@@ -21,11 +21,13 @@ from midas.provider import (BearerCredentials, CodexTransport, Limits, ModelOutp
     Provider, ResponsesTransport, Route, ScriptedTransport, worker_payload)
 from midas.provider.protocol import META_BYTES, pack
 from midas.provider.transport import Collector, normalize_usage, retry_after
-from midas.provider.wire import decode, validate_wire
+from midas.provider.wire import decode, extend_object, validate_wire
 
 LIMITS = Limits(2000, 500, 500, 500, 500, 1000, 200, 131072, 1048576, 4194304)
 ROUTE = Route('azure', 'model', 'azure_responses', 'test', 'https://example.test/responses')
-WIRE = b'{ "model":"model", "input":[{"role":"user","content":"prove"}], "stream":true,"store":false,"text":{"format":{"type":"json_object"}} }'
+SCHEMA = b'{"type":"object","properties":{"proof":{"type":"string"}},"required":["proof"],"additionalProperties":false}'
+WIRE = (b'{ "model":"model", "input":[{"role":"user","content":"prove"}], "stream":true,"store":false,'
+        b'"text":{"format":{"type":"json_schema","name":"proof","strict":true,"schema":' + SCHEMA + b'}} }')
 
 
 class Artifacts:
@@ -165,9 +167,20 @@ class ProviderTests(unittest.TestCase):
         out = self.http(handler, request=req)
         self.assertEqual(calls, [raw])
         self.assertEqual(out.raw, b' \n{"proof":"by trivial"}\n ')
-        for text in (None, {'format':{'type':'text'}}, {'format':{**schema,'strict':False}}):
+        for text in (None, {'format':{'type':'text'}}, {'format':{'type':'json_object'}},
+                     {'format':{**schema,'strict':False}}, {'format':{**schema,'strict':None}},
+                     {'format':{**schema,'schema':None}}):
             with self.assertRaises(ValueError):
                 validate_wire(req, json.dumps({**json.loads(raw),'text':text}).encode())
+
+    def test_schema_rejection_does_not_retry_with_unstructured_output(self):
+        calls = []
+        def handler(request):
+            calls.append(request.content)
+            return httpx.Response(400, json={'error': {'code': 'invalid_json_schema'}})
+        out = self.http(handler)
+        self.assertEqual(out.error, 'configuration')
+        self.assertEqual(calls, [WIRE])
 
     def test_wire_rejects_tools_state_and_model_mismatch(self):
         for update in ({'tools':[]}, {'model':'wrong'}, {'stream':False}, {'store':True},
@@ -373,12 +386,15 @@ class ProviderTests(unittest.TestCase):
 
 class CodexTests(unittest.TestCase):
     def invoke(self, mode='success', *, web_calls=0, deadline=2, digest=None,
-               provider='openai', limits=LIMITS):
+               provider='openai', limits=LIMITS, prepared=None):
         a = Artifacts()
         route = Route(provider,'model','codex')
-        req = ModelRequest(route, 'research' if web_calls else 'prover', replace(limits,web_calls=web_calls),
-                           a.save(b'{"input":[{"type":"text","text":"JSON proof"}]}'),
-                           a.save(b'{"baseInstructions":"Return the saved JSON schema"}'))
+        raw = prepared.wire if prepared else (b'{"input":[{"type":"text","text":"JSON proof"}],'
+                                              b'"outputSchema":' + SCHEMA + b'}')
+        setup = prepared.setup if prepared else b'{"baseInstructions":"Return a proof."}'
+        role = prepared.provider_role if prepared else 'research' if web_calls else 'prover'
+        req = ModelRequest(route, role, replace(limits,web_calls=web_calls), a.save(raw), a.save(setup))
+        validate_wire(req, raw, setup)
         executable = str(Path(sys.executable).resolve())
         digest = digest or sha256(Path(executable).read_bytes()).hexdigest()
         with TemporaryDirectory() as directory:
@@ -387,6 +403,11 @@ class CodexTests(unittest.TestCase):
                 executable_sha256=digest,cwd=directory,environment={
                     'FIXTURE_LOG':str(log),'FIXTURE_MODE':mode})
             out = transport(req,a.data[req.wire.id],a.data[req.setup.id],threading.Event(),time.monotonic()+deadline)
+            turn_log = log.with_suffix('.turn')
+            if turn_log.exists():
+                # Includes the exact schema bytes, with only threadId appended.
+                self.assertTrue(turn_log.read_bytes().endswith(
+                    b',"params":' + extend_object(raw, {'threadId': 'thread-1'}) + b'}\n'))
             if mode == 'child':
                 pid = int(log.with_suffix('.pid').read_text())
                 stat = Path(f'/proc/{pid}/stat')
@@ -400,6 +421,25 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(out.usage,Usage(12,3,5,None))
         self.assertEqual(calls.count('turn/start'),1)
         self.assertEqual(out.termination,Termination.TERMINATED)
+
+    def test_role_schemas_reach_native_turn_unchanged(self):
+        from midas.prompt import Options, Section, Snapshot, build, prover, reviewer, researcher
+        snapshot = Snapshot((Section('subject', 'goal', b'True'),
+                             Section('candidate', 'proof', b'by trivial'),
+                             Section('question', 'question', b'Find a reference.'),
+                             Section('capabilities', 'allowance', b'web_calls=1')))
+        for renderer in (prover.render, reviewer.render, researcher.render):
+            prepared = build(snapshot, Options('codex', 'model'), renderer=renderer)
+            with self.subTest(role=prepared.role):
+                out, calls = self.invoke(prepared=prepared, web_calls=int(prepared.role == 'researcher'))
+                self.assertIsNone(out.error)
+                self.assertEqual(calls.count('turn/start'), 1)
+
+    def test_native_schema_rejection_is_reported_without_retry(self):
+        out, calls = self.invoke('schema-rejected')
+        self.assertEqual(out.error, 'configuration')
+        self.assertEqual(calls.count('turn/start'), 1)
+        self.assertEqual(out.termination, Termination.TERMINATED)
 
     def test_detached_descendant_is_terminated(self):
         out,_ = self.invoke('child')

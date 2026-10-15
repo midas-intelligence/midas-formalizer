@@ -529,7 +529,9 @@ and delivery certainty. Retry decisions remain in policy and the controller.
 Credentials are supplied only to the relevant worker and are not saved in wire
 or request artifacts.
 
-Responses wire requests explicitly use JSON output through `text.format`.
+Responses wire requests use native schema enforcement through `text.format`
+with `type=json_schema` and `strict=true`. Codex turn requests carry the schema
+in `outputSchema`. Instructions do not duplicate the schema as prose.
 `prompt` owns the role-specific JSON schema and renders the complete wire bytes;
 `provider` validates and transmits them unchanged. It does not strip fences, trim
 prose into JSON, or silently fall back to unstructured text. Protocol JSON is
@@ -578,6 +580,13 @@ Scripted mode supplies saved model responses at the provider boundary. Supplied
 candidates enter the same candidate-admission and checking path. Mode-specific
 attempt/review rules are explicit policy, while execution, receipt handling,
 generation fences, and artifact publication are shared.
+
+The pure strategy boundary is implemented in `new/midas/strategy`. It consumes
+the new prompt contracts, uses binary candidate/memory records, and returns
+versioned proposals for candidate checks, reviews, helper continuations and
+direct-consumer repairs. The controller/storage integration remains a later
+layer; strategy neither authenticates transport receipts nor commits effects.
+See `new/README.md` for its handoff contracts and offline validation results.
 
 ## Export
 

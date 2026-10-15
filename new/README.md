@@ -1,4 +1,4 @@
-# Clean Midas: domain, policy, source, executor, environment, checker, provider, and tools
+# Clean Midas: domain, policy, source, executor, environment, checker, provider, tools, prompt, and strategy
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -29,6 +29,185 @@ domain and executor.
 retrieval continuations, research validation, source excerpts, and indexed evidence
 paging. It imports only domain, policy, and source.
 
+`midas/prompt` implements independent, replaceable prover, reviewer and researcher
+renderers, bounded readable context, and exact frozen wire construction. It imports
+only domain and source.
+
+`midas/strategy` implements pure candidate, review, repair, memory and continuation
+decisions. It imports only domain, policy, prompt and tools.
+
+## Strategy
+
+Six implementation modules plus `__init__.py` replace the strategy-owned parts
+of the sixteen v2 modules mapped in the cleanup blueprint:
+
+| Module | Responsibility |
+| --- | --- |
+| `protocol.py` | Strict default prover/reviewer contract interpretation with bounded wire decoding |
+| `candidates.py` | Flat candidate expansion, ordered checks, child contexts, exact revisions and supplied admission |
+| `memory.py` | Immutable semantic lessons, scoped evidence pins, admitted observations and whole-record retention |
+| `state.py` | Frozen snapshots, dispatch bindings and atomic proposed effects |
+| `service.py` | Planning, prompt preparation, model/check/review reduction and helper continuations |
+| `repairs.py` | Current direct-consumer objection delivery, policy-gated retirement and repair grants |
+
+The package does not import v2 or perform SQL, filesystem writes, provider
+invocations, compiler launches or scheduling. Scripted model responses use the
+provider's existing scripted transport and enter `on_model` through the same
+admitted-output boundary. Supplied candidates use `submit`, share domain/context
+validation and checking, and require explicit admitted reviews for conditional
+plans. Supplied workflow does not schedule model turns.
+
+`Context` contains the selected subjects, one flat definition block, explicit
+prerequisites, advertised entry references and imports. `child_context` projects
+only the child's declared premises and retains inherited imports. Definition and
+child dependency cycles are rejected by domain/checker boundaries; candidate
+check order visits dependencies first. Unproved children receive binding checks
+only. Definitions remain named declarations with bodies, never assumed facts.
+Joint definition/property candidates require every preceding selected definition
+as an explicit dependency and retain the direct-attempt classification. Their
+proofs enter domain's atomic `accept_joint` path.
+
+`Draft` saves the binary submission and separate English guidance. Exact named
+fragment edits apply sequentially on private values and either produce a complete
+new draft or fail without effects. They reject stale bases, overlapping/ambiguous
+matches, no-ops, changed inherited definitions, changed target statements and
+structural changes. Local references bind to the controller-allocated new
+submission ID. `fragments` exposes the exact strings for prompt presentation.
+
+The controller supplies an immutable `Snapshot`, then calls `Strategy.plan`.
+Returned `Work` values describe operations to lower through the owning component.
+`prepare_model` renders once and saves a `Turn` binding the exact schema, wire,
+context, owner, graph revision, memory/evidence versions, base and review candidate.
+The review presentation must bind the candidate artifact and each dependency's
+owner/interface. `Dispatch.bind` checks the final frozen provider request against
+those wire bytes and owner versions. Replacement renderers can change wording and
+layout; replacing the schema requires an explicitly supplied matching interpreter.
+
+`on_model` accepts provider-admitted complete output for that exact dispatch.
+Partial, refused, cancelled and failed output cannot produce candidates or memory
+changes. A model approval permits a conditional selection only alongside the exact
+checker-admitted composition. Binding checks, research, lookup, probes, page reads
+and model claims cannot establish proof authority. `activate` restores a selection
+from previously admitted check/review handoffs during recovery.
+
+Helpers use tools' existing plans and receipt projections. Search-to-lookup
+continuations use `tools.continue_retrieval`; `on_helper` accepts the final stage
+set and resumes the original prover or reviewer operation without charging another
+helper request. Probe case bytes are proposed for controller publication before
+their referenced jobs are admitted. Recall/page requests require advertised
+result IDs/cursors, use tools' scoped indexed reads and preserve duplicate delivery
+keys. A duplicate page resumes the turn without replaying its content.
+
+Every `Changes` value carries expected versions. The future controller/storage
+layer must publish proposed artifacts, reserve candidate/helper allowances, dedupe
+the original receipt application, recheck versions and commit all effects and
+downstream intents together. `AttemptDecision` closes one candidate reservation;
+policy charges only mathematical success/rejection. Resource/protocol revision
+allowances remain separate. An explicit statement objection targets only current
+direct consumers. Repair proposes graph retirement and a policy-sized grant in
+one effect; cancellation occurs after commit and preserves shared reachable work.
+Transport retry, receipt authentication, durable recovery and export execution
+remain with their existing/future owners.
+
+Model JSON is parsed with the shared bounded, chunked decoder; fences and prose
+wrappers are rejected. Responses, contexts and submissions are capped at **8 MiB**;
+source/proof strings at **1 MiB**. Drafts use length-prefixed raw binary fields;
+there is no large JSON serialization, hex encoding or recursively embedded parent
+context. Memory has a **16 KiB** soft target and **64 KiB** hard limit. Retention
+evicts whole older records and counts omissions. Model lessons remain separate
+from complete selected diagnostics and their admitted evidence references.
+
+Validation: **33 strategy tests and 133 adjacent domain, policy, tools and prompt
+tests passed**. These are offline Python tests; no Lean or live model was run.
+Seven alternating benchmark samples measured new/v2 median ratios of **0.884**,
+**0.699**, and **0.299** for complete candidate interpretation/admission with
+16-byte, 1 KiB and 8 KiB proof payloads, and **0.176** for memory updates. New-only
+900 KiB response admission and exact revision took approximately **4.2 ms** and
+**3.4 ms**. These measure local strategy work, not formalization throughput.
+V2 benchmark JSON inputs stay below 16 KiB; large new workloads run with JSON
+library operations disabled.
+
+```sh
+python3 -B -m unittest tests.test_strategy -v
+python3 -B -m tests.benchmark_strategy
+```
+
+## Prompt
+
+Each default role owns its wording, response schema, contract version and context
+layout in one file: `prompt/prover.py`, `prompt/reviewer.py`, and
+`prompt/researcher.py`. Shared `protocol.py` defines immutable display inputs;
+`wire.py` builds provider wire bytes. There is no import of the old implementation,
+database lookup, provider call, or environment inventory in this layer.
+
+Replacement means supplying a different `renderer(snapshot) -> Prompt` callable.
+It may change instructions, the schema, and the ordering/presentation of context.
+The application selects that callable for each configured model; there are no
+model-name heuristics, global registration, or dynamic imports. For example:
+
+```python
+from midas.prompt import Options, Section, Snapshot, build, prover, subject
+
+snapshot = Snapshot(
+    sections=(
+        Section('source', 'Main.lean', frozen_prefix),
+        subject('goal', checked_signature),
+        Section('capabilities', 'remaining', frozen_allowance_text),
+    ),
+    artifacts=(source_ref, context_ref),
+    owners=(owner_version,),
+)
+renderers = {'model-a': prover.render, 'model-b': my_prover_render}
+request = build(snapshot, Options(route.transport, route.model),
+                renderer=renderers[route.model])
+```
+
+Section bodies are UTF-8 bytes. The caller supplies the exact source prefix,
+named definitions, checked dependency interfaces, current candidate, history,
+memory, capabilities and diagnostic locations as applicable. `subject` uses the
+source layer's telescope renderer. The source layer also supplies `render_context`
+for named definitions. No arbitrary object graph or JSON packet is displayed.
+Evidence sections arrive in preference order (for example pinned pages first);
+the default renderers include whole pages within `evidence_bytes` and report any
+omissions. Required mathematical context and candidate fragments are never clipped.
+Input and wire limits are 8 MiB; excessive escaped output fails before dispatch.
+
+The default prover contract returns `{action, memory_update}`; the action covers
+proofs, decomposition, joint candidates, revisions, helpers and stopping. The
+reviewer returns `{verdict, rationale, findings, question, urls}`. Research returns
+`{answer, sources, unresolved}`, matching tools' existing research evidence
+admission. Response interpretation, semantic validation, helper lowering and
+budget enforcement belong to the future strategy/application layer. Replacing a
+schema requires a matching interpreter there; transport never interprets actions.
+Research snapshots supply a question and their frozen web-call allowance.
+
+Store `request.wire` and, for Codex, `request.setup` as immutable artifacts and
+pass those references to `provider.ModelRequest` with `request.provider_role`.
+The provider calls the researcher role `research`. The prompt identity binds the
+renderer/contract, exact bytes, artifact references and owner generations. The
+provider request separately binds the saved route and invocation limits. Retry
+the saved bytes; do not rebuild prompts from current state during retries.
+
+Responses uses a named strict JSON schema in `text.format`; Codex receives the
+schema natively in `turn/start.outputSchema`. Instructions contain the role wording
+without a second copy of the schema. Wire strings are escaped in bounded byte chunks,
+without passing large content through a JSON library. Only small schemas and
+transport controls use JSON serialization. Bounded caches reuse exact schemas
+and fixed wire prefixes. Explicit Responses caching requires
+`Options(..., prompt_cache='explicit', cache_scope=route.scope)`; its key includes
+route/model/contract/controls and remains stable across changing turn material.
+Codex controls remain in its pinned provider configuration.
+
+Run offline checks and the local performance comparison with:
+
+```sh
+PYTHONPATH=new .venv/bin/python -m unittest tests.test_prompt
+PYTHONPATH=new .venv/bin/python -m tests.benchmark_prompt
+```
+
+The benchmark compares small frozen blocks with v2 and separately measures large
+raw source input in the new writer. It invokes no Lean, model or network service.
+
 ## Tools
 
 The nine helper modules in the blueprint are consolidated into five implementation
@@ -46,7 +225,7 @@ These replace the tools responsibilities of `combined_retrieval`, `discovery`,
 `discovery_helpers`, `lookup_helpers`, `lookup_source`, `probe_helpers`,
 `research_helpers`, `research_protocol` and `retrieval_helpers`. SQL, publication,
 scheduling and model/compiler execution remain with their owning components.
-Research prompt wording and response schemas belong to the future prompt layer.
+Research prompt wording and response schemas belong to `prompt/researcher.py`.
 The original `midas_formalizer` files remain unchanged and are not imported.
 
 `HelperRequest` freezes the action, continuation, forbidden names and `Scope`.
@@ -989,7 +1168,7 @@ The surrounding shared job retains only the environment hash required by domain.
 
 For Responses, `wire` is the complete HTTP body, sent unchanged. It must select
 the saved model with `stream=true`, `store=false`, text messages and an explicit
-`text.format` of `json_schema` (named, with `strict=true`) or `json_object`.
+`text.format` of `json_schema` (named, with `strict=true`).
 **Prompt owns the role-specific schema and renders it into this field.** Provider
 validates the transport envelope, sends it without rewriting, and returns the
 model's response text without whitespace trimming, fence stripping or extracting
@@ -999,9 +1178,12 @@ retries with plain text. Refusals have a distinct outcome, and incomplete stream
 retain their partial text and available usage. See the
 [official Responses Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses).
 
-For Codex, `wire` contains the frozen `turn/start` `input` text blocks and `setup`
-contains the complete frozen `baseInstructions`, including the role contract.
-Provider adds only thread/model/protocol controls. Policy's `model` and
+For Codex, `wire` contains the frozen `turn/start` `input` text blocks and native
+`outputSchema`; `setup` contains the complete frozen `baseInstructions` wording.
+The schema is required on every turn and is not duplicated in the instructions.
+Provider adds only thread/model/protocol controls, preserving the schema bytes.
+See the [official app-server turn contract](https://learn.chatgpt.com/docs/app-server#start-a-turn).
+Policy's `model` and
 `research_model` sections define `request_max_retries` and `stream_max_retries`,
 both defaulting to zero. These are frozen through `Limits.from_config(...)` and
 control retries within one Codex turn; `recovery.transport_retries` separately

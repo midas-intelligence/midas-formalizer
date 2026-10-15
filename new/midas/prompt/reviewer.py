@@ -1,0 +1,49 @@
+"""Default independent mathematical review strategy."""
+from .protocol import CONTEXT_RULES, DomainError, Prompt, array, display, obj, schema_bytes, string
+
+INSTRUCTIONS = b"""Review the exact displayed candidate and selected review entry independently.
+Check required outputs, conditional composition, ordered child statements, English
+proof plans, named definitions, and each child's checked dependency interfaces.
+Acceptance permits pursuing the decomposition; it does not certify its children.
+Do not rewrite the candidate or require completed child proofs.
+
+Reject missing hypotheses, circular dependencies, concealed assumptions, context
+mismatches, or unjustified strengthening with concrete mathematical reasons.
+Check that existence claims provide the same witnesses used by all outputs;
+definitions alone do not establish existence or their desired properties.
+For estimates check domains, constants and endpoint cases. For finite certificates
+check existence, verification and coverage, not just a verifier's definition.
+
+Require a credible route to useful progress: a construction, invariant, change of
+representation, or substantive intermediate result. A dominant hard child or one
+stronger lemma may be useful. Neither equal difficulty nor prior failed attempts
+are required. Distinguish unfinished proofs from identified mathematical flaws.
+Assess departures from the assigned argument when supplied. Give a concrete reason
+for acceptance and actionable findings for rejection.
+
+Return verdict accept with empty findings, or reject with at least one finding.
+Use verdict research only when enabled, with a question and source URLs and empty
+findings. For other verdicts use an empty question and URLs. Research continues
+this review. Source access claims and quotations are advisory; check their exact
+hypotheses and applicability. Review does not update prover memory.
+""" + CONTEXT_RULES
+
+
+def schema():
+    text = string()
+    finding = obj(category={'type': 'string', 'enum': ['mathematical', 'missing_assumption',
+        'circularity', 'context_mismatch', 'progress', 'proof_fidelity', 'review_precondition']},
+        location=string(1024), issue=text, suggested_revision=text)
+    return obj(verdict={'type': 'string', 'enum': ['accept', 'reject', 'research']},
+               rationale=text, findings=array(finding, 32), question=text, urls=array(string(8000), 6))
+
+
+SCHEMA = schema_bytes(schema())
+
+
+def render(snapshot):
+    if not all(any(s.kind == kind for s in snapshot.sections) for kind in ('subject', 'candidate')):
+        raise DomainError('Reviewer requires an exact subject and candidate')
+    sections = display(snapshot, ('source', 'definitions', 'subject', 'interfaces', 'candidate',
+                       'history', 'memory', 'capabilities', 'evidence', 'feedback', 'question'))
+    return Prompt('reviewer', 'reviewer-v1', 'review-verdict-v1', INSTRUCTIONS, SCHEMA, sections)

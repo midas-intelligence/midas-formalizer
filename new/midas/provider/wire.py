@@ -33,8 +33,10 @@ def validate_wire(request, raw, setup=None):
         raise DomainError('Expected wire object')
     route = request.route
     if route.transport == 'codex':
-        if set(w) != {'input'} or type(w['input']) is not list or not w['input']:
-            raise DomainError('Expected frozen turn input')
+        if set(w) != {'input', 'outputSchema'} or type(w['input']) is not list or not w['input']:
+            raise DomainError('Expected frozen turn input and native output schema')
+        if type(w['outputSchema']) is not dict or w['outputSchema'].get('type') != 'object':
+            raise DomainError('Expected an object output schema from prompt')
         for block in w['input']:
             if type(block) is not dict or set(block) != {'type', 'text'} or block['type'] != 'text' or type(block['text']) is not str:
                 raise DomainError('Only text turn inputs are supported')
@@ -51,21 +53,15 @@ def validate_wire(request, raw, setup=None):
         if type(text_config) is not dict or set(text_config) != {'format'}:
             raise DomainError('Responses requires an explicit JSON output format')
         output_format = text_config['format']
-        if type(output_format) is not dict:
-            raise DomainError('Invalid Responses output format')
-        if output_format.get('type') == 'json_object':
-            if set(output_format) != {'type'}:
-                raise DomainError('Invalid JSON object output format')
-        elif output_format.get('type') == 'json_schema':
-            if (set(output_format) - {'type', 'name', 'schema', 'strict', 'description'}
-                    or output_format.get('strict') is not True
-                    or type(output_format.get('schema')) is not dict
-                    or type(output_format.get('name')) is not str
-                    or re.fullmatch(r'[A-Za-z0-9_-]{1,64}', output_format['name']) is None
-                    or 'description' in output_format and type(output_format['description']) is not str):
-                raise DomainError('Expected a named strict JSON schema from prompt')
-        else:
-            raise DomainError('Responses output must use json_schema or json_object')
+        if (type(output_format) is not dict or output_format.get('type') != 'json_schema'
+                or set(output_format) - {'type', 'name', 'schema', 'strict', 'description'}
+                or output_format.get('strict') is not True
+                or type(output_format.get('schema')) is not dict
+                or output_format['schema'].get('type') != 'object'
+                or type(output_format.get('name')) is not str
+                or re.fullmatch(r'[A-Za-z0-9_-]{1,64}', output_format['name']) is None
+                or 'description' in output_format and type(output_format['description']) is not str):
+            raise DomainError('Expected a named strict JSON schema from prompt')
         for message in w['input']:
             if (type(message) is not dict or set(message) != {'role', 'content'}
                     or message['role'] not in ('system', 'developer', 'user', 'assistant')):
