@@ -1,0 +1,137 @@
+{
+  "format": "midas-config-v1",
+  "run": {
+    "turns": 400,
+    "runtime_ms": 7200000,
+    "max_intents": 10000,
+    "max_input_tokens": null,
+    "max_output_tokens": null,
+    "max_cost_microusd": null
+  },
+  "scheduling": {
+    "model_concurrency": 2,
+    "compiler_concurrency": 1,
+    "local_concurrency": 2,
+    "compiler_memory_mib": 4096,
+    "backlog_low": 4,
+    "backlog_new_stop": 52,
+    "backlog_all_stop": 72,
+    "reopen_per_tick": 1
+  },
+  "mathematics": {
+    "direct": 7,
+    "decomposition": 7,
+    "backtracks": 12,
+    "owner_backtracks": 3,
+    "repair": 2,
+    "timeout": 2,
+    "memory": 0,
+    "elaboration": 2,
+    "protocol": 2
+  },
+  "helpers": {
+    "research": 7,
+    "retrieval": 10,
+    "probe": 6,
+    "web_calls": 12
+  },
+  "checker": {
+    "wall_ms": 90000,
+    "memory_mib": 4096,
+    "output_bytes": 8388608,
+    "evidence_bytes": 67108864
+  },
+  "local": {
+    "wall_ms": 60000,
+    "memory_mib": 4096,
+    "output_bytes": 8388608,
+    "evidence_bytes": 67108864
+  },
+  "export": {
+    "timeout_ms": 90000,
+    "comparator_timeout_ms": 1800000,
+    "deadline_ms": 7200000,
+    "memory_mib": 4096,
+    "max_bytes": 17179869184,
+    "output_bytes": 8388608,
+    "evidence_bytes": 67108864
+  },
+  "model": {
+    "invocation_ms": 600000,
+    "preparation_ms": 10000,
+    "connect_ms": 30000,
+    "write_ms": 30000,
+    "read_ms": 60000,
+    "pool_ms": 10000,
+    "startup_ms": 30000,
+    "shutdown_ms": 3000,
+    "output_bytes": 131072,
+    "frame_bytes": 1048576,
+    "event_bytes": 4194304
+  },
+  "research_model": {
+    "invocation_ms": 300000,
+    "preparation_ms": 10000,
+    "connect_ms": 30000,
+    "write_ms": 30000,
+    "read_ms": 60000,
+    "pool_ms": 10000,
+    "startup_ms": 30000,
+    "shutdown_ms": 3000,
+    "output_bytes": 131072,
+    "frame_bytes": 1048576,
+    "event_bytes": 4194304
+  },
+  "recovery": {
+    "transport_retries": 2,
+    "unknown_retries": 0,
+    "local_retries": 2,
+    "deadline_ms": 1920000,
+    "backoff_ms": 2000,
+    "backoff_cap_ms": 60000,
+    "retry_after_cap_ms": 300000,
+    "failure_window_ms": 600000,
+    "failure_threshold": 3,
+    "cooldown_ms": 60000
+  },
+  "prover": {
+    "provider": "azure",
+    "model": "gpt-6.1-sol",
+    "transport": "azure_responses",
+    "account": "midas-azure",
+    "endpoint": "https://midas-openai.services.ai.azure.com/openai/v1/responses",
+    "credential_env": "AZURE_OPENAI_API_KEY",
+    "prompt_cache": null,
+    "prices": {
+      "input": 2000000,
+      "cached_input": 100000,
+      "output": 10000000,
+      "cache_write": 2500000
+    }
+  },
+  "reviewer": {
+    "provider": "azure",
+    "model": "gpt-6.1-sol",
+    "transport": "azure_responses",
+    "account": "midas-azure",
+    "endpoint": "https://midas-openai.services.ai.azure.com/openai/v1/responses",
+    "credential_env": "AZURE_OPENAI_API_KEY",
+    "prompt_cache": "explicit",
+    "prices": {
+      "input": 2000000,
+      "cached_input": 100000,
+      "output": 10000000,
+      "cache_write": 2500000
+    }
+  },
+  "research": {
+    "provider": null,
+    "model": null,
+    "transport": null,
+    "account": null,
+    "endpoint": null,
+    "credential_env": null,
+    "prompt_cache": null,
+    "prices": null
+  }
+}
