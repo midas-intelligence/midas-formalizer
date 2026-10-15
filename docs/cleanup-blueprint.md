@@ -529,6 +529,14 @@ and delivery certainty. Retry decisions remain in policy and the controller.
 Credentials are supplied only to the relevant worker and are not saved in wire
 or request artifacts.
 
+Responses wire requests explicitly use JSON output through `text.format`.
+`prompt` owns the role-specific JSON schema and renders the complete wire bytes;
+`provider` validates and transmits them unchanged. It does not strip fences, trim
+prose into JSON, or silently fall back to unstructured text. Protocol JSON is
+parsed incrementally with bounded string chunks; saved requests use small binary
+records and raw/artifact payloads. Strategy owns interpretation of the returned
+JSON object after transport admission.
+
 ## Strategy
 
 Strategy is a state machine over explicit values. It returns proposed effects
@@ -859,7 +867,7 @@ module has one primary destination below.
 | `source` (15) | `assembly`, `candidate_imports`, `checked_binding`, `declaration_context`, `helper_context`, `library_imports`, `lookup_context`, `source_modules`, `source_names`, `source_presentation`, `source_proofs`, `source_statements`, `source_tree`, `strategy_diagnostics`, `strategy_sources` |
 | `executor` (6) | `comparator_runtime`, `import_pool`, `import_runtime`, `import_worker`, `lean_runner`, `process_runner` |
 | `environment` (12) | `attachment`, `dependency_admission`, `dependency_compiler`, `dependency_modules`, `environment`, `leaneval_admission`, `packaging`, `problem`, `shared_package`, `shared_toolchain`, `toolchains`, `verification_config` |
-| `checker` (11) | `cache_probe`, `check_protocol`, `checker_runtime`, `checking`, `extraction`, `interface_lookup`, `probe_runtime`, `proof_execution`, `proof_jobs`, `source_cache`, `source_proof_admission` |
+| `checker` (10) | `check_protocol`, `checker_runtime`, `checking`, `extraction`, `interface_lookup`, `probe_runtime`, `proof_execution`, `proof_jobs`, `source_cache`, `source_proof_admission` |
 | `provider` (3) | `model_adapters`, `model_protocol`, `model_runtime` |
 | `tools` (9) | `combined_retrieval`, `discovery`, `discovery_helpers`, `lookup_helpers`, `lookup_source`, `probe_helpers`, `research_helpers`, `research_protocol`, `retrieval_helpers` |
 | `prompt` (10) | `model_evidence`, `model_math`, `prompt_display`, `strategy_context`, `strategy_contract`, `strategy_formats`, `strategy_history`, `strategy_instructions`, `strategy_presentation`, `strategy_prompts` |
@@ -867,7 +875,7 @@ module has one primary destination below.
 | `export` (10) | `comparator`, `export_io`, `finalization`, `finalization_events`, `leaneval_audit`, `leaneval_finalization`, `leaneval_layout`, `leaneval_verify`, `leaneval_workspace`, `portable` |
 | `controller` (12) | `controller`, `lean_run`, `live_finalization`, `live_run`, `live_timing`, `pending_checks`, `probe_progress`, `proof_driver`, `script_run`, `strategy_checks`, `strategy_dispatch`, `strategy_lifecycle` |
 | `status` (5) | `cli_output`, `live_cli_status`, `live_status`, `node_details`, `nodes` |
-| `application` (4) | `forking`, `live_initialization`, `preparation`, `run_cli` |
+| `application` (5) | `cache_probe`, `forking`, `live_initialization`, `preparation`, `run_cli` |
 | `cli` (3) | `__init__`, `__main__`, `cli` |
 
 The nine bundled Lean files remain private checker/source resources, including

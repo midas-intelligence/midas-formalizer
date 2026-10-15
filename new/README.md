@@ -1,4 +1,4 @@
-# Clean Midas: domain, policy, source, executor, and environment
+# Clean Midas: domain, policy, source, executor, environment, checker, and provider
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -16,6 +16,14 @@ and imports only the domain and the standard library.
 `midas/environment` implements frozen packages, toolchain admission and relocation,
 dependency provenance/module inventories, source replay, library attachment, and
 trusted benchmark archives. It imports only domain, source, and executor.
+
+`midas/checker` implements source inspection, binding and proof checks, checked
+lookup, probes, whole-source kernel auditing, and compiler receipt admission.
+It uses the existing environment and executor services.
+
+`midas/provider` implements frozen model routing, one invocation, bounded transport
+parsing, delivery/usage reporting and authenticated model receipts. It imports only
+domain and executor.
 
 ## Policy
 
@@ -39,8 +47,8 @@ where integers are expected, nonfinite numbers and inconsistent limits fail
 validation. Large source, request, result and environment payloads are never
 part of config. Provider/model choices and non-secret binding references live in
 this file. Client construction, credential resolution, supported provider/transport
-combinations and request validation belong to the future provider/application
-components. Environment admission lives in `midas/environment`.
+combinations and request validation belong to `midas/provider`; application
+constructs the configured transport bindings. Environment admission lives in `midas/environment`.
 
 For example, application code can read one config with a bounded read:
 
@@ -706,4 +714,220 @@ python3 -B -m unittest tests.test_environment -v
 python3 -B -m tests.benchmark_environment
 # Requires permission for Lean/bubblewrap:
 python3 -B -m tests.check_environment_lean /absolute/path/to/toolchain/bin/lean
+```
+
+## Checker
+
+Six implementation modules plus `__init__.py` separate compiler preparation,
+execution and evidence admission:
+
+| Module | Responsibility |
+| --- | --- |
+| `requests.py` | Immutable compiler requests, exact source/candidate/dependency bindings, closed signatures, lookup prefixes and probe cases |
+| `evidence.py` | Strict binary certificates, native frames, binding/replay receipts and advisory result validation |
+| `runtime.py` | Exact installed resource hashes, isolated compilation, atomic private runtime cache and explicit fresh/retained recipes |
+| `inspection.py` | Binary Lean declaration inventories and frozen selection construction |
+| `proofs.py` | Rendering admitted earlier definition proofs into their original source scopes |
+| `service.py` | One executor callback and staging path, cumulative process limits, probe progress and trusted receipt admission |
+
+These replace the checker-owned portions of `check_protocol`, `checker_runtime`,
+`checking`, `extraction`, `interface_lookup`, `probe_runtime`, `proof_execution`,
+`proof_jobs`, `source_cache`, and `source_proof_admission`. No implementation imports
+v2. SQL, task publication, graph updates and scheduling stay with their future
+owners. V2's `cache_probe` is a model-provider diagnostic workflow, rather than a
+Lean checker operation. Export owns certificate composition, final layouts and
+export acceptance; checker supplies the independent whole-source kernel audit.
+
+`Checker(environment, cache_directory)` owns one admitted environment service.
+`inspect(selection_request, worker_context)` returns a `FrozenSelection` from
+recorded project source. `prepare(operation, selection, ...)` accepts `binding`,
+`proof`, `lookup`, `probe` or `audit`, and returns a `CompilerRequest` with immutable
+binary `payload` bytes. The controller saves those bytes as
+`FrozenRequest.operation_payload`, binds the exact input references and owner
+versions in its job, then dispatches `checker.execute` through the existing
+executor reservation. Preparation also rejects source bytes that differ from the
+environment's authorized input. Environment manifests, packages and toolchain
+inventories never enter requests, results or certificates; only the hash crosses
+those boundaries.
+
+Source and proof text remain raw UTF-8 fields in the binary graph format. Types
+cross the boundary only as compact signature DAGs where identity/binding needs
+them. Expanded expressions remain private to Lean. Lookup returns display text
+and optional source ranges, without expression trees; it reads only the selected
+declaration's prefix. No source, certificate, inventory, lookup or probe output
+uses JSON parsing/stringification, stdout framing or hex payloads. Lean's internal
+`Json` value type is only a private DAG container for the binary codec. The sole
+remaining checker JSON encoding is the executor's small protected control-FIFO
+completion record, containing a fixed request filename, exit code and timing.
+Existing domain structural-name metadata retains its explicit 16 KiB cap.
+
+Binding elaboration and its independent replay are separate compiler requests
+within the same invocation budget. Binding admission returns the checked identity,
+parameter names and an `AdmittedBinding`; it never reports a proof. Proof production
+retains submitted source and independently audits every new declaration, including
+generated helpers. Replay restores the original environment, checks the exact
+subject and assumptions, and kernel-checks native declarations when available.
+Only `propext`, `Classical.choice` and `Quot.sound` are permitted global axioms.
+Conditional assumptions remain explicit and cannot become a direct proof.
+Closed definition dependencies require matching admitted proofs from the same
+joint submission, and are rendered in a flat, explicit dependency order.
+
+`admit_receipt` requires the controller/storage `ReceiptVerifier` capability. It
+checks the seal callback, original invocation, saved result bytes, request hash,
+runtime hash, staged artifacts, phase order, diagnostic accounting, signature and
+replay evidence before producing a domain handoff. A model-supplied certificate,
+ordinary successful `WorkerResult`, or probe result cannot establish proof
+authority. `worker_payload` defines the small exact binary result representation
+that receipt publication must save. The actual durable seal implementation and
+artifact publication belong to storage/controller. `admit_probe_progress` validates
+executor-delivered starts/completions against each case and invocation; it remains
+advisory, including when a probe closes its goal.
+
+Runtime builds and compiler calls use the existing executor context. Retained
+imports require Lean 4.35.0-rc3 and the executor's supported Linux/Landlock platform.
+The retained launcher explicitly disables Lean's extra main thread and uses the bundled
+executor C runtime; that runtime's C build uses the existing isolated bootstrap
+capability. Other supported launches use fresh processes, and configured Lean
+options/plugins select the interpreted launcher. Fallback consumes the residual
+wall/output/evidence allowance. Cancellation and resource exhaustion never start
+a fresh fallback. Successful fallback retains the failed attempt's bounded
+diagnostics, while admission requires complete evidence from each successful phase.
+
+Compiler input/evidence graphs are capped at **64 MiB**, authored proof/statement
+terms at **1 MiB**, native cache blobs at **8 MiB** per batch, and result metadata
+at **64 KiB**. Native blobs use memory views until materialization. Signature reuse
+retains only compact immutable bytes in a bounded, fork-safe cache. Runtime files
+are inventoried and hash-checked before use. Source/native scratch files remain
+in private executor workspaces for storage's later publication and cleanup.
+
+Validation on 2026-10-15: **13 Python checker tests passed**, covering exact
+requests/dependencies, malformed binary frames, source inventory admission,
+source/signature changes, lookup boundaries, progress binding, runtime mutation,
+and rejected forged/incomplete/over-budget receipts. With the required root
+`AGENTS.md` permission, real Lean 4.35.0-rc3/bubblewrap checks passed native runtime
+builds, binary inspection, fresh and retained proof/replay, sorry rejection,
+binding elaboration/replay, derived definitions, conditional/frozen-peer proofs, lookup/ranges,
+probe states, whole-source audit, closed joint definitions, evidence/wall limits,
+cancellation with confirmed termination, and the configured interpreted launcher.
+No unrelated component suites were rerun.
+
+Seven alternating decoder samples measured new/v2 median ratios of **0.965**,
+**0.873** and **0.480** for native frames carrying 1 KiB, 1 MiB and 8 MiB blobs,
+each with a 100 KiB source field. These measure evidence decoding, not complete
+formalization throughput. Real integration checks also exercised import reuse
+across the cases of a probe batch without fallback.
+
+```sh
+python3 -B -m unittest tests.test_checker -v
+python3 -B -m tests.benchmark_checker
+# Requires permission for Lean/bubblewrap:
+python3 -B -m tests.check_checker_lean /absolute/path/to/toolchain/bin/lean
+```
+
+
+## Provider
+
+Six implementation modules plus `__init__.py` own the provider slice:
+
+| Module | Responsibility |
+| --- | --- |
+| `protocol.py` | Immutable routes, projected transport bounds, artifact-based requests and normalized outcomes |
+| `wire.py` | Bounded protocol parsing, small control messages and validation of already-rendered wire bytes |
+| `transport.py` | Linear text accumulation, usage/error normalization, cancellation and deterministic scripted responses |
+| `responses.py` | One stateless Azure/Bedrock HTTPS Responses invocation with no redirects or retries |
+| `codex.py` | One ephemeral app-server turn, effective zero-retry verification, tool restrictions and advisory web events |
+| `service.py` | Executor callback, private staging and exact authenticated receipt admission |
+
+These replace the provider-owned responsibilities of `model_adapters`,
+`model_protocol` and `model_runtime`. Their old SQL, timers, retry policy, task
+publication and recovery coordination remain assigned to storage, policy and
+controller. Provider does not import those components or v2. The small new
+`executor/protocol.py` owns bidirectional subprocess lifetimes, using the existing
+process-tree monitor and waiting for observed descendants to exit, including
+children which create another process group. This is a trusted protocol client,
+not a compiler launch or a way to run model-generated code.
+
+Application projects `Route.from_config(config.prover)` and
+`Limits.from_config(config.model)`, resolves credentials, and constructs
+`Provider([(route, transport), ...])`. Limits contain frozen transport bounds,
+not scheduling/retry rules or prices. `BearerCredentials` binds an ephemeral
+secret to one exact route; `from_environment` reads only its named variable.
+Codex receives an explicit environment-variable mapping and a pinned absolute
+executable. Credential values are never in request/result artifacts. Its config
+and credential provisioning remain application responsibilities.
+
+Prompt creates the exact UTF-8 wire artifacts. `ModelRequest(route, role, limits,
+wire, setup=None)` contains only their references and small transport metadata.
+Its `payload` is a shallow binary record capped at **16 KiB**. Each wire artifact
+is capped at **8 MiB**. The controller saves the payload as
+`FrozenRequest.operation_payload`, sets `job.input_refs` to `request.inputs`,
+and dispatches `provider.execute` through the existing executor grant. The job's
+output allowance must cover `limits.output_bytes`; its evidence allowance must
+cover `limits.event_bytes + 16 KiB`. An environment is never passed to provider.
+The surrounding shared job retains only the environment hash required by domain.
+
+For Responses, `wire` is the complete HTTP body, sent unchanged. It must select
+the saved model with `stream=true`, `store=false`, text messages and an explicit
+`text.format` of `json_schema` (named, with `strict=true`) or `json_object`.
+**Prompt owns the role-specific schema and renders it into this field.** Provider
+validates the transport envelope, sends it without rewriting, and returns the
+model's response text without whitespace trimming, fence stripping or extracting
+JSON from prose. It does not interpret a mathematical candidate. Unsupported
+backend settings remain a reported error; provider never removes the schema or
+retries with plain text. Refusals have a distinct outcome, and incomplete streams
+retain their partial text and available usage. See the
+[official Responses Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses).
+
+For Codex, `wire` contains the frozen `turn/start` `input` text blocks and `setup`
+contains the complete frozen `baseInstructions`, including the role contract.
+Provider adds only thread/model/protocol controls. It verifies the effective
+request/stream retry settings before inference, disables local tools, and admits
+bounded web operations only for OpenAI research. Usage notifications before the
+turn acknowledgement and before the final thread-read acknowledgement are kept.
+The subprocess is terminated and reaped before reporting termination.
+
+Protocol-required JSON stays at the transport boundary. The parser scans incoming
+bounded frames and decodes strings in **8 KiB** pieces; it rejects duplicate keys,
+invalid Unicode, excessive depth, excessive values and nonfinite numbers. Large
+wire strings and result text are never passed to `json.loads` or `json.dumps`.
+Only small, bounded app-server controls use JSON encoding. SSE byte accounting
+includes comments and incomplete frames. Text deltas append to a byte buffer,
+avoiding repeated copying of the accumulated response.
+
+Worker output consists of raw UTF-8, length-prefixed binary advisory events and a
+small binary report. The report retains request/response/thread/turn IDs, error
+phase, delivery certainty, nullable usage, cache-write telemetry and retry-after
+metadata. Unknown telemetry remains unknown. Costs and retry decisions stay in
+policy. A pre-send cancellation or connection failure is `NOT_SENT`; a write
+failure is `UNKNOWN`; an HTTP response is `DELIVERED`, including errors. Closing a
+local HTTP stream does not imply cancellation of remote computation.
+
+`worker_payload(result)` gives controller/storage the exact small result bytes to
+save. `admit_receipt` requires the controller's `ReceiptVerifier`, verifies those
+bytes, the saved request, artifact hashes/limits, report consistency and all event
+frames. It returns `AdmittedOutput` with raw/event references, small outcome
+metadata and the executor's final status. A stop arriving after transport return
+can change execution status while preserving known usage and complete bytes.
+These remain advisory results, never proof authority. `ScriptedTransport` supplies
+a deterministic saved outcome by exact wire hash through the same staging and
+receipt path.
+
+Validation: **34 offline tests passed**, covering config projection, route/wire
+validation, structured JSON output, exact wire bytes, large payloads with JSON
+operations disabled, usage/cache telemetry, refusals, partial/truncated streams,
+limits, cancellation, HTTP failures, zero retries, receipt tampering, executor
+handoff, pinned app-server startup, detached-child termination and stderr overflow.
+No Lean, external-service, or unrelated component tests were run.
+
+Seven alternating local samples measured new/v2 median time ratios of **0.026**
+for 128 KiB text accumulation, **0.014** for 1 MiB accumulation, and **0.686** for
+parsing a complete SSE stream of 1,024 deltas. The stream comparison includes
+framing, event decoding and text accumulation. These measure local provider work,
+not live model latency or end-to-end formalization.
+
+Run from `new/` with the repository virtual environment (HTTP tests use `httpx`):
+
+```sh
+../.venv/bin/python -B -m unittest tests.test_provider -v
+../.venv/bin/python -B -m tests.benchmark_provider
 ```
