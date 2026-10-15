@@ -1,4 +1,4 @@
-# Clean Midas: domain, policy, source, executor, environment, checker, and provider
+# Clean Midas: domain, policy, source, executor, environment, checker, provider, and tools
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -24,6 +24,107 @@ It uses the existing environment and executor services.
 `midas/provider` implements frozen model routing, one invocation, bounded transport
 parsing, delivery/usage reporting and authenticated model receipts. It imports only
 domain and executor.
+
+`midas/tools` implements advisory helper plans, frozen-source and hosted search,
+retrieval continuations, research validation, source excerpts, and indexed evidence
+paging. It imports only domain, policy, and source.
+
+## Tools
+
+The nine helper modules in the blueprint are consolidated into five implementation
+modules plus `__init__.py`:
+
+| New module | Responsibility |
+| --- | --- |
+| `tools/protocol.py` | Immutable scoped actions, binary requests, stable identities and bounded stage descriptions |
+| `tools/search.py` | Frozen source selectors/content ranking, hosted LeanExplore transport, worker execution and search receipt admission |
+| `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
+| `tools/research.py` | Structured response validation, recorded web actions, access claims, quote bounds and advisory provenance |
+| `tools/evidence.py` | Frozen declaration excerpts, staged binary archives, indexed pages and duplicate-delivery keys |
+
+These replace the tools responsibilities of `combined_retrieval`, `discovery`,
+`discovery_helpers`, `lookup_helpers`, `lookup_source`, `probe_helpers`,
+`research_helpers`, `research_protocol` and `retrieval_helpers`. SQL, publication,
+scheduling and model/compiler execution remain with their owning components.
+Research prompt wording and response schemas belong to the future prompt layer.
+The original `midas_formalizer` files remain unchanged and are not imported.
+
+`HelperRequest` freezes the action, continuation, forbidden names and `Scope`.
+The scope contains an owner/generation, an environment **hash**, and one artifact
+reference for the admitted selection/goal/alias context. No environment object,
+toolchain or package inventory is embedded in requests. Probe cases likewise use
+artifact references to binary case records (`id`, `code`, and optional `operation`,
+`setup`, `expected`); the checker owns their Lean-facing validation.
+
+`plan_helper` uses `Policy.helper` for allowance and service checks, charges probe
+cases individually, and freezes the research web-call bound. Plans describe work;
+they never invoke a checker/model, open SQLite, start a private pool, or retry.
+`Plan.admission` places the logical helper charge on the first initial stage.
+The controller must reserve that allowance and the initial stage intents atomically.
+The checker/provider lower stage descriptions into their exact frozen requests,
+preserving the stage key, scope and initial helper charge. Remaining stages and
+`continue_retrieval` reserve execution capacity without another helper charge.
+
+Search hints are fused using exact integer reciprocal-rank weights over the bounded
+rank domain. Explicit names retain priority; forbidden names, equivalent escaped
+spellings, internal Midas names and invalid identifiers cannot become lookup jobs.
+Searches must all have exact, ordered outcomes, including explicit failures.
+Names are checked before their availability is reported. Search-driven retrieval
+retains authored excerpts; names-only inspection can request original declaration
+ranges. `finish_helper` validates the expected stages and current scope and returns
+advisory evidence with the original strategy continuation. Storage/controller must
+commit this result once against current owner versions and retain every search,
+compiler and model receipt, including failed stages.
+
+Application prepares a `SourceIndex` from admitted frozen file references once per
+environment. Search reads through a verified `ArtifactReader`, with 2 MiB per-file
+and 128 MiB total scan bounds. Dotted modules, paths and stems resolve against this
+index; ambiguous selectors require a qualified root. Query terms must occur in the
+displayed excerpt, including after truncation. Project modules can supply lookup
+excerpts but are excluded from discovery. Hosted search uses the fixed LeanExplore
+endpoint, rejects redirects and bounds input at 5 MB, with cancellation/deadline
+checks between reads. `SearchService` implements the existing reserved-worker
+callback and authenticates saved request/result bytes and receipt seals.
+
+`admit_checked` consumes a checker-admitted advisory handoff and its exact compiler
+payload hash; it checks lookup queries and probe case IDs/operations. The controller
+must first bind that compiler request to the planned stage. Checker retains the
+per-case start/completion protocol. `admit_research` similarly consumes an admitted
+provider result bound by the controller to the research stage. Research accepts only
+bounded structured evidence and recorded web actions. It preserves the existing
+open/find or matching-document-view access semantics and cumulative 25-word quote
+bound per URL. Access and quotations remain provider-reported. None of these tools
+creates proof authority.
+
+Requests, results and archives use shallow binary records. The bounded external
+wire decoder is shared in `domain/wire.py`; provider imports that same decoder.
+Search/research wire parsing and large source/evidence handling make no JSON-library
+calls. `prepare_archive` stages fixed pages of at most 16,000 bytes and a bounded
+index. Container descriptors preserve object/array shape. Text fragments carry
+field paths, UTF-8 byte offsets and total byte lengths;
+they require reassembly before use as complete source. Each `recall` reads and
+verifies one indexed page, with no archive-wide decoding or earlier-page scan.
+The controller supplies an indexed duplicate-delivery check and rechecks the returned
+delivery key and scope when committing. Scope changes invalidate recall/cursors.
+Artifact publication and orphaned staging recovery remain storage responsibilities.
+
+Validation on 2026-10-15: **24 distinct offline tools tests and 4 affected provider
+wire tests passed**, with focused reruns after changes. They cover request/receipt
+binding, allowance reuse, search integrity and limits, exact rank ordering, failure
+continuations, checker handoffs, research claims, and 1.6 MB Unicode evidence paging
+without JSON calls. No Lean, live hosted search or model calls were run.
+
+Seven alternating local benchmark samples measured the following median ratios
+against v2: **0.149×** for 1,200-hint fusion with cached names, **0.563×** with cold
+name validation, **0.714×** for matching source, **0.514×** for nonmatching source,
+and **0.023×** for the first page of 110 KB evidence. The paging comparison gives
+v2 a free archive read; the new path includes an artifact read and verification.
+These measure local helper work, not network/compiler or end-to-end run latency.
+
+```sh
+python3 -B -m unittest tests.test_tools -v
+python3 -B -m tests.benchmark_tools
+```
 
 ## Policy
 
