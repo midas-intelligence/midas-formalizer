@@ -16,7 +16,7 @@ from midas.domain import (ArtifactRef, CapacityGrant, DeliveryCertainty, FrozenR
     Invocation, Job, JobKind, OwnerVersion, ResourceLimits, ResultStatus, Session,
     Termination, Usage, WorkerProgress, WorkerResult)
 from midas.executor import (Executor, ImportInput, ImportRecipe, LaunchSpec, Mount,
-    Outcome, WorkerStopped, import_runtime_source, import_worker_supported)
+    Outcome, WorkerStopped, import_runtime_source, import_worker_platform_supported)
 from midas.executor.imports import _ImportWorker
 from midas.executor.isolation import _launch
 from midas.executor.process import (_Capture, _Discovery, _ProcessTree, _metadata,
@@ -509,6 +509,25 @@ class WorkerTests(unittest.TestCase):
 
 
 class ImportTests(unittest.TestCase):
+    def test_import_worker_platform_requirements(self):
+        for system, machine in (('Darwin', 'x86_64'), ('Linux', 'aarch64')):
+            with self.subTest(system=system, machine=machine), \
+                    patch('midas.executor.imports.platform.system', return_value=system), \
+                    patch('midas.executor.imports.platform.machine', return_value=machine), \
+                    patch('midas.executor.imports.ctypes.CDLL') as library:
+                self.assertFalse(import_worker_platform_supported())
+                library.assert_not_called()
+
+    def test_import_worker_landlock_capability_without_toolchain_input(self):
+        with patch('midas.executor.imports.platform.system', return_value='Linux'), \
+                patch('midas.executor.imports.platform.machine', return_value='x86_64'), \
+                patch('midas.executor.imports.ctypes.CDLL') as library:
+            for abi, expected in ((-1, False), (5, False), (6, True), (7, True)):
+                with self.subTest(abi=abi):
+                    library.return_value.syscall.return_value = abi
+                    self.assertEqual(import_worker_platform_supported(), expected)
+                    library.return_value.syscall.assert_called_with(444, 0, 0, 1)
+
     def test_recipe_bindings_and_flat_runtime_resource(self):
         first, second = recipe(b'one'), recipe(b'two')
         limits = ResourceLimits(1000, 128, 4096, 4096)
@@ -519,7 +538,6 @@ class ImportTests(unittest.TestCase):
             value = 'env_' + '4' * 64 if field == 'environment_id' else '4' * 64
             self.assertNotEqual(first.key(limits), replace(first, **{field: value}).key(limits))
         self.assertIn(b'PTRACE_O_TRACEFORK', import_runtime_source())
-        self.assertFalse(import_worker_supported('unsupported'))
 
     def test_transport_reuse_and_hash_validation_without_payload_json(self):
         with tempfile.TemporaryDirectory() as directory:

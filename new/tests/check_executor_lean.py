@@ -15,7 +15,7 @@ import time
 
 from midas.domain import CapacityGrant, ResourceLimits, ResultStatus, Termination
 from midas.executor import (Executor, ImportInput, ImportRecipe, LaunchSpec, LINK_FLAGS,
-                            Mount, Outcome, import_runtime_source, import_worker_supported)
+                            Mount, Outcome, import_runtime_source, import_worker_platform_supported)
 from tests.test_executor import invocation, success
 
 
@@ -58,7 +58,7 @@ def main : IO UInt32 := do
 def main():
     compiler = Path(sys.argv[1]).resolve(strict=True)
     toolchain = compiler.parent.parent
-    if not import_worker_supported('4.35.0-rc3') or '4.35.0-rc3' not in (toolchain / 'include/lean/version.h').read_text():
+    if not import_worker_platform_supported() or '4.35.0-rc3' not in (toolchain / 'include/lean/version.h').read_text():
         raise SystemExit('Native smoke check requires Lean 4.35.0-rc3, Linux x86-64 and Landlock ABI 6')
     launcher = str(Path(shutil.which('bwrap')).resolve())
     launcher_hash = sha256(Path(launcher).read_bytes()).hexdigest()

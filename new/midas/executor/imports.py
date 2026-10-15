@@ -32,10 +32,9 @@ def import_runtime_source():
     return Path(__file__).with_name('import_runtime.c').read_bytes()
 
 
-def import_worker_supported(toolchain_version):
-    """Capability only. Checker owns source/version binding and build admission."""
+def import_worker_platform_supported():
+    """Host capability only; recipe owners admit toolchain/runtime compatibility."""
     return (platform.system() == 'Linux' and platform.machine() == 'x86_64'
-            and toolchain_version == '4.35.0-rc3'
             and ctypes.CDLL(None).syscall(444, 0, 0, 1) >= 6)
 
 

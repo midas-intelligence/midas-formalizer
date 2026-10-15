@@ -1,4 +1,4 @@
-# Clean Midas: domain, policy, source, and executor
+# Clean Midas: domain, policy, source, executor, and environment
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -12,6 +12,10 @@ It adds no persisted formats or JSON files.
 `midas/executor` implements reserved worker dispatch, isolated subprocesses,
 cancellation, and retained compiler lifetimes. It consumes explicit launch recipes
 and imports only the domain and the standard library.
+
+`midas/environment` implements frozen packages, toolchain admission and relocation,
+dependency provenance/module inventories, source replay, library attachment, and
+trusted benchmark archives. It imports only domain, source, and executor.
 
 ## Policy
 
@@ -35,8 +39,8 @@ where integers are expected, nonfinite numbers and inconsistent limits fail
 validation. Large source, request, result and environment payloads are never
 part of config. Provider/model choices and non-secret binding references live in
 this file. Client construction, credential resolution, supported provider/transport
-combinations, request validation and environment admission belong to the future
-provider/application and environment components.
+combinations and request validation belong to the future provider/application
+components. Environment admission lives in `midas/environment`.
 
 For example, application code can read one config with a bounded read:
 
@@ -252,7 +256,7 @@ shared reachable work survives. Retired candidates cannot reactivate, and affect
 ancestor assemblies return to conditional state for later reassembly.
 
 Proof verification is separate from source integration and independent export
-verification. This directory contains domain, policy, source, and executor components, not a runnable
+verification. This directory contains domain, policy, source, executor, and environment components, not a runnable
 formalizer or an implementation of the remaining blueprint components.
 
 ## Formats and validation
@@ -532,9 +536,10 @@ Retained workers are keyed by the exact launch recipe, environment/runtime hashe
 request filename, non-request input hashes, memory and scratch limits. A changed
 request is streamed into the private input workspace; unchanged dependencies are
 copied and verified once. Sequential probe cases can share the same parent while
-consuming the invocation's remaining evidence budget. The retained native runtime
-currently supports the existing Linux x86-64 / Lean 4.35.0-rc3 profile with Landlock
-ABI 6. Checker owns exact runtime admission and build recipes, using
+consuming the invocation's remaining evidence budget.
+`import_worker_platform_supported()` checks Linux x86-64 and Landlock ABI 6 or
+later; executor does not accept or select a Lean version. Checker owns toolchain
+compatibility, exact runtime admission and build recipes, using
 `import_runtime_source()` and `LINK_FLAGS`. Unsupported optimized execution can
 use an explicitly supplied isolated fresh recipe, within the residual budget.
 Cancellation and resource exhaustion do not start another attempt.
@@ -579,3 +584,126 @@ Seven alternating local samples measured **0.999× v2 time** for capturing 1 MiB
 and **1.002×** for launching/monitoring a Python child that emits 64 KiB. These
 small differences indicate comparable supervisor performance; they do not measure
 end-to-end formalization or compiler import-cache speed.
+
+## Environment
+
+Six implementation modules plus `__init__.py` consolidate the environment-owned
+parts of the twelve modules assigned by the cleanup blueprint:
+
+| Module | Responsibility |
+| --- | --- |
+| `inventory.py` | Bounded no-follow scans, stable streaming hashes/copies, flat binary records, file and directory validation |
+| `manifest.py` | Pinned Lean versions, immutable profile settings, canonical manifests, module conflicts, hash-only source bindings, bounded manifest cache |
+| `package.py` | Trusted installation probes, frozen runtime closure, preparation/preflight, atomic publication, shared toolchain admission/relocation, generated inputs and launch recipes |
+| `dependencies.py` | Pinned Git/Lake closure, complete source provenance, compiled modules/sidecars, metadata revalidation and isolated source replay |
+| `archive.py` | Bounded verification configuration, tool pins, committed benchmark archives, target metadata, relocation checks |
+| `attachment.py` | Namespace-scoped library attachment, retained original pins, import preflight and new environment identity |
+
+These replace environment ownership in `environment`, `toolchains`, `packaging`,
+`shared_package`, `shared_toolchain`, `problem`, `attachment`,
+`dependency_admission`, `dependency_modules`, `dependency_compiler`,
+`verification_config`, and `leaneval_admission`. They do not import v2.
+Run bindings, artifact publication and run-cache retirement from `problem` and
+`shared_package` belong to the future storage/application components. Checker
+resource compilation and proof receipt admission belong to checker. Lake's
+freshness/hash gates, workspace layout, kernel comparison and final LeanEval
+acceptance belong to checker/export; provenance or successful source replay alone
+does not report a verified export.
+
+`Environment.prepare(destination, config, worker_context)` consumes a
+`PackageConfig` with one pinned release, one installed toolchain, explicit
+project/dependency roots, selected project files and ordered module search paths.
+It never downloads or builds missing dependencies. The caller supplies an existing
+executor reservation; installation probes, preflight, native builds and replay
+all use that context's cumulative process limits and cancellation. There is no
+second process runner or scheduler inside environment.
+
+Preparation shares the installed toolchain and copies other roots. It checks
+source stability, records exact file hashes/modes/directories, freezes the runtime
+closure for Lean and native build tools, and checks the reported compiler version
+and selected sources under bubblewrap. Only successful preflight publishes the
+package, using an atomic rename that cannot replace an existing destination.
+Copied bytes, runtime files and package metadata consume the package allowance;
+the shared toolchain is inventoried separately. Internal toolchain file aliases
+are allowed; external links, directory links and special files are rejected.
+
+The package contains `environment.bin`, `preflight.bin`, a small `location.json`,
+and the original roots. Its manifest is a flat binary record stream beginning
+with `MIDASENV` and byte `2`. Paths, settings and file metadata have explicit
+lengths; hashes remain raw 32-byte fields. `env_…` hashes the canonical manifest.
+Loading validates canonical record ordering, bounded lengths/counts, directories,
+references and profile fields directly, without serializing the decoded value.
+There are no v2 JSON-manifest compatibility readers.
+
+`Environment.restore(package, manifest=saved_manifest, expected_id=saved_hash,
+toolchain=relocated_installation)` checks the saved identity and resolves the
+supplied locations. A supplied saved manifest is authoritative; a package's loose
+manifest cannot replace it. Opening a standalone package reads its binary manifest.
+The explicit toolchain argument, `MIDAS_SHARED_TOOLCHAIN`, or the small package
+locator selects an installation. Relocation does not change the environment ID.
+
+Frozen package files receive exact content checks. Shared toolchains retain v2's
+default metadata admission and optional content policy
+(`MIDAS_VERIFY_TOOLCHAIN=1`, or `validate(hash_toolchain=True)`). Successful
+toolchain admissions are bounded, process-local and keyed by location, exact
+toolchain inventory and policy. `validate(fresh=True)` repeats admission;
+dependency source replay requires content admission before and after execution.
+File digest reuse requires identical device/inode/mode/size/mtime/ctime stamps.
+Caches and service admission reset across forks.
+
+An environment service owns stable roots for its lifetime, matching v2's
+`EnvironmentVerifier` contract. Repeated jobs reuse that admitted service;
+explicit `validate()` always rechecks package contents. `selection_inputs()`
+returns only the environment hash and authorized source hashes/sizes to domain.
+Manifests, installation paths and package inventories stay with environment.
+
+`materialize()` accepts exact `AuthorizedInput` records, copies verified bytes into
+a new private directory, and rejects path conflicts or frozen-module shadowing,
+including compiled sidecars. `launch()` returns an executor `LaunchSpec` with
+explicit read-only roots and an optional separate writable build directory.
+Generated inputs are checked before each recipe is issued. The installed
+bubblewrap hash is also checked at execution; missing isolation never enables a
+host fallback. Trusted bootstrap inspection uses an explicit Linux system runtime
+under bubblewrap; compiler jobs use the frozen runtime.
+
+Dependency closure admission compares pinned commits, committed Lake metadata,
+transitive pins, mapping membership and source/module paths. Development
+toolchain metadata is provenance, so it may differ from the workspace compiler.
+Module admission checks complete committed Lean source bytes, required modules,
+unambiguous source mappings, sidecars and module conflicts. It rechecks metadata
+and HEAD after scanning; its source-only profile also rejects native libraries.
+Replay resolves the required import closure with empty placeholders, removes all
+placeholders, compiles in dependency order without prepared objects mounted, and
+compares exact generated sidecars. Results bind the environment hash, module
+inventory hash, import graph, build order and explicit options.
+
+Benchmark archives use another flat binary stream (`MIDASARC`, byte `2`), retaining
+raw source bytes rather than JSON/hex. They verify the pinned working tree twice,
+bound tool identities and target metadata, and require explicit archived-fixture
+opt-in. JSON is restricted to configuration, lockfiles and small external
+metadata with a hard **16 KiB** cap checked before parsing. Large raw Lake
+configuration/source files remain raw bytes. Manifest/record streams are capped
+at **64 MiB**; benchmark content at **16 MiB**, with **8 MiB** per file. The layouts
+use fixed-depth records, not recursively embedded environments.
+
+Validation on 2026-10-15: **32 distinct Python environment tests passed**, with
+focused reruns after the inventory/cache and dependency revalidation changes.
+Coverage includes malformed binary records, large raw payloads, path/link and
+mutation checks, relocation, toolchain policy, generated inputs, module conflicts,
+attachment, publication races, Git/module provenance and archive admission.
+With the required `AGENTS.md` permission, real Lean 4.35.0-rc3/bubblewrap checks
+passed preparation/preflight, exact toolchain admission, relocation, proof
+success/rejection, native compilation, a pinned two-module Git dependency and
+source replay, and failed-preflight cleanup.
+
+Seven alternating local samples over 200 source files measured new/v2 median
+ratios of **0.810** for scanning, **0.925** for freezing, **0.815** for cold manifest
+loading and **0.876** for cached loading. These measure filesystem/manifest work,
+not end-to-end formalization. No unrelated component suites were rerun.
+
+```sh
+python3 -B -m unittest tests.test_environment -v
+python3 -B -m tests.benchmark_environment
+# Requires permission for Lean/bubblewrap:
+python3 -B -m tests.check_environment_lean /absolute/path/to/toolchain/bin/lean
+```
