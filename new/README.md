@@ -106,6 +106,13 @@ million tokens**: the example's $2/$0.10/$10/$2.50 rates become
 is unknown, while an explicit zero rate means free. Cache-write pricing is
 optional; explicit write pricing requires write telemetry when it affects cost.
 
+`checker.max_heartbeat` and `export.max_heartbeat` set Lean's `maxHeartbeats`
+option in user-facing heartbeat units. Both default to `2000000`; `0` disables
+the heartbeat limit while wall-time and memory limits still apply. The shared
+`local` process profile also carries this field, though search jobs do not use
+Lean. `limits()` freezes the value into `ResourceLimits`; policy admission rejects
+compiler jobs above a finite configured limit, including unlimited requests.
+
 `Policy` and `Config` are immutable. `config.increase(...)` produces a new snapshot
 for prospective run/mathematical increases. It does not reset usage, move the
 run's time origin, enlarge existing repair grants or rewrite frozen requests.
@@ -750,6 +757,18 @@ environment's authorized input. Environment manifests, packages and toolchain
 inventories never enter requests, results or certificates; only the hash crosses
 those boundaries.
 
+Each checker packet receives `max_heartbeat` from the reserved job limits.
+Fresh, interpreted and retained workers use that value for elaboration and
+probes; retained workers read it separately for each request. Source inspection,
+runtime compilation, environment preflights and dependency replay receive the
+reserved limit as well. Heartbeat limits are execution settings and do not
+change the environment identity.
+
+Heartbeat validation: **117 focused Python tests passed**. Lean 4.35.0-rc3
+integration checks passed for fresh, retained and interpreted execution,
+including `max_heartbeat=12345`, unlimited (`0`) execution and a looping probe
+interrupted at the configured limit.
+
 Source and proof text remain raw UTF-8 fields in the binary graph format. Types
 cross the boundary only as compact signature DAGs where identity/binding needs
 them. Expanded expressions remain private to Lean. Lookup returns display text
@@ -835,7 +854,7 @@ Six implementation modules plus `__init__.py` own the provider slice:
 | `wire.py` | Bounded protocol parsing, small control messages and validation of already-rendered wire bytes |
 | `transport.py` | Linear text accumulation, usage/error normalization, cancellation and deterministic scripted responses |
 | `responses.py` | One stateless Azure/Bedrock HTTPS Responses invocation with no redirects or retries |
-| `codex.py` | One ephemeral app-server turn, effective zero-retry verification, tool restrictions and advisory web events |
+| `codex.py` | One ephemeral app-server turn, effective policy retry-limit verification, tool restrictions and advisory web events |
 | `service.py` | Executor callback, private staging and exact authenticated receipt admission |
 
 These replace the provider-owned responsibilities of `model_adapters`,
@@ -849,9 +868,10 @@ not a compiler launch or a way to run model-generated code.
 
 Application projects `Route.from_config(config.prover)` and
 `Limits.from_config(config.model)`, resolves credentials, and constructs
-`Provider([(route, transport), ...])`. Limits contain frozen transport bounds,
-not scheduling/retry rules or prices. `BearerCredentials` binds an ephemeral
-secret to one exact route; `from_environment` reads only its named variable.
+`Provider([(route, transport), ...])`. Limits contain frozen transport bounds and
+Codex's internal retry limits; scheduling, invocation recovery and prices stay in
+policy. `BearerCredentials` binds an ephemeral secret to one exact route;
+`from_environment` reads only its named variable.
 Codex receives an explicit environment-variable mapping and a pinned absolute
 executable. Credential values are never in request/result artifacts. Its config
 and credential provisioning remain application responsibilities.
@@ -880,9 +900,15 @@ retain their partial text and available usage. See the
 
 For Codex, `wire` contains the frozen `turn/start` `input` text blocks and `setup`
 contains the complete frozen `baseInstructions`, including the role contract.
-Provider adds only thread/model/protocol controls. It verifies the effective
-request/stream retry settings before inference, disables local tools, and admits
-bounded web operations only for OpenAI research. Usage notifications before the
+Provider adds only thread/model/protocol controls. Policy's `model` and
+`research_model` sections define `request_max_retries` and `stream_max_retries`,
+both defaulting to zero. These are frozen through `Limits.from_config(...)` and
+control retries within one Codex turn; `recovery.transport_retries` separately
+limits retries of whole invocations. The internal limits apply only to Codex;
+Responses transports continue to make one HTTP attempt. Codex verifies that its
+effective request/stream retry settings match the saved limits before inference,
+disables local tools, and admits bounded web operations only for OpenAI research.
+Usage notifications before the
 turn acknowledgement and before the final thread-read acknowledgement are kept.
 The subprocess is terminated and reaped before reporting termination.
 
@@ -912,10 +938,11 @@ These remain advisory results, never proof authority. `ScriptedTransport` suppli
 a deterministic saved outcome by exact wire hash through the same staging and
 receipt path.
 
-Validation: **34 offline tests passed**, covering config projection, route/wire
+Validation: **36 offline provider tests and 29 policy tests passed**, covering config projection, route/wire
 validation, structured JSON output, exact wire bytes, large payloads with JSON
 operations disabled, usage/cache telemetry, refusals, partial/truncated streams,
-limits, cancellation, HTTP failures, zero retries, receipt tampering, executor
+limits, cancellation, HTTP failures, default-zero and configured Codex retries,
+effective retry-setting mismatches, receipt tampering, executor
 handoff, pinned app-server startup, detached-child termination and stderr overflow.
 No Lean, external-service, or unrelated component tests were run.
 

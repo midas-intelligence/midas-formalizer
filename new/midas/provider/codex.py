@@ -1,4 +1,4 @@
-"""One ephemeral app-server turn with verified zero-retry controls."""
+"""One ephemeral app-server turn with verified policy retry limits."""
 import asyncio
 from collections import deque
 from dataclasses import replace
@@ -34,10 +34,9 @@ class CodexTransport:
             args = ['app-server', '-c', 'approval_policy="never"', '-c', 'model_provider=' + small_json(provider).decode()]
             if request.route.provider == 'openai':
                 args += ['-c', 'model_providers.midas-openai={name="OpenAI", wire_api="responses", '
-                         'requires_openai_auth=true, request_max_retries=0, stream_max_retries=0}']
-            else:
-                for key in ('request_max_retries', 'stream_max_retries'):
-                    args += ['-c', f'model_providers.{provider}.{key}=0']
+                         'requires_openai_auth=true}']
+            for key in ('request_max_retries', 'stream_max_retries'):
+                args += ['-c', f'model_providers.{provider}.{key}={getattr(c.limits, key)}']
             for feature in ('shell_tool', 'unified_exec', 'multi_agent', 'apps', 'plugins', 'browser_use',
                     'computer_use', 'image_generation', 'view_image', 'goals', 'sleep_tool', 'hooks', 'skill_search'):
                 args += ['-c', f'features.{feature}=false']
@@ -131,7 +130,7 @@ class CodexTransport:
                 await send('initialized', b'{}')
                 config = await rpc('config/read', small_json({'includeLayers': False}))
                 effective = config.get('config', {}).get('model_providers', {}).get(provider, {})
-                if any(type(effective.get(k)) is not int or effective[k] != 0
+                if any(type(effective.get(k)) is not int or effective[k] != getattr(c.limits, k)
                        for k in ('request_max_retries', 'stream_max_retries')):
                     raise TransportError('unsupported_retry_control')
                 if request.route.provider == 'openai':

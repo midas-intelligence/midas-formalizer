@@ -87,7 +87,7 @@ class Route:
 
 @dataclass(frozen=True, slots=True)
 class Limits:
-    """Frozen transport bounds projected from policy; no retry or pricing rules."""
+    """Frozen transport bounds from policy, including Codex's internal retries."""
     invocation_ms: int
     connect_ms: int
     write_ms: int
@@ -99,10 +99,13 @@ class Limits:
     frame_bytes: int
     event_bytes: int
     web_calls: int = 0
+    request_max_retries: int = 0
+    stream_max_retries: int = 0
 
     def __post_init__(self):
         for f in fields(self):
-            natural(getattr(self, f.name), f.name, positive=f.name != 'web_calls')
+            natural(getattr(self, f.name), f.name,
+                    positive=f.name not in ('web_calls', 'request_max_retries', 'stream_max_retries'))
         if (not self.output_bytes <= self.frame_bytes <= self.event_bytes <= 4 * 1024**2
                 or max(self.invocation_ms, self.startup_ms) > 7_200_000 or self.web_calls > 12):
             raise DomainError('Invalid transport limits')

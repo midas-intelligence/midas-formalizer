@@ -88,6 +88,11 @@ class WorkerContext:
         self._parent = parent
         self._thread_id = None
 
+    @property
+    def limits(self):
+        """The immutable limits saved with this invocation's capacity grant."""
+        return self._limits
+
     def check(self):
         if self._thread_id != threading.get_ident():
             raise WorkerStopped('Worker context belongs to its execution thread')
@@ -117,7 +122,7 @@ class WorkerContext:
             return None
         return ResourceLimits(max(1, int((self.deadline - time.monotonic()) * 1000)),
                               self._limits.memory_mib, self._limits.output_bytes - self._output,
-                              self._limits.evidence_bytes - self._evidence)
+                              self._limits.evidence_bytes - self._evidence, self._limits.max_heartbeat)
 
     def _record(self, result):
         self._output += result.stdout.observed_bytes + result.stderr.observed_bytes

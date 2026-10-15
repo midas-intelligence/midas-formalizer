@@ -96,8 +96,9 @@ partial def scan (imports : Environment) (records : Array Json := #[])
 end Midas.Extract
 
 def main (args : List String) : IO UInt32 := do
-  let [inputPath, logicalPath, outputPath] := args
-    | throw (IO.userError "expected snapshot source, logical source path, and output path")
+  let [inputPath, logicalPath, outputPath, heartbeat] := args
+    | throw (IO.userError "expected snapshot source, logical source path, output path, and heartbeat limit")
+  let some maxHeartbeat := heartbeat.toNat? | throw (IO.userError "invalid heartbeat limit")
   unsafe enableInitializersExecution
   initSearchPath (← findSysroot)
   let input ← IO.FS.readFile inputPath
@@ -109,7 +110,8 @@ def main (args : List String) : IO UInt32 := do
     for message in messages.toList do IO.eprintln (← message.toString)
     return 1
   let ((records, external), _) ← ((Midas.Extract.scan env).run {inputCtx := ictx}).run {
-    commandState := Command.mkState env messages (({} : Options).setBool `Elab.async false),
+    commandState := Command.mkState env messages
+      (maxHeartbeats.set (({} : Options).setBool `Elab.async false) maxHeartbeat),
     parserState := ps, cmdPos := ps.pos }
   let output ← IO.ofExcept (Midas.Binary.encode (Json.mkObj [
     ("format", toJson "midas-source-inventory-v1"), ("declarations", toJson records),

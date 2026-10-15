@@ -190,7 +190,7 @@ class Checker:
             runtime = runtime or prepare_runtime(self.environment, context, self.cache)
             self.runtime = runtime
             operation, packet, digest = value['operation'], value['packet'], request.sha256
-            packet.update(request=digest)
+            packet.update(request=digest, max_heartbeat=limits.max_heartbeat)
             if operation == 'proof':
                 cert, binaries = run('produce', dict(packet, mode='produce'))
                 ev.proof_for(cert, packet, digest)

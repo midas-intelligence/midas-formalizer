@@ -16,7 +16,7 @@ from midas.domain import (
 )
 from midas.policy import (
     AdmissionRequest, BacklogState, Capacity, Config, ExportUsage, Failure,
-    HelperConfig, MathematicsConfig, ModelRoute, OwnerUsage, Policy, Prices, Progress,
+    HelperConfig, MathematicsConfig, ModelConfig, ModelRoute, OwnerUsage, Policy, Prices, Progress,
     RecoveryConfig, RetryHistory, RunConfig, RunUsage, SchedulingConfig, Services,
     Stage, cost_microusd, load_config,
 )
@@ -49,6 +49,54 @@ def result_for(req, *, status=ResultStatus.FAILED, delivery=DeliveryCertainty.NO
 
 
 class ConfigTests(unittest.TestCase):
+    def test_heartbeat_config_projects_and_round_trips(self):
+        config = load_config(b'''{"format":"midas-config-v1",
+            "checker":{"max_heartbeat":12345}, "local":{"max_heartbeat":0},
+            "export":{"max_heartbeat":54321}}''')
+        self.assertEqual(load_config(config.encode()), config)
+        self.assertNotEqual(config.id, Config().id)
+        for name, count in (('checker', 12345), ('local', 0), ('export', 54321)):
+            section = getattr(config, name)
+            self.assertEqual(section.limits().max_heartbeat, count)
+            for invalid in (-1, True, 1.5, None, 2**63):
+                with self.subTest(name=name, value=invalid), self.assertRaises(DomainError):
+                    replace(section, max_heartbeat=invalid)
+            with self.assertRaises(DomainError):
+                config.increase({name: {'max_heartbeat': count + 1}})
+        self.assertEqual(config.export.limits(comparator=True).max_heartbeat, 54321)
+        self.assertEqual(Policy(config).export_limits(ExportUsage(elapsed_ms=100)).max_heartbeat, 54321)
+
+    def test_codex_retry_limits_round_trip_and_remain_frozen(self):
+        config = load_config(b'''{
+            "format": "midas-config-v1",
+            "model": {"request_max_retries": 3, "stream_max_retries": 1},
+            "research_model": {"request_max_retries": 2, "stream_max_retries": 4}
+        }''')
+        self.assertEqual(load_config(config.encode()), config)
+        defaults = Config()
+        for section in ('model', 'research_model'):
+            saved = getattr(config, section)
+            self.assertEqual(getattr(config.increase({'run': {'turns': 401}}), section), saved)
+            for name in ('request_max_retries', 'stream_max_retries'):
+                self.assertEqual(getattr(getattr(defaults, section), name), 0)
+                changed = replace(config, **{section: replace(saved, **{name: 0})})
+                self.assertNotEqual(changed.id, config.id)
+                with self.assertRaises(FrozenInstanceError):
+                    setattr(saved, name, 5)
+            with self.assertRaises(DomainError):
+                config.increase({section: {'request_max_retries': 5}})
+        self.assertEqual(config.recovery, defaults.recovery)
+
+    def test_invalid_codex_retry_limits_rejected(self):
+        for name in ('request_max_retries', 'stream_max_retries'):
+            for value in (-1, True, 1.5, '2', None, 2**63):
+                with self.subTest(name=name, value=value), self.assertRaises(DomainError):
+                    ModelConfig(**{name: value})
+            for section in ('model', 'research_model'):
+                payload = ('{"format":"midas-config-v1","' + section + '":{"' + name + '":-1}}').encode()
+                with self.subTest(section=section, name=name), self.assertRaises(DomainError):
+                    load_config(payload)
+
     def test_model_routes_round_trip_and_affect_config_identity(self):
         config = load_config(b'''{
             "format": "midas-config-v1",
@@ -230,6 +278,22 @@ class ConfigTests(unittest.TestCase):
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_heartbeat_admission_respects_finite_and_unlimited_profiles(self):
+        config = Config()
+        for profile, kind in (('checker', JobKind.CHECK_PROOF), ('checker', JobKind.PROBE),
+                              ('export', JobKind.EXPORT_VERIFY)):
+            for maximum in (0, 100):
+                policy = Policy(replace(config, **{profile: replace(getattr(config, profile), max_heartbeat=maximum)}))
+                for count in (0, 100, 101):
+                    req = request(kind)
+                    req = replace(req, job=replace(req.job, limits=replace(req.job.limits, max_heartbeat=count)))
+                    decision = policy.admit(req, run=RunUsage(), owner=OwnerUsage(), capacity=Capacity(), services=Services())
+                    allowed = maximum == 0 or 0 < count <= maximum
+                    with self.subTest(kind=kind, maximum=maximum, count=count):
+                        self.assertEqual(decision.allowed, allowed)
+                        if not allowed:
+                            self.assertEqual(decision.reason, 'process_resource_limit')
+
     def setUp(self):
         self.policy = Policy()
 

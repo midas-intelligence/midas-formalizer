@@ -51,7 +51,8 @@ def inspect(checker, request, context):
     channel = context.workspace / ('inspect-' + str(uuid4()))
     channel.mkdir()
     spec = environment.launch(('--run', '/checker/Extract.lean', '/project/' + request.source,
-                               request.source, '/channel/evidence'))
+                               request.source, '/channel/evidence', str(context.limits.max_heartbeat)),
+                              max_heartbeat=context.limits.max_heartbeat)
     spec = replace(spec, mounts=(*spec.mounts, Mount(str(runtime.directory), '/checker'), Mount(str(channel), '/channel')))
     result = context.run_process(spec, evidence_path=channel / 'evidence')
     if (result.outcome != Outcome.COMPLETED or result.evidence is None or result.evidence.truncated

@@ -5,9 +5,20 @@ from pathlib import Path
 import sys
 import subprocess
 import time
+import tomllib
 
 mode = os.environ.get('FIXTURE_MODE', 'success')
 log = Path(os.environ['FIXTURE_LOG'])
+providers = {}
+for index, arg in enumerate(sys.argv[:-1]):
+    if arg != '-c':
+        continue
+    setting = sys.argv[index + 1]
+    if setting.startswith('model_provider='):
+        provider = tomllib.loads(setting)['model_provider']
+    elif setting.startswith('model_providers.'):
+        for name, fields in tomllib.loads(setting)['model_providers'].items():
+            providers.setdefault(name, {}).update(fields)
 
 
 def send(value):
@@ -23,15 +34,23 @@ for line in sys.stdin:
         continue
     result = {}
     if method == 'config/read':
-        result = {'config':{'model_providers':{'midas-openai':{'request_max_retries':
-            1 if mode == 'retry' else 0, 'stream_max_retries':0,'requires_openai_auth':True,'wire_api':'responses'}}}}
+        effective = providers[provider]
+        if mode == 'retry':
+            effective['request_max_retries'] += 1
+        elif mode == 'stream_retry':
+            effective['stream_max_retries'] += 1
+        elif mode == 'missing_retry':
+            del effective['request_max_retries']
+        elif mode == 'invalid_retry':
+            effective['stream_max_retries'] = bool(effective['stream_max_retries'])
+        result = {'config': {'model_providers': providers}}
     elif method == 'account/read':
         result = {'requiresOpenaiAuth':True,'account':{'type':'test'}}
     elif method == 'thread/start':
         assert params['ephemeral'] is True
         assert params['sandbox'] == 'read-only'
         assert params['approvalPolicy'] == 'never'
-        result = {'thread':{'id':'thread-1'},'modelProvider':'midas-openai'}
+        result = {'thread':{'id':'thread-1'},'modelProvider':provider}
     elif method == 'turn/start':
         if mode == 'stderr':
             sys.stderr.write('x' * (4 * 1048576 + 1))

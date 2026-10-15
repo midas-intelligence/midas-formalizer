@@ -104,16 +104,18 @@ class ProcessConfig:
     memory_mib: int = 4096
     output_bytes: int = 8 * MIB
     evidence_bytes: int = 64 * MIB
+    max_heartbeat: int = 2_000_000
 
     def __post_init__(self):
-        _integers(self)
+        _integers(self, zero=('max_heartbeat',))
         for name, cap in (('wall_ms', 86_400_000), ('memory_mib', 1_048_576),
                           ('output_bytes', 8 * MIB), ('evidence_bytes', 64 * MIB)):
             if getattr(self, name) > cap:
                 raise DomainError(f'{name} exceeds process profile')
 
     def limits(self):
-        return ResourceLimits(self.wall_ms, self.memory_mib, self.output_bytes, self.evidence_bytes)
+        return ResourceLimits(self.wall_ms, self.memory_mib, self.output_bytes, self.evidence_bytes,
+                              self.max_heartbeat)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +127,10 @@ class ExportConfig:
     max_bytes: int = 16 * 1024**3
     output_bytes: int = 8 * MIB
     evidence_bytes: int = 64 * MIB
+    max_heartbeat: int = 2_000_000
 
     def __post_init__(self):
-        _integers(self)
+        _integers(self, zero=('max_heartbeat',))
         ProcessConfig(self.timeout_ms, self.memory_mib, self.output_bytes, self.evidence_bytes)
         if (self.comparator_timeout_ms > 7_200_000 or self.deadline_ms > 86_400_000
                 or self.max_bytes > 1024**4):
@@ -135,11 +138,12 @@ class ExportConfig:
 
     def limits(self, *, comparator=False):
         return ResourceLimits(self.comparator_timeout_ms if comparator else self.timeout_ms,
-                              self.memory_mib, self.output_bytes, self.evidence_bytes)
+                              self.memory_mib, self.output_bytes, self.evidence_bytes, self.max_heartbeat)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
+    """Invocation bounds, including Codex retries within a single turn."""
     invocation_ms: int = 600_000
     preparation_ms: int = 10_000
     connect_ms: int = 30_000
@@ -151,9 +155,11 @@ class ModelConfig:
     output_bytes: int = 131_072
     frame_bytes: int = MIB
     event_bytes: int = 4 * MIB
+    request_max_retries: int = 0
+    stream_max_retries: int = 0
 
     def __post_init__(self):
-        _integers(self)
+        _integers(self, zero=('request_max_retries', 'stream_max_retries'))
         if not self.output_bytes <= self.frame_bytes <= self.event_bytes <= 4 * MIB:
             raise DomainError('Invalid model byte bounds')
         if max(self.invocation_ms, self.startup_ms) > 7_200_000:

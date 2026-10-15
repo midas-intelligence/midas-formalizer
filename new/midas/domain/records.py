@@ -254,10 +254,12 @@ class ResourceLimits:
     memory_mib: int
     output_bytes: int
     evidence_bytes: int
+    max_heartbeat: int = 2_000_000
 
     def __post_init__(self) -> None:
         for field in ("wall_ms", "memory_mib", "output_bytes", "evidence_bytes"):
             natural(getattr(self, field), field, positive=True)
+        natural(self.max_heartbeat, "max_heartbeat")
 
 
 @dataclass(frozen=True, slots=True)

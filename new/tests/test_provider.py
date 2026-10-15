@@ -99,6 +99,20 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(ModelRequest.load(req.payload), req)
         self.assertLess(len(req.payload), META_BYTES)
         self.assertNotIn(b'env_', req.payload)
+        for config in (cfg.model, cfg.research_model):
+            limits = Limits.from_config(replace(config, request_max_retries=3, stream_max_retries=1))
+            self.assertEqual((limits.request_max_retries, limits.stream_max_retries), (3, 1))
+            saved = replace(req, limits=limits)
+            self.assertEqual(ModelRequest.load(saved.payload), saved)
+            for name in ('request_max_retries', 'stream_max_retries'):
+                changed = replace(saved, limits=replace(limits, **{name: 0}))
+                self.assertNotEqual(changed.payload, saved.payload)
+
+    def test_invalid_codex_retry_limits_rejected(self):
+        for name in ('request_max_retries', 'stream_max_retries'):
+            for value in (-1, True, 1.5, '2', None, 2**63):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    replace(LIMITS, **{name: value})
 
     def test_route_and_role_validation(self):
         for change in ({'provider':'openai'}, {'transport':'unknown'}, {'endpoint':'http://example.test'},
@@ -358,10 +372,11 @@ class ProviderTests(unittest.TestCase):
 
 
 class CodexTests(unittest.TestCase):
-    def invoke(self, mode='success', *, web_calls=0, deadline=2, digest=None):
+    def invoke(self, mode='success', *, web_calls=0, deadline=2, digest=None,
+               provider='openai', limits=LIMITS):
         a = Artifacts()
-        route = Route('openai','model','codex')
-        req = ModelRequest(route, 'research' if web_calls else 'prover', replace(LIMITS,web_calls=web_calls),
+        route = Route(provider,'model','codex')
+        req = ModelRequest(route, 'research' if web_calls else 'prover', replace(limits,web_calls=web_calls),
                            a.save(b'{"input":[{"type":"text","text":"JSON proof"}]}'),
                            a.save(b'{"baseInstructions":"Return the saved JSON schema"}'))
         executable = str(Path(sys.executable).resolve())
@@ -397,10 +412,24 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(out.termination,Termination.TERMINATED)
 
     def test_retry_controls_rejected_before_inference(self):
-        out,calls = self.invoke('retry')
-        self.assertEqual((out.error,out.delivery),('unsupported_retry_control',Delivery.NOT_SENT))
-        self.assertNotIn('turn/start',calls)
-        self.assertEqual(out.termination,Termination.TERMINATED)
+        for limits in (LIMITS, replace(LIMITS, request_max_retries=3, stream_max_retries=1)):
+            for mode in ('retry', 'stream_retry', 'missing_retry', 'invalid_retry'):
+                with self.subTest(limits=limits, mode=mode):
+                    out,calls = self.invoke(mode, limits=limits)
+                    self.assertEqual((out.error,out.delivery),('unsupported_retry_control',Delivery.NOT_SENT))
+                    self.assertNotIn('turn/start',calls)
+                    self.assertEqual(out.termination,Termination.TERMINATED)
+
+    def test_policy_retry_limits_applied_to_each_codex_provider(self):
+        from midas.policy import load_config
+        config = load_config(b'{"format":"midas-config-v1","model":{"request_max_retries":3,"stream_max_retries":1}}')
+        limits = Limits.from_config(config.model)
+        for provider in ('openai', 'azure', 'amazon-bedrock-runtime'):
+            with self.subTest(provider=provider):
+                out, calls = self.invoke(provider=provider, limits=limits)
+                self.assertIsNone(out.error)
+                self.assertEqual(calls.count('turn/start'), 1)
+                self.assertEqual(out.termination, Termination.TERMINATED)
 
     def test_executable_mismatch_never_starts(self):
         out,calls = self.invoke(digest='0'*64)

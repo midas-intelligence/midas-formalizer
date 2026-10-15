@@ -139,6 +139,14 @@ class ValueTests(unittest.TestCase):
 
 
 class WorkTests(unittest.TestCase):
+    def test_heartbeat_limits_accept_zero_and_reject_invalid_counts(self):
+        limits = ResourceLimits(1000, 256, 1000, 1000)
+        self.assertEqual(limits.max_heartbeat, 2_000_000)
+        self.assertEqual(replace(limits, max_heartbeat=0).max_heartbeat, 0)
+        for value in (-1, True, 1.5, None, 2**63):
+            with self.subTest(value=value), self.assertRaises(DomainError):
+                replace(limits, max_heartbeat=value)
+
     def setUp(self):
         self.owner = node("root").owner
         self.job = Job("proof:root", JobKind.CHECK_PROOF, self.owner, (artifact("input"),),

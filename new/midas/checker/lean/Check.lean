@@ -1043,6 +1043,7 @@ def main (args : List String) : IO UInt32 := do
   let source ← IO.ofExcept (Midas.Check.str packet "source")
   let logical ← IO.ofExcept (Midas.Check.str packet "logical")
   let offset ← IO.ofExcept (Midas.Check.nat packet "offset")
+  let maxHeartbeat ← IO.ofExcept (Midas.Check.nat packet "max_heartbeat")
   unsafe enableInitializersExecution
   initSearchPath (← findSysroot)
   let ictx := Parser.mkInputContext source logical
@@ -1073,7 +1074,7 @@ def main (args : List String) : IO UInt32 := do
   try
     let (result, _) ← (action.run {inputCtx := ictx}).run {
       commandState := Command.mkState env messages
-        (maxHeartbeats.set (({} : Options).setBool `Elab.async false) 2000000),
+        (maxHeartbeats.set (({} : Options).setBool `Elab.async false) maxHeartbeat),
       parserState := ps, cmdPos := ps.pos }
     let artifacts ← Midas.Check.nativeOutputs.get
     let some path ← IO.getEnv "MIDAS_EVIDENCE_PATH"

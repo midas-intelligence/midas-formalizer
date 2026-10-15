@@ -492,7 +492,9 @@ class Policy:
             if not local and job.limits.memory_mib > limits.compiler_memory_mib:
                 return Decision('impossible_memory')
             if (job.limits.wall_ms > profile.wall_ms or job.limits.memory_mib > profile.memory_mib
-                    or job.limits.output_bytes > profile.output_bytes or job.limits.evidence_bytes > profile.evidence_bytes):
+                    or job.limits.output_bytes > profile.output_bytes or job.limits.evidence_bytes > profile.evidence_bytes
+                    or not local and profile.max_heartbeat and (
+                        job.limits.max_heartbeat == 0 or job.limits.max_heartbeat > profile.max_heartbeat)):
                 return Decision('process_resource_limit')
             if local:
                 if capacity.locals >= limits.local_concurrency:
@@ -638,8 +640,8 @@ class Policy:
         if usage.artifact_bytes > limits.max_bytes or usage.captured_bytes >= limits.output_bytes:
             raise DomainError('Export byte budget exhausted')
         return ResourceLimits(min(limits.comparator_timeout_ms if comparator else limits.timeout_ms,
-                                  limits.deadline_ms - usage.elapsed_ms), limits.memory_mib,
-                              limits.output_bytes - usage.captured_bytes, limits.evidence_bytes)
+                              limits.deadline_ms - usage.elapsed_ms), limits.memory_mib,
+                              limits.output_bytes - usage.captured_bytes, limits.evidence_bytes, limits.max_heartbeat)
 
     def completion(self, progress: Progress) -> Completion:
         proof = 'verified' if progress.verified_roots == progress.roots else 'incomplete'

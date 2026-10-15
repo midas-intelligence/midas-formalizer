@@ -24,7 +24,7 @@ def main():
         root = Path(temporary)
         project = root / 'project'
         project.mkdir()
-        (project / 'Main.lean').write_text('theorem target : True := by sorry\n')
+        (project / 'Main.lean').write_text('import Lean\n\ntheorem target : True := by sorry\n')
         (project / 'Joint.lean').write_text('def witness : Nat := sorry\ntheorem property : witness = witness := by sorry\n')
         config = PackageConfig('4.35.0-rc3', toolchain, (('project', project),),
                                ('project/Main.lean', 'project/Joint.lean'), ('project', 'toolchain/lib/lean'))
@@ -105,8 +105,30 @@ def main():
                 return result, admitted
 
             candidate = Candidate(str(uuid4()), owner, selected.environment_id, artifacts.save(b'by trivial'))
+            def heartbeat_checks(label):
+                from midas.policy import load_config
+                policy = load_config(b'{"format":"midas-config-v1","checker":{"max_heartbeat":12345}}')
+                limits = policy.checker.limits()
+                for count in (12345, 0):
+                    code = ('by\n  run_tac do\n'
+                            '    unless Lean.maxHeartbeats.get (← Lean.getOptions) == ' + str(count) + ' do\n'
+                            '      throwError "heartbeat limit mismatch"\n  trivial').encode()
+                    proof = replace(candidate, id=str(uuid4()), source=artifacts.save(code))
+                    check(label + ' configured heartbeat ' + str(count),
+                        checker.prepare('proof', selected, 0, proof, artifacts), candidate=proof,
+                        limits=replace(limits, max_heartbeat=count))
+                result, _ = check(label + ' heartbeat interruption', checker.prepare('probe', selected, 0,
+                    candidate.owner, (ProbeCase('heartbeat', 'repeat skip'),)), limits=limits)
+                report = codec.load_record(artifacts.data[result.output.id], limit=65536)
+                rows = codec.load_record(artifacts.data[report['evidence']['id']], limit=65536)
+                outcome = codec.decode(artifacts.data[rows[0]['id']])['row']['result']
+                assert outcome['status'] == 'interrupted', outcome
+                assert '12345' in outcome['diagnostic'] and 'heartbeat' in outcome['diagnostic'], outcome
+
+            heartbeat_checks('retained')
             check('direct proof with native replay', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             checker.retained = False
+            heartbeat_checks('fresh')
             check('explicit fresh proof with native replay', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             checker.retained = True
             for code in (b'by sorry', b'by exact False.elim (by trivial)',
@@ -177,6 +199,7 @@ def main():
                 identities=tuple(replace(i, environment_id=configured.id) for i in selected.identities))
             candidate = replace(candidate, environment_id=configured.id, owner=OwnerVersion(selected.identities[0].id, 0))
             check('configured interpreted checker', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
+            heartbeat_checks('interpreted')
     print('checker Lean checks passed', flush=True)
 
 

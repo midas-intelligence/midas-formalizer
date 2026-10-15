@@ -13,6 +13,7 @@ import threading
 from types import MappingProxyType
 
 from ..domain.encoding import canonical, load_json
+from ..domain.records import natural
 from ..executor import LaunchSpec, Mount, Outcome
 from .inventory import (EnvironmentError, File, Inventory, MAX_BYTES, MAX_INVENTORY,
                         MAX_ENTRIES, absolute, chunks, copy_file, file_hash, open_root, relative,
@@ -273,7 +274,8 @@ class Environment:
             checks = [(b'version', report.encode())]
             for source in settings.project_inputs:
                 if source.endswith('.lean'):
-                    checked = output(context.run_process(environment.launch(('--root=/project', '/' + source))))
+                    checked = output(context.run_process(environment.launch(('--root=/project', '/' + source),
+                        max_heartbeat=context.limits.max_heartbeat)))
                     checks.append((source.encode(), checked))
             if config.preflight_imports:
                 with tempfile.TemporaryDirectory(prefix='imports-', dir=context.workspace) as temp:
@@ -281,7 +283,8 @@ class Environment:
                     source.write_text(''.join('import ' + name + '\n' for name in config.preflight_imports))
                     inputs = environment.materialize((AuthorizedInput('Imports.lean', source,
                         file_hash(source), source.stat().st_size),), Path(temp) / 'inputs', check=context.check)
-                    checks.append((b'imports', output(context.run_process(environment.launch(('/inputs/Imports.lean',), inputs=inputs)))))
+                    checks.append((b'imports', output(context.run_process(environment.launch(('/inputs/Imports.lean',),
+                        inputs=inputs, max_heartbeat=context.limits.max_heartbeat)))))
             environment.validate(hash_toolchain=True, fresh=True, check=context.check)
             if _before_publish is not None:
                 _before_publish(environment)
@@ -399,11 +402,15 @@ class Environment:
         fd = open_root(path.parent)
         os.close(fd)
 
-    def launch(self, arguments, *, inputs=None, build=None, executable=None):
+    def launch(self, arguments, *, inputs=None, build=None, executable=None, max_heartbeat=None):
         """Lower admitted files to executor recipes; no compiler execution or scheduling."""
         self._admit()
         spec = self.manifest.settings
         executable = executable or spec.lean_executable
+        if max_heartbeat is not None:
+            natural(max_heartbeat, 'max_heartbeat')
+            if executable != spec.lean_executable:
+                raise EnvironmentError('Only Lean executables accept a heartbeat limit')
         item = self.manifest.inventory.by_path.get(logical(executable))
         if item is None or not item.executable:
             raise EnvironmentError('Executable is outside the admitted inventory')
@@ -432,6 +439,7 @@ class Environment:
                      ('LD_LIBRARY_PATH', libraries), *spec.variables)
         argv = ('/' + spec.runtime_loader, '--inhibit-cache', '--library-path', libraries, '/' + executable,
                 *('-D' + k + '=' + v for k, v in spec.options),
+                *(('-DmaxHeartbeats=' + str(max_heartbeat),) if max_heartbeat is not None else ()),
                 *('--plugin=/' + p for p in spec.plugins), *arguments)
         if executable == 'toolchain/bin/leanc':
             if build is None:

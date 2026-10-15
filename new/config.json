@@ -39,13 +39,15 @@
     "wall_ms": 90000,
     "memory_mib": 4096,
     "output_bytes": 8388608,
-    "evidence_bytes": 67108864
+    "evidence_bytes": 67108864,
+    "max_heartbeat": 2000000
   },
   "local": {
     "wall_ms": 60000,
     "memory_mib": 4096,
     "output_bytes": 8388608,
-    "evidence_bytes": 67108864
+    "evidence_bytes": 67108864,
+    "max_heartbeat": 2000000
   },
   "export": {
     "timeout_ms": 90000,
@@ -54,7 +56,8 @@
     "memory_mib": 4096,
     "max_bytes": 17179869184,
     "output_bytes": 8388608,
-    "evidence_bytes": 67108864
+    "evidence_bytes": 67108864,
+    "max_heartbeat": 2000000
   },
   "model": {
     "invocation_ms": 600000,
@@ -67,7 +70,9 @@
     "shutdown_ms": 3000,
     "output_bytes": 131072,
     "frame_bytes": 1048576,
-    "event_bytes": 4194304
+    "event_bytes": 4194304,
+    "request_max_retries": 0,
+    "stream_max_retries": 0
   },
   "research_model": {
     "invocation_ms": 300000,
@@ -80,7 +85,9 @@
     "shutdown_ms": 3000,
     "output_bytes": 131072,
     "frame_bytes": 1048576,
-    "event_bytes": 4194304
+    "event_bytes": 4194304,
+    "request_max_retries": 0,
+    "stream_max_retries": 0
   },
   "recovery": {
     "transport_retries": 2,

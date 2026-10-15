@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from midas.domain.encoding import canonical
+from midas.domain import ResourceLimits
 from midas.environment import (Archive, ArchiveFile, AuthorizedInput, Bootstrap, Dependency,
     Environment, EnvironmentError, File, Inventory, Manifest, PackageConfig, Pin, Settings,
     Tool, VerificationConfig, archive_benchmark, attach, check_version, describe,
@@ -34,6 +35,7 @@ def write(path, data=b'x', *, executable=False):
 class Context:
     def __init__(self, workspace, *, fail=False):
         self.workspace, self.fail, self.launches = workspace, fail, []
+        self.limits = ResourceLimits(120000, 4096, 1024**2, 64*1024**2)
 
     def check(self):
         pass
@@ -274,6 +276,19 @@ class EnvironmentTests(unittest.TestCase):
         write(inputs.directory / 'Proof.lean', b'changed')
         with self.assertRaises(ValueError):
             self.env.launch(('/inputs/Proof.lean',), inputs=inputs)
+
+    def test_heartbeat_limit_is_a_launch_option(self):
+        original = self.env.id
+        for limit in (0, 12345):
+            recipe = self.env.launch(('--run', '/checker/Resource.lean'), max_heartbeat=limit)
+            self.assertIn('-DmaxHeartbeats=' + str(limit), recipe.argv)
+            self.assertLess(recipe.argv.index('-DmaxHeartbeats=' + str(limit)), recipe.argv.index('--run'))
+        self.assertEqual(self.env.id, original)
+        for invalid in (-1, True, 1.5):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                self.env.launch((), max_heartbeat=invalid)
+        with self.assertRaises(ValueError):
+            self.env.launch((), executable='toolchain/bin/leanc', max_heartbeat=12345)
 
     def test_materialize_rejects_shadowing_overlaps_hashes_and_extras(self):
         source = write(self.root / 'source', b'x')

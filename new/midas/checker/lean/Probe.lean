@@ -150,9 +150,9 @@ def run (expected : Expr) (spec : Case) (aliases : Nat := 0) : CommandElabM Json
   liftTermElabM <| withCurrHeartbeats do
     let _ := MonadAlwaysExcept.except (m := TermElabM)
     let result ← try
-        -- Match the checker's 2,000,000 user-facing heartbeats. Core counts
-        -- raw heartbeats, which are 1,000 times the option's units.
-        withTheReader Core.Context (fun ctx => { ctx with maxHeartbeats := 2000000000 }) do
+        -- Core counts raw heartbeats, 1,000 times the configured option's units.
+        let limit := maxHeartbeats.get (← getOptions)
+        withTheReader Core.Context (fun ctx => { ctx with maxHeartbeats := limit * 1000 }) do
           forallBoundedTelescope expected aliases fun _ target => runCase target spec
       catch error =>
         pure <| Json.mkObj [("id", toJson spec.id), ("operation", toJson spec.operation),
