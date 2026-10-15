@@ -379,3 +379,47 @@ class ArtifactReader(Protocol):
     """A bounded, verified read capability; deliberately has no write methods."""
 
     def read_artifact(self, reference: ArtifactRef, *, max_bytes: int) -> bytes: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityGrant:
+    """Controller handoff after reservation commit; construction is not authority.
+
+    A retained worker transfers its existing footprint into this invocation's
+    reservation. Policy admission excludes that worker from retained memory.
+    """
+    invocation: Invocation
+    retained_worker_id: str | None = None
+
+    def __post_init__(self):
+        instance(self.invocation, Invocation)
+        if self.retained_worker_id is not None:
+            uuid(self.retained_worker_id)
+
+    def validate_for(self, invocation: Invocation):
+        if self.invocation != invocation:
+            raise DomainError('Capacity grant differs from the committed invocation')
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProgress:
+    """Small progress metadata; evidence travels only as bounded artifact refs."""
+    invocation_id: str
+    sequence: int
+    kind: str
+    artifacts: tuple[ArtifactRef, ...] = ()
+
+    def __post_init__(self):
+        uuid(self.invocation_id)
+        natural(self.sequence, 'Progress sequence')
+        text(self.kind, 'Progress kind')
+        if len(self.kind) > 128:
+            raise DomainError('Progress kind exceeds 128 characters')
+        items(self.artifacts, ArtifactRef)
+        if len(self.artifacts) > 16:
+            raise DomainError('Progress has too many artifact references')
+
+
+class ArtifactStaging(Protocol):
+    """Private, bounded worker writes; publication remains controller/storage-owned."""
+    def write_bounded(self, data: bytes, *, max_bytes: int) -> ArtifactRef: ...

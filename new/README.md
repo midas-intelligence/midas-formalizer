@@ -1,9 +1,17 @@
-# Clean Midas: domain and policy
+# Clean Midas: domain, policy, source, and executor
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
 document. [`config.json`](config.json) contains the policy defaults and the
 prover/reviewer model settings from the supplied v2 `live.json` example.
+
+`midas/source` implements the pure source layer: names, explicit declaration and
+lookup contexts, shared rendering, byte edits, source maps, and flat module layouts.
+It adds no persisted formats or JSON files.
+
+`midas/executor` implements reserved worker dispatch, isolated subprocesses,
+cancellation, and retained compiler lifetimes. It consumes explicit launch recipes
+and imports only the domain and the standard library.
 
 ## Policy
 
@@ -244,7 +252,7 @@ shared reachable work survives. Retired candidates cannot reactivate, and affect
 ancestor assemblies return to conditional state for later reassembly.
 
 Proof verification is separate from source integration and independent export
-verification. This directory contains domain and policy contracts, not a runnable
+verification. This directory contains domain, policy, source, and executor components, not a runnable
 formalizer or an implementation of the remaining blueprint components.
 
 ## Formats and validation
@@ -347,3 +355,227 @@ end-to-end throughput or a benchmark of large v2 JSON files.
 ```sh
 python3 -B -m tests.benchmark_domain --case scoped_admission --case submission_load --case submission_save --case context_prefixes --case scope_resolution --case review_digest --case json_warm_admission
 ```
+
+## Source
+
+The source responsibilities of the blueprint's 15 v2 modules are consolidated
+into **six modules plus `__init__.py`** under `midas/source`:
+
+| New module | Responsibility |
+| --- | --- |
+| `names.py` | Structural Lean name spelling, exact alias queries, advisory lexical declaration hints |
+| `text.py` | Raw UTF-8 source, bounded assembly, one-pass byte edits, authored source maps and coordinates |
+| `terms.py` | Expression and universe rendering, Lean string escaping, explicit rendering options |
+| `context.py` | Explicit declaration/lookup contexts, sequential definition rendering, import merging and insertion |
+| `render.py` | Shared candidate/probe rendering, subject presentation, named proof declarations, result applications and in-place integration |
+| `modules.py` | Flat module names, dependency order, reachability, shared modules and aggregate byte limits |
+
+The public boundary uses existing binary `Signature` values, source bytes, and
+small immutable records. Expression expansion stays private to rendering. There
+are no source JSON files, per-type codecs, save/load round trips, manifests,
+environment records, database queries, file operations, or compiler invocations.
+The implementation imports only `domain`, its own modules, and the standard
+library. The preserved v2 implementation remains unchanged.
+
+`declaration_context` takes an admitted selection and explicit checked interfaces.
+`lookup_context` retains only the requested checked aliases and never decodes the
+goal or an alias type. These contexts reference the original source bytes and a
+prefix offset. Checker/controller own receipt provenance, exact binding selection,
+repair ancestry and environment admission; a `CheckedAlias` or
+`CheckedDeclaration` constructor does not establish proof authority.
+
+Import functions receive an admitted `frozenset` of module names. They enforce
+the existing candidate import limits, reject unavailable/private/self imports,
+and preserve an initial `module` command and header comments. Toolchains,
+package inventories, compiled-file hashes and import capability display belong
+to their respective environment, checker and prompt owners.
+
+`candidate` and `probe` share one renderer and retain authored proof/statement
+locations. `RenderPolicy` supplies readable names, raw numeral spelling, grouped
+sorts and computability explicitly. Local contexts are closed using a flat
+rendering sequence. Named definition contexts preserve domain-generated prefix
+names, including inherited alias scopes. A declaration bundle decodes each unique
+signature once, emits each definition/proof once, and orders dependencies before
+their users. Missing required declarations, conflicts and cycles fail before any
+output is published. Certificate composition and semantic admission remain checker
+responsibilities; source consumes their explicit named results.
+
+For example, given an admitted `selection`:
+
+```python
+from midas.source import SourceFile, candidate, declaration_context
+
+context = declaration_context(selection, 0)
+generated = candidate(context, SourceFile("proof", b"by\n  trivial"))
+compiler_input = generated.data
+# A diagnostic byte offset maps only when it lies in copied authored text.
+location = generated.authored_location(generated.data.index(b"trivial"))
+```
+
+Source maps are flat, non-overlapping byte spans verified against exact original
+bytes. Generated scaffolding and indentation have no authored location. Returned
+locations use one-based lines and zero-based Unicode code-point columns;
+compiler protocols using bytes or UTF-16 must convert at their boundary.
+
+`integrate` replaces exactly the selected bodies, preserving the remaining source
+and its scopes. It applies all edits in one pass instead of copying the whole file
+for every replacement. `module_tree` takes explicit module bodies/dependencies and
+returns raw sources and build order. Generated names are single components, so a
+deep proof graph never creates deep directories. A shared child has one module.
+Export owns profile selection, artifact persistence, packaging, declaration audits
+and independent rebuild verification; none of those services is introduced here.
+
+Source output is capped at 64 MiB, with caller-supplied smaller limits and an
+aggregate module-tree limit. Expression rendering checks rope sizes before
+flattening shared DAGs; exponentially large projections fail without expansion.
+Large string literals use Lean escaping directly, without JSON. Repeated named
+context rendering uses a bounded cache (128 entries, 16 MiB), keyed only by exact
+context bytes and the output limit. Conservative size accounting includes source
+maps and their lazy line indices; forked workers start with an empty cache.
+
+Validation on 2026-10-15: **35 distinct Python source tests passed**, using the
+initial focused run and targeted reruns after changes. Coverage includes large
+source/string inputs with JSON operations disabled, lookup without type decoding,
+shared signatures, Unicode mapping, inherited definitions, cycles and conflicts,
+1,100 local declarations and a 1,200-module chain with flat paths. No unrelated
+policy, domain, storage, packaging or provider suites were rerun.
+
+With the permission required by the root `AGENTS.md`, **six generated Lean files
+compiled through bubblewrap with Lean 4.34.1**: representative expressions,
+control-character strings, candidate aliases, definitions, local contexts,
+universe parameters, integration, namespace/section prefixes, a module header,
+and a three-module dependency chain. These smoke checks validate generated syntax
+and elaboration, not the future checker's receipt or export-audit contracts.
+
+```sh
+python3 -B -m unittest tests.test_source -v
+# Requires permission for Lean/bubblewrap:
+python3 -B -m tests.check_source_lean /absolute/path/to/toolchain/bin/lean
+python3 -B -m tests.benchmark_source
+```
+
+Local alternating seven-sample comparisons against v2 measured:
+
+| Operation | New/v2 time |
+| --- | ---: |
+| 32-component Lean name | 0.392 |
+| Lexical declaration hints | 0.999 |
+| Import insertion after a large header comment | 0.015 |
+| Shared expression rendering, including binary decoding | 0.398 |
+| Repeated context rendering, warm bounded cache | 0.001 |
+| First-use context rendering, including binary decoding on both sides | 0.790 |
+| 100 edits in a 2.2 MB source | 0.305 |
+| Minimal lookup context / v2 source-prefix loading | 0.674 |
+
+These are synthetic source measurements, not end-to-end formalizer throughput.
+The warm context figure measures reuse; the first-use comparison includes binary
+decoding on both sides and clears the new cache before each call. New output also
+includes source maps. The lookup comparison includes constructing the new
+context, while v2 loads its saved source prefix.
+
+## Executor
+
+The executor has **four Python modules plus `__init__.py`**, and one private C
+resource:
+
+| Module | Responsibility |
+| --- | --- |
+| `process.py` | Shared Linux process discovery, pidfd ownership, sampled memory limits, bounded diagnostics/evidence, termination and result normalization |
+| `isolation.py` | Explicit namespace launch recipes, launcher hash checks, isolated roots and bounded scratch space |
+| `imports.py` | Retained import transport, exact input copying, protected completion messages, native-runtime capability and source access |
+| `workers.py` | Bounded dispatch, cancellation, progress, cumulative invocation limits, compiler capacity and retained-worker transfers/eviction |
+| `import_runtime.c` | Preserved native import isolation: Landlock, ptrace, descendant termination and private control descriptors |
+
+These collect the executor responsibilities of `process_runner`, `lean_runner`,
+`import_pool`, `import_worker`, `import_runtime`, and `comparator_runtime`. Package
+and runtime inventories/materialization belong to environment; Lean source
+assembly, toolchain support admission, source-bound builds, and semantic evidence
+validation belong to checker/export. Those later components supply the recipes.
+Executor does not import their v2 implementations, discover a toolchain, build
+checker sources implicitly, publish artifacts, or own SQLite transactions.
+
+`Executor.start(invocation, execute, grant=..., workspace=..., reader=...,
+staging=...)` consumes a controller-issued `CapacityGrant` for the exact invocation,
+including its saved request, reservation and session. The new grant and progress
+records live in domain. Their constructors check structure; the controller must
+issue grants only after committed admission. There is no second admission queue.
+Over-dispatch is rejected, and unconsumed completions also bound the dispatch count.
+
+The callable receives only its `FrozenRequest` and `WorkerContext`. The context
+has the supplied artifact reader/private staging interfaces, a private workspace,
+cancellation, deadline, bounded progress, `run_process`, and `run_import`; it has
+no controller or submission method. Recursive dispatch and use of a context from
+another thread are rejected. The future storage component supplies the actual
+read/staging capabilities and owns publication and workspace cleanup. Completed
+workspace files survive executor shutdown for publication or recovery.
+
+`LaunchSpec` describes argv, explicit mounts, process environment variables, and
+the admitted bubblewrap executable/hash. It does not contain an Environment,
+toolchain manifest, package inventory or source payload. The executor clears the
+inherited process environment, unshares namespaces, drops capabilities, binds only
+the supplied roots, and requires private bubblewrap status. Missing/changed
+launchers and isolation failures never enable host execution. The raw subprocess
+function is private and used by supervisor tests. Launch metadata is capped at
+16 KiB; generated inputs and outputs stay in files or raw byte streams.
+
+Compiler checks, lookup, probes, assembly, integration and export verification
+share compiler slots and memory. Active and retained footprints remain reserved
+until their processes terminate. `state()` exposes retained worker IDs and their
+full reserved memory so policy can account for them. An explicit
+`CapacityGrant(invocation, retained_worker_id)` transfers that footprint into the
+new reservation. Other idle workers are evicted before new compiler work starts.
+All checks/fallbacks within a context consume the same remaining wall, output and
+evidence budgets, including launch preparation. Attempt evidence remains separate;
+`ImportResult.attempts` retains each bounded result for later staging.
+
+Retained workers are keyed by the exact launch recipe, environment/runtime hashes,
+request filename, non-request input hashes, memory and scratch limits. A changed
+request is streamed into the private input workspace; unchanged dependencies are
+copied and verified once. Sequential probe cases can share the same parent while
+consuming the invocation's remaining evidence budget. The retained native runtime
+currently supports the existing Linux x86-64 / Lean 4.35.0-rc3 profile with Landlock
+ABI 6. Checker owns exact runtime admission and build recipes, using
+`import_runtime_source()` and `LINK_FLAGS`. Unsupported optimized execution can
+use an explicitly supplied isolated fresh recipe, within the residual budget.
+Cancellation and resource exhaustion do not start another attempt.
+
+Memory remains **sampled anonymous RSS**, as in v2, rather than a hard cgroup
+ceiling. Descendant discovery is shared for at most 20 ms, resets after fork, and
+pins process identities with pidfds. Cleanup waits for observed thread groups;
+the namespace contains untrusted descendants between samples. An observation
+failure reports unknown termination and keeps capacity held for recovery.
+Native request completion comes from the protected control FIFO only after its
+traced descendants exit; retaining the parent is accounted for separately.
+
+Trusted Python callbacks use cooperative cancellation and deadlines for external
+I/O. They cannot be forcibly killed safely as threads. `drain(timeout=...)` returns
+false while such work remains alive, retaining capacity and withholding completion.
+A returned result keeps its staged references and known usage even when a late
+cancellation changes its status. Final artifact publication and proof acceptance
+remain controller/owning-service operations.
+
+Validation on 2026-10-15: **33 executor tests and four existing domain execution
+tests passed**. Coverage includes process trees across sessions, cancellation,
+output/evidence/memory/wall limits, launch/monitor failures, descriptor cleanup,
+progress backpressure, reservation binding, retained transfers/eviction, cumulative
+fallback limits and preserved partial results. No unrelated source, policy,
+storage or provider suites were rerun.
+
+With the root `AGENTS.md` permission, real bubblewrap/Lean 4.35.0-rc3 smoke checks
+passed for fresh success/rejection, explicit read-only roots, compilation of a
+small native harness against the bundled C runtime, retained reuse and rejection,
+protected-control-FIFO rejection followed by authorized isolated fallback, and
+cancellation with confirmed process-tree exit. These test executor behavior,
+not the future checker's receipt or proof-admission contracts.
+
+```sh
+python3 -B -m unittest tests.test_executor tests.test_domain.WorkTests -v
+python3 -B -m tests.benchmark_executor
+# Requires permission for Lean/bubblewrap:
+python3 -B -m tests.check_executor_lean /absolute/path/to/lean-4.35.0-rc3/bin/lean
+```
+
+Seven alternating local samples measured **0.999× v2 time** for capturing 1 MiB
+and **1.002×** for launching/monitoring a Python child that emits 64 KiB. These
+small differences indicate comparable supervisor performance; they do not measure
+end-to-end formalization or compiler import-cache speed.

@@ -15,9 +15,9 @@ from .proofs import (
     validate_joint_submission,
 )
 from .records import (
-    ArtifactReader, ArtifactRef, Candidate, DeliveryCertainty, Dependency, DependencyOrigin,
+    ArtifactReader, ArtifactRef, ArtifactStaging, Candidate, CapacityGrant, DeliveryCertainty, Dependency, DependencyOrigin,
     DomainError, FrozenRequest, Invocation, Job, JobKind, OwnerVersion, ReceiptBinding, ResourceLimits,
-    ResultStatus, Session, Termination, Usage, WorkerResult, obligation_id,
+    ResultStatus, Session, Termination, Usage, WorkerProgress, WorkerResult, obligation_id,
 )
 from .selection import (
     ByteSpan, Declaration, FrozenSelection, SelectedTargets, SelectionInputs, SelectionRequest,
@@ -27,6 +27,7 @@ from .submission import encode_submission, lexical_scope, load_submission, resol
 
 
 __all__ = [
+    "ArtifactStaging", "CapacityGrant", "WorkerProgress",
     "AdmittedBinding", "AdmittedCheck", "AdmittedReview", "ArtifactReader", "ArtifactRef",
     "Candidate", "CheckKind", "DeliveryCertainty", "Dependency", "DependencyOrigin", "DomainError",
     "FrozenRequest", "Invocation", "Job", "JobKind", "OwnerVersion", "ProofGraph",
