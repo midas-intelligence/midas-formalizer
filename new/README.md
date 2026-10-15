@@ -1,4 +1,4 @@
-# Clean Midas: domain, policy, source, executor, environment, checker, provider, tools, prompt, and strategy
+# Clean Midas: domain, policy, storage, source, executor, environment, checker, provider, tools, prompt, strategy, and controller
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -35,6 +35,260 @@ only domain and source.
 
 `midas/strategy` implements pure candidate, review, repair, memory and continuation
 decisions. It imports only domain, policy, prompt and tools.
+
+`midas/storage` implements SQLite ownership, immutable artifact publication,
+fenced task accounting, recovery and indexed read views. Its only component
+dependency is domain; compression uses the existing `zstandard` dependency.
+
+`midas/controller` implements one run loop over these components. It owns
+admission, publication, receipt application, retries, cancellation and recovery.
+
+## Controller
+
+Five implementation modules plus `__init__.py` replace the controller lifecycle
+responsibilities distributed across the twelve v2 modules in the blueprint:
+
+| Module | Responsibility |
+| --- | --- |
+| `protocol.py` | Bounded effects, frozen planned work and the fixed operation table |
+| `records.py` | Small binary reservations, frozen retry rules and indexed budget projections |
+| `allowances.py` | Atomic candidate/helper reservations and candidate settlement |
+| `operations.py` | Existing provider, checker and search receipt admission |
+| `service.py` | One loop for progress, receipts, planning, dispatch, stop, drain and recovery |
+
+Construct `Controller(writer, executor, policy, operations, ...)` after freezing
+the run. One controller owns each writer. `Operations` has explicit slots for
+model, binding, proof, lookup, probe, search, assembly, integration and export
+verification. There is no dynamic registration or separate live/scripted loop.
+`model_operation`, `checker_operation` and `search_operation` use the existing
+owning services. Their reducers receive authenticated results and current storage
+reads, and return `Effect` values. The application supplies those reducers, a
+bounded planner and the current root/export completion projection. Candidate
+lowering, graph selection, helper continuations and export algorithms remain with
+their owning services. The export/application components are still separate work;
+this package does not implement a CLI or an export engine.
+
+An `Effect` combines storage `Changes`, `Planned` frozen requests, streamed
+artifacts and post-commit cancellation. `publish(key, effect)` publishes bytes
+before atomically saving their references, version checks, counters and work.
+The caller lowers strategy/tool proposals into that effect; storage does not
+interpret a raw strategy proposal. `reserve_candidate`, `settle_candidate` and
+`reserve_helper` produce allowance effects to compose with the corresponding
+checks/stages. Owner counters retain lifetime usage across generations. Candidate
+exceptions refund the reserved mathematical attempt and keep their separate
+exception charge. A helper request is charged once across its stages; research
+retains its own model resource profile after reserving its allowance.
+
+`step()` drains bounded progress, receives completions, admits saved receipts,
+applies effects, plans changed state, then dispatches ready jobs. Ready and receipt
+pages have cursors, so a blocked first page cannot starve later work. Completed
+workers report their final progress count: their staging survives until every
+queued message has been processed, even with a full progress channel. Invalid
+progress cancels the emitter. Proof state changes only through the owning semantic
+reducer after receipt authentication; saving a successful result alone selects
+nothing.
+
+Local workspace/input preparation finishes before admission. Policy is rechecked
+under the write transaction, and reservation plus the dispatch marker commit
+together before any worker call. Workers receive only an artifact allowlist,
+private staging and the exact capacity grant. A launch rejection follows the normal
+not-sent receipt path. A crash after the dispatch commit retains uncertain work;
+it does not infer that the provider was never called. Separately saved PREPARED
+work is refundable during recovery. Retained compiler memory participates in
+admission and is freed only after executor-confirmed eviction.
+
+Worker artifacts, receipt bytes and accounting commit together through storage's
+`prepare_receipt`/`receive` boundary. Semantic admission follows outside that
+transaction. Application, downstream work and disposition then commit together.
+Publication/commit acknowledgement failures retain the completion for replay.
+Duplicate receipt delivery cannot settle usage twice. Stale work keeps its receipt
+and original charge without acquiring current proof authority.
+
+Model budgets use bounded per-invocation binary projections and indexed counters,
+including unknown bounds and overrun flags. Admission never scans execution
+history. `report_usage` applies cumulative late usage to its original invocation.
+Retry rules and the first-attempt time are saved; retries reuse the exact request
+and create a new original invocation. Provider cooldowns are scoped to frozen
+routes, with indexed recent failures. `reset_provider` is an explicit application
+recovery action after checking provider health.
+
+`request_stop()` is safe from another thread. The loop persists the stop, cancels
+owned workers and keeps receiving results. Cancelled receipts remain available
+for `resume()`. On a newly claimed writer, `recover()` reconciles bounded batches;
+saved receipts pass through normal semantic admission before adoption. Original
+invocation IDs, charges and usage remain unchanged. `reconcile_termination`
+requires an application OS observer to confirm exit before releasing uncertain
+capacity. That confirmation does not grant proof authority.
+
+`drain(timeout=...)` keeps polling progress while cancelling and returns `False`
+if workers or uncertain processes remain. `run(progress)` uses the application's
+current root/export projection with policy completion and the controller's actual
+worker/recovery state. The writer remains application-owned. Controller metadata
+contains artifact references and environment hashes, with no environment inventory,
+large JSON operation or recursive persisted structure.
+
+Validation and benchmark commands (from `new/`):
+
+```sh
+python3 -B -m unittest tests.test_controller -v
+python3 -B -m tests.benchmark_controller
+# Requires the Lean permission specified by root AGENTS.md:
+python3 -B -m tests.check_controller_lean /path/to/lean/bin/lean
+```
+
+The controller checks cover real storage, deterministic workers, threaded progress
+backpressure, actual scripted-provider/strategy composition, crash replay, budget
+accounting, retries, stop/resume and receipt adoption. The real Lean integration
+checks target binding, direct proof selection, probes, sealed receipt admission
+and confirmed drain. **216 offline controller/adjacent tests passed**, along with
+the real Lean integration. Seven alternating benchmark samples measured new/v2
+median ratios of **0.901** for the model lifecycle and **0.451–0.516** for idle
+ticks with/without history. The comparison uses deterministic workers; it does
+not measure formalization throughput or a live provider.
+
+## Storage
+
+Nine implementation modules plus `__init__.py` replace the storage-owned portions
+of the twenty v2 modules in the blueprint. There is no v2 import or schema migration.
+
+| Module | Responsibility |
+| --- | --- |
+| `protocol.py` | Explicit bounded changes, versions, run inputs and read views |
+| `codec.py` | Shallow binary requests, proof-node records and exact worker results |
+| `schema.py` | One SQLite schema, foreign keys, indexes and immutable history |
+| `artifacts.py` | Worker staging, compressed archive segments and verified streams |
+| `queries.py` | Bounded graph, state, intent, receipt and accounting reads |
+| `transaction.py` | Artifact registration and atomic graph/state applications |
+| `ledger.py` | Reservations, dispatch, receipts, cumulative usage and recovery actions |
+| `integrity.py` | Agreement between saved records and indexes, iterative cycle checks |
+| `service.py` | Writer lock, sessions, publication, receipt seals and structural recovery |
+
+`create(directory)` requires a new directory and returns an active `RunWriter`.
+Publish the input/configuration artifacts and call `tx.freeze(FrozenRun(...))`
+before adding nodes or work. `FrozenRun` contains the environment **hash**, two
+artifact references and optional parent run/revision. It cannot be replaced.
+`claim_writer(directory)` acquires the exclusive run lock, checks the current
+schema and storage integrity, reconciles archive files and starts a new session.
+It does not call higher-level semantic validators or decide retries.
+`open_reader(directory)` opens a read-only SQLite connection. WAL and FULL
+synchronization protect commits; handles reject use in another process/thread.
+
+The controller owns `writer.transaction(writer.session)`. It never passes SQL
+connections to workers or domain services. Operations use savepoints, so catching
+a failed operation cannot commit its partial effects. `Changes` commits node
+updates, versioned artifact pointers, counters, roots and downstream intents as
+one application. It checks owner generations, node/record revisions, expected
+counter values and graph revision. An exact application replay is a no-op;
+reusing its key for different effects or another receipt fails. The mutable-state
+revision advances for state/ledger changes, not standalone immutable artifacts.
+
+Proof nodes are stored individually, with indexed selected dependencies and
+immutable node history. Updates check current dependency bindings, direct
+consumers and cycles without decoding the whole history. **Callers must first
+validate proof authority through domain/checker/strategy.** Constructing a stored
+node, publishing an artifact or retaining a successful worker receipt does not
+perform a Lean check. Historical semantic revalidation remains with the owning
+services. Structural recovery uses streamed records and disk-backed temporary
+degree tables, including for deep dependency graphs.
+
+Versioned `(scope, key)` artifact pointers cover frozen model/script inputs,
+submissions, drafts, memory, helper/archive indexes, guidance and repair state.
+Counters retain explicit allowance changes. The controller chooses these scopes
+and maps service proposals to storage values; storage does not interpret their
+policy or schemas. A `None` pointer removes the current value while preserving
+earlier revisions. Probe progress is stored separately by original invocation
+and sequence, with exact duplicate checks and artifact foreign keys.
+
+`reserve` saves the exact `FrozenRequest`, reservation artifact, resource bounds
+and original invocation. The controller evaluates policy against current reads
+inside the transaction and supplies `expected_revision`; storage also rechecks
+owners, prerequisites and readiness. Dispatch is recorded before external I/O.
+Model invocations retain one turn each, cumulative usage and separate unknown
+counts. Repeated usage reports are idempotent; conflicting or decreasing reports
+and integer overflow fail atomically. Provider request IDs identify one original
+invocation. Late correlated usage can update that invocation after retirement,
+recovery or retry without granting it current proof authority.
+
+Workers receive an `ArtifactAccess` allowlist and a private `Staging` capability.
+Staging enforces byte/item quotas and one writer thread. Small staged values stay
+in memory; large values use raw private files. Publication copies and verifies
+them into storage-owned archives. Up to **16 KiB** stays inline in SQLite;
+larger artifacts use independent **4 MiB** chunks, compressed only when smaller.
+Segments rotate at artifact boundaries after a **256 MiB** target; a single
+larger artifact remains streamed. Artifact identities are content-derived unless
+an explicit reference is supplied. No source/proof/evidence JSON operations occur.
+
+`publish`/`publish_staged` return `Durable` values after file synchronization.
+`tx.register` then commits their metadata, possibly with the referencing effects.
+Recovery validates committed placements before truncating unpublished tails or
+removing orphan segments/staging. Unreferenced interior segment bytes are retained;
+there is no compaction or deletion of committed artifacts. Every read verifies
+lengths and hashes. Unchanged filesystem stamps can reuse archive integrity checks
+on reopen; `force_artifacts=True` forces rehashing. This cache does not admit
+semantic receipts. Executor workspace retirement remains coordinated by the
+controller after confirmed process termination and artifact publication.
+
+The receipt flow is explicit:
+
+```python
+published = tuple(writer.publish_staged(staging, ref)
+                  for ref in result.staged_artifacts)
+with writer.transaction(writer.session) as tx:
+    for durable in published:
+        tx.register(durable)
+
+receipt = writer.seal_result(invocation, result)
+with writer.transaction(writer.session) as tx:
+    tx.receive(invocation, result, receipt)
+
+# Invoke the owning semantic validator, using writer as ReceiptVerifier.
+# Convert its admitted effects to a storage Changes value.
+with writer.transaction(writer.session) as tx:
+    tx.apply(application_key, changes, receipt=receipt)
+```
+
+Seals bind the original run/session, invocation, request, reservation and exact
+binary worker result with a private run key. Checker, provider and search already
+use that result encoding. `verify_receipt` requires the matching committed receipt.
+`result` reconstructs a saved worker result for normal semantic admission on resume.
+`adopt_receipt` transfers application authority to the new session while keeping
+the original invocation and charge. Prepared work can release its reservation;
+dispatched work becomes UNKNOWN in bounded `reconcile` batches and retains its
+charge/capacity. Retry and termination reconciliation require explicit controller
+decisions. A not-sent receipt refunds a model turn only with confirmed termination
+and no contradictory usage. Receiving a result never selects a proof.
+
+Read pages cap at **1,000** rows and use key cursors. `work_snapshot` reads explicit
+owners and state keys consistently. `snapshot()` pins a consistent parent
+checkpoint for paginated fork reads; `copy_artifact` streams authorized bytes to
+the child. Fork selection and evidence compatibility remain domain/application
+decisions. Status uses maintained counts and totals, with immutable cached views
+invalidated by local writes or external SQLite commits. Accounting exposes known
+usage, unknown counts, held bounds and active capacity separately; policy owns
+budget interpretation, prices and retained-worker accounting.
+
+Validation: **44 storage tests and 96 adjacent domain/policy tests passed**.
+Storage coverage includes interrupted publication and commits, truncation and
+corruption, session fencing, uncertain dispatch, cumulative/late usage, receipt
+adoption, graph retirement, a 1,100-level dependency chain, paging and live reader
+invalidation. No Lean, live provider or external integration was run.
+
+Seven alternating benchmark samples measured new/v2 median ratios of
+**0.992–1.004** for small inline writes, **0.902–0.960** for 64 KiB/1 MiB writes,
+**0.096–0.958** for reads, **0.130/0.942** for small/1 MiB staging, and **0.814**
+for a complete task lifecycle. Repeated status reads measured **0.224–0.303**.
+Inline writes are effectively at parity within filesystem timing variability.
+The new lifecycle batches intent/reservation and receipt/effect commits; the v2
+comparison uses its public task API. These are local storage measurements, not
+formalization throughput. A separate 5 MB publication/read check disabled JSON
+library operations throughout.
+
+Validation and local benchmark commands (run from `new/`):
+
+```sh
+python3 -B -m unittest tests.test_storage -v
+python3 -B -m tests.benchmark_storage
+```
 
 ## Strategy
 
@@ -98,8 +352,8 @@ their referenced jobs are admitted. Recall/page requests require advertised
 result IDs/cursors, use tools' scoped indexed reads and preserve duplicate delivery
 keys. A duplicate page resumes the turn without replaying its content.
 
-Every `Changes` value carries expected versions. The future controller/storage
-layer must publish proposed artifacts, reserve candidate/helper allowances, dedupe
+Every `Changes` value carries expected versions. The controller must use storage
+to publish proposed artifacts, reserve candidate/helper allowances, dedupe
 the original receipt application, recheck versions and commit all effects and
 downstream intents together. `AttemptDecision` closes one candidate reservation;
 policy charges only mathematical success/rejection. Resource/protocol revision
@@ -500,8 +754,8 @@ iteratively, including deep graphs and shared subproofs.
 Domain functions consume values and propose new values. They do not open files,
 execute SQL, schedule work, invoke Lean, contact providers, or render source.
 SQL, receipt fetching, transaction handling, and allowance settlement formerly
-inside `proof_state` and `joint_targets` belong to the future storage/controller
-components. File reading formerly in `submission` likewise belongs to callers.
+inside `proof_state` and `joint_targets` belong to storage and its controller
+integration. File reading formerly in `submission` likewise belongs to callers.
 
 Environment admission belongs to the environment service. It supplies an admitted
 `env_…` hash and explicit authorized source bindings (`SelectionInputs`); manifests,
@@ -804,9 +1058,9 @@ The callable receives only its `FrozenRequest` and `WorkerContext`. The context
 has the supplied artifact reader/private staging interfaces, a private workspace,
 cancellation, deadline, bounded progress, `run_process`, and `run_import`; it has
 no controller or submission method. Recursive dispatch and use of a context from
-another thread are rejected. The future storage component supplies the actual
-read/staging capabilities and owns publication and workspace cleanup. Completed
-workspace files survive executor shutdown for publication or recovery.
+another thread are rejected. Storage supplies the actual read/staging capabilities
+and owns publication and staging cleanup. Completed workspace files survive
+executor shutdown for controller-coordinated publication, recovery and retirement.
 
 `LaunchSpec` describes argv, explicit mounts, process environment variables, and
 the admitted bubblewrap executable/hash. It does not contain an Environment,
@@ -899,7 +1153,7 @@ These replace environment ownership in `environment`, `toolchains`, `packaging`,
 `dependency_admission`, `dependency_modules`, `dependency_compiler`,
 `verification_config`, and `leaneval_admission`. They do not import v2.
 Run bindings, artifact publication and run-cache retirement from `problem` and
-`shared_package` belong to the future storage/application components. Checker
+`shared_package` belong to storage/application integration. Checker
 resource compilation and proof receipt admission belong to checker. Lake's
 freshness/hash gates, workspace layout, kernel comparison and final LeanEval
 acceptance belong to checker/export; provenance or successful source replay alone

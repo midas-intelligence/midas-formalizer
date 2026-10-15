@@ -47,6 +47,7 @@ class Completion:
     result: WorkerResult
     detail: str = ''
     retained_worker_id: str | None = None
+    progress_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +333,7 @@ class Executor:
             # The callable has returned. No context operation can start afterward.
             context._active = False
             if (self._closed or context.cancellation.is_set() or detail or
+                    valid_result is not None and result.termination != Termination.TERMINATED or
                     context._termination != Termination.TERMINATED):
                 context._discard()
             retained_id = None
@@ -343,12 +345,26 @@ class Executor:
                     self._retained[worker.id] = worker
                     retained_id = worker.id
                     context._retained = None
-            result = replace(result, termination=context._termination)
+            # Transport-owned processes can be uncertain independently of the
+            # subprocesses observed through WorkerContext. Neither clears the other.
+            termination = context._termination if valid_result is None else (
+                Termination.TERMINATED if result.termination == context._termination == Termination.TERMINATED
+                else Termination.UNKNOWN)
+            result = replace(result, termination=termination)
             if result.termination != Termination.TERMINATED:
                 # An unknown process tree is never turned into free capacity.
                 # Recovery must reconcile OS ownership before a new executor.
                 self._unconfirmed[invocation.original_execution_id] = context
-            return Completion(invocation, result, detail, retained_id)
+            return Completion(invocation, result, detail, retained_id, context._sequence)
+
+    def reconcile_termination(self, invocation_id, termination):
+        """Owning recovery coordinator supplies independently observed OS exit."""
+        if termination != Termination.TERMINATED:
+            raise ValueError('Reconciliation requires observed termination')
+        with self._lock:
+            if invocation_id in self._entries:
+                raise ValueError('Poll completion before reconciling termination')
+            return self._unconfirmed.pop(invocation_id, None) is not None
 
     def poll(self):
         with self._lock:

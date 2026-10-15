@@ -442,8 +442,10 @@ class Policy:
 
     def admit(self, request: AdmissionRequest, run: RunUsage, owner: OwnerUsage,
               capacity: Capacity, services: Services, *, now_ms=0,
-              backlog_state: BacklogState = BacklogState()) -> Decision:
+              backlog_state: BacklogState = BacklogState(), reserved_allowances=False) -> Decision:
         natural(now_ms, 'now_ms')
+        if type(reserved_allowances) is not bool:
+            raise DomainError('Invalid allowance reservation flag')
         job, limits = request.job, self.config.scheduling
         if run.elapsed_ms >= self.config.run.runtime_ms:
             return Decision('run_deadline')
@@ -451,11 +453,11 @@ class Policy:
             return Decision('lifetime_intent_allowance_exhausted')
         if not request.dependencies_ready:
             return Decision('waiting_dependency')
-        if request.candidate_mode:
+        if request.candidate_mode and not reserved_allowances:
             decision = self.candidate(request.candidate_mode, owner)
             if not decision.allowed:
                 return decision
-        if request.helper:
+        if request.helper and not reserved_allowances:
             decision = self.helper(request.helper, owner, services, units=request.helper_units)
             if not decision.allowed:
                 return decision

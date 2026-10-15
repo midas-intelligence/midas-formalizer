@@ -36,7 +36,7 @@ def invocation(*, kind=JobKind.CHECK_PROOF, limits=None):
 
 def success(request, context):
     return WorkerResult(context.invocation_id, request.request_hash, ResultStatus.SUCCEEDED,
-                        (), None, None, Usage(0, 0, 0, 0), DeliveryCertainty.DELIVERED, Termination.UNKNOWN)
+                        (), None, None, Usage(0, 0, 0, 0), DeliveryCertainty.DELIVERED, Termination.TERMINATED)
 
 
 def recipe(source=b'first', *, launch=None):
@@ -246,6 +246,17 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(done.result.termination, Termination.TERMINATED)
         with self.assertRaises(WorkerStopped):
             seen[0][1].check()
+
+    def test_explicit_transport_uncertainty_survives_callable_return(self):
+        inv = self.start(lambda request, context: replace(success(request, context), termination=Termination.UNKNOWN),
+                         inv=invocation(kind=JobKind.MODEL))
+        done, = self.complete()
+        self.assertEqual(done.result.termination, Termination.UNKNOWN)
+        self.assertIn(inv.original_execution_id, self.executor.state().unconfirmed)
+        with self.assertRaises(ValueError):
+            self.executor.reconcile_termination(inv.original_execution_id, Termination.UNKNOWN)
+        self.assertTrue(self.executor.reconcile_termination(inv.original_execution_id, Termination.TERMINATED))
+        self.assertFalse(self.executor.state().unconfirmed)
 
     def test_capacity_grant_matches_full_invocation(self):
         inv = invocation()
