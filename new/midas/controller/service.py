@@ -601,7 +601,7 @@ class Controller:
         finally:
             self._stepping = False
 
-    def run(self, progress, *, poll_interval=.01):
+    def run(self, progress, *, poll_interval=.01, observe=None):
         """Use the application's current root/export projection for completion."""
         if not 0 < poll_interval <= 1:
             raise ValueError('Invalid poll interval')
@@ -621,6 +621,8 @@ class Controller:
                 stopped=self._stop.is_set(), active=state.running+state.pending_completions+len(self._completed),
                 recovery_required=view.recovery_required or bool(state.unconfirmed) or self.writer.recovery_pending())
             completion = self.policy.completion(view)
+            if observe is not None:
+                observe(view, completion)
             if completion.exit_code is not None:
                 if not self.drain(timeout=0):
                     return self.policy.completion(replace(view, recovery_required=True))

@@ -26,9 +26,9 @@ class Verification:
         return 0 if self.verified else 1
 
 
-def verify(application, directory, *, package, config=Config()):
+def verify(application, directory, *, package, config=Config(), cancellation=None):
     environment = application.environment(package)
-    checker = preparation.ready(application.checker_factory(environment, application.cache))
+    checker = preparation.ready(application.checker_factory(environment, application.cache), cancellation=cancellation)
     bundle, source = read_bundle(directory, maximum=config.export.max_bytes)
     request = Export(checker).prepare_recheck(bundle, source)
     value = request.decode()
@@ -57,6 +57,8 @@ def verify(application, directory, *, package, config=Config()):
                     request.payload, tuple(r.unref([x['id'], x['sha256'], x['bytes']]) for x in value['inputs']),
                     (owner,), limits, ['verify']))
                 def progress(reader):
+                    if cancellation is not None and cancellation.is_set():
+                        controller.request_stop()
                     return Progress(1, ready=int(r.value(reader, r.SCOPE, 'verification') is None))
                 try:
                     completion = controller.run(progress)
@@ -70,7 +72,7 @@ def verify(application, directory, *, package, config=Config()):
                         controller.drain(timeout=5)
 
 
-def cache_probe(application, directory, *, config):
+def cache_probe(application, directory, *, config, cancellation=None):
     """Explicit diagnostic only; never invoked by formalization or preflight."""
     route = Route.from_config(config.prover)
     if route.transport == 'codex':
@@ -120,6 +122,8 @@ def cache_probe(application, directory, *, config):
                 output.outcome.cache_write_tokens if output else None, invocation.original_execution_id])
             return r.record(reader, r.SCOPE, 'cache-results', rows)
         def progress(reader):
+            if cancellation is not None and cancellation.is_set():
+                controller.request_stop()
             rows = r.value(reader, r.SCOPE, 'cache-results') or []
             return Progress(1, ready=int(len(rows) < 4 and not (rows and rows[-1][0])))
         with Executor(writer.directory, workers=1, compiler_slots=1,

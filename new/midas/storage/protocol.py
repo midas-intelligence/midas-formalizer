@@ -73,6 +73,15 @@ class SavedNode:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeSummary:
+    owner: OwnerVersion
+    revision: int
+    state: str
+    interface: ArtifactRef
+    target: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class NodeChange:
     expected: NodeVersion | None
     node: ProofNode

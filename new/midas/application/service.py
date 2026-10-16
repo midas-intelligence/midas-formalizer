@@ -1,7 +1,7 @@
 """Command workflows and concrete service ownership; the controller owns all run work."""
-from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+import time
 
 from ..checker import Checker
 from ..controller import Controller, Effect, artifact
@@ -11,20 +11,14 @@ from ..domain import encoding as codec
 from ..environment import Environment
 from ..executor import Executor
 from ..export import Export
-from ..policy import Completion, Config, Policy, Progress, Stage, load_config
-from ..storage import (Changes, FrozenRun, NodeChange, Status, claim_writer, create, open_reader)
+from ..policy import Config, Policy, load_config
+from ..storage import (Changes, FrozenRun, NodeChange, claim_writer, create, open_reader)
 from ..strategy import Context, Subject
 from ..tools import SearchService
 from . import candidates, preparation, providers, records as r
 from .workflow import Workflow
-
-
-@dataclass(frozen=True, slots=True)
-class Inspection:
-    run_id: str
-    workflow: str
-    status: Status
-    completion: Completion
+from .inspection import Inspector
+from ..status import project
 
 
 class Run:
@@ -38,8 +32,17 @@ class Run:
     def step(self):
         return self.controller.step()
 
-    def run(self, *, poll_interval=.01):
-        result = self.controller.run(self.workflow.progress, poll_interval=poll_interval)
+    def run(self, *, poll_interval=.01, observe=None):
+        next_update = 0
+        def publish(progress, completion):
+            nonlocal next_update
+            now = time.monotonic()
+            if observe is not None and (completion.exit_code is not None or now >= next_update):
+                next_update = now+1
+                observe(project(self.writer, self.workflow.policy, workflow=self.workflow.mode,
+                                progress=progress, completion=completion))
+        result = self.controller.run(self.workflow.progress, poll_interval=poll_interval,
+                                     observe=publish if observe is not None else None)
         commit(self.writer, 'completion:'+str(uuid4()), r.record(self.writer, r.SCOPE, 'completion',
             [self.writer.status_snapshot().revision, result.proof_state, result.integration_state.value,
              result.export_verification_state.value, result.outcome, list(result.reasons), result.exit_code]))
@@ -111,11 +114,12 @@ def commit(writer, key, effect, *, frozen=None):
 
 
 class Application:
-    def __init__(self, cache_directory, *, transports=None, checker_factory=Checker, search_factory=SearchService):
+    def __init__(self, cache_directory, *, transports=None, codex=None, checker_factory=Checker, search_factory=SearchService):
         self.cache = Path(cache_directory).absolute()
         self.transports = transports
+        self.codex = codex
         self.checker_factory, self.search_factory = checker_factory, search_factory
-        self._inspections = {}
+        self._inspector = Inspector()
 
     package = staticmethod(preparation.package)
 
@@ -130,11 +134,6 @@ class Application:
     def select(self, package, request, **options):
         environment = self.environment(package)
         return preparation.select(self.checker_factory(environment, self.cache), request, **options)
-
-    targets = select
-
-    def preflight(self, package, request, **options):
-        return self.select(package, request, **options)
 
     def start(self, directory, *, package, selection, config=Config(), workflow='live',
               script=(), instructions=(), library=None, library_reader=None, _lineage=None):
@@ -214,7 +213,7 @@ class Application:
     def _build(self, writer, environment, checker, selection, config, inputs, *, library=None,
                export_only=False, allow_sorry=False):
         script = providers.Script(writer) if inputs.workflow == 'scripted' and not export_only else None
-        provider = providers.construct(config, transports=self.transports, script=script) if inputs.workflow != 'supplied' and not export_only else None
+        provider = providers.construct(config, transports=self.transports, script=script, codex=self.codex) if inputs.workflow != 'supplied' and not export_only else None
         instructions = tuple((role, r.read(writer, ref, 16384)) for role, ref in inputs.instructions)
         search = self.search_factory() if provider else None
         if search is not None and hasattr(environment.manifest, 'inventory') and search.index is None:
@@ -236,7 +235,7 @@ class Application:
             raise
 
     def resume(self, directory, *, package=None, toolchain=None, increases=None,
-               export_only=False, allow_sorry=False):
+               export_only=False, allow_sorry=False, cancellation=None):
         writer = claim_writer(directory)
         try:
             frozen = writer.frozen_run()
@@ -250,7 +249,7 @@ class Application:
             configuration = writer.record(r.SCOPE, 'configuration')
             config = load_config(r.read(writer, configuration.artifact if configuration else frozen.configuration, 16384))
             checker = self.checker_factory(environment, self.cache)
-            preparation.ready(checker)
+            preparation.ready(checker, cancellation=cancellation)
             if increases:
                 config = config.increase(increases)
                 commit(writer, 'increase:'+str(uuid4()), r.save(writer, r.SCOPE, 'configuration', config.encode()))
@@ -339,39 +338,7 @@ class Application:
                 raise ValueError('Saved export differs from admitted evidence')
 
     def inspect(self, directory):
-        with open_reader(directory) as reader, reader.snapshot():
-            status = reader.status_snapshot()
-            cache_key = reader.run_id, status.revision
-            if cache_key in self._inspections:
-                return self._inspections[cache_key]
-            frozen = reader.frozen_run()
-            inputs = r.Inputs.load(r.read(reader, frozen.inputs))
-            configured = reader.record(r.SCOPE, 'configuration')
-            policy = Policy(load_config(r.read(reader, configured.artifact if configured else frozen.configuration, 16384)))
-            roots = tuple(reader.node(key).node for _, key in reader.roots(limit=1000))
-            counts = dict(status.intents)
-            stages = []
-            allow_sorry = False
-            for name in ('integration', 'verification'):
-                saved = r.value(reader, 'application.export', name)
-                valid = saved and saved[0] == 'accepted' and saved[4] == status.graph_revision
-                allow_sorry |= bool(valid and saved[5])
-                stages.append(Stage.VERIFIED if valid else Stage.FAILED
-                    if saved and saved[0] == 'failed' and saved[-1] == status.graph_revision else Stage.PENDING)
-            progress = Progress(len(roots), sum(n.state == ProofState.VERIFIED for n in roots), *stages,
-                active=status.accounting.models+status.accounting.compilers+status.accounting.locals,
-                ready=counts.get('PENDING', 0), waiting=counts.get('RUNNING', 0),
-                stopped=bool(reader.counter('controller', 'stopped')), recovery_required=reader.recovery_pending(),
-                allow_sorry=allow_sorry)
-            completion = policy.completion(progress)
-            saved = r.value(reader, r.SCOPE, 'completion')
-            if saved and saved[0]+1 == status.revision:
-                completion = Completion(saved[1], Stage(saved[2]), Stage(saved[3]), saved[4], tuple(saved[5]), saved[6])
-            result = Inspection(reader.run_id, inputs.workflow, status, completion)
-            self._inspections[cache_key] = result
-            while len(self._inspections) > 8:
-                self._inspections.pop(next(iter(self._inspections)))
-            return result
+        return self._inspector.inspect(directory)
 
     def nodes(self, directory, *, after='', limit=100, state=None):
         with open_reader(directory) as reader:
@@ -389,13 +356,13 @@ class Application:
                 run.materialize(destination)
             return completion
 
-    def verify(self, directory, *, package, config=Config()):
+    def verify(self, directory, *, package, config=Config(), cancellation=None):
         from .diagnostics import verify
-        return verify(self, directory, package=package, config=config)
+        return verify(self, directory, package=package, config=config, cancellation=cancellation)
 
-    def cache_probe(self, directory, *, config):
+    def cache_probe(self, directory, *, config, cancellation=None):
         from .diagnostics import cache_probe
-        return cache_probe(self, directory, config=config)
+        return cache_probe(self, directory, config=config, cancellation=cancellation)
 
     def fork(self, parent, directory, *, config=None, package=None, workflow=None, script=None):
         from .forking import fork

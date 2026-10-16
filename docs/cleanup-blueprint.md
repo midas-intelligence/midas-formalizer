@@ -793,7 +793,7 @@ checks; it does not mutate the parent or make ordinary resume reset its budgets.
 
 ## Status application and CLI
 
-Status is a read interface. Live display, `inspect`, node queries, and exit
+Status is a read interface. Live display, `status`, node queries, and exit
 classification use the same projection and reason definitions. Temporary counters
 and optimized SQL belong inside storage; the status formatter consumes values.
 
@@ -811,7 +811,7 @@ def read_status(reader, transient_workers=None):
 class Application:
     def execute(self, command):
         match command:
-            Targets() | Select() | Preflight():
+            Select():
                 return inspect_with_environment_and_checker(command)
             Package():
                 return environment.prepare(command.config, executor)
@@ -825,7 +825,7 @@ class Application:
                 return submit_through_current_owner_and_common_candidate_admission(command)
             Fork():
                 return fork_run(command.parent, command.request)
-            Inspect() | Nodes():
+            Status():
                 return status.read_or_query(storage.open_reader(command.directory), command)
             Export() | Verify():
                 return run_bounded_model_free_export_command(command)
@@ -843,6 +843,12 @@ def cli_main(argv):
 does not require credentials, a provider, a compiler, or a write session. Start
 and resume share controller construction; scripted mode supplies a deterministic
 provider implementation, and supplied-candidate mode enables no model work.
+
+The implemented CLI consolidates `targets`/`select`/`preflight` as `select`, and
+`inspect`/`nodes` as `status` with node-query options. `export` replaces `finalize`;
+`verify` retains its independent bundle-audit meaning. Library attachment is
+`package --base`. Legacy command names are not aliases. See `new/README.md` for
+the current arguments, bounded output protocol and examples.
 No command bypasses the run lock or writes to an active controller's SQLite
 connection. Admission happens through the current owner, or through an exclusively
 claimed writer when the command is authorized to open the run itself.

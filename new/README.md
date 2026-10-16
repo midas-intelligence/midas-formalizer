@@ -1,4 +1,4 @@
-# Clean Midas: domain through application
+# Clean Midas: domain through CLI
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -48,8 +48,128 @@ verification and exact-file publication. LeanEval remains separate work for a
 wrapper around `cli`; it is not an export profile or a second controller loop.
 
 `midas/application` constructs these services and implements the complete run
-workflow. CLI argument handling and dedicated status presentation remain separate
-components.
+workflow. `midas/status` owns committed views, node queries and presentation;
+`midas/cli` owns arguments, signals, stop IPC, output routing and exit handling.
+
+## Status and CLI
+
+Run the new entry point from `new/`:
+
+```sh
+../.venv/bin/python -B -m midas --help
+```
+
+The command set has one name per operation. Old names are not aliases:
+
+| v2 commands | New command |
+| --- | --- |
+| `targets`, `select`, `preflight` | `select PACKAGE --source Main.lean [--target NAME] [--output selection.bin]` |
+| `inspect`, `nodes` | `status RUN [--nodes | --owner ID]` |
+| `finalize` | `export RUN OUTPUT` |
+| `attach-library` | `package OUTPUT --base PACKAGE --config attachment.json` |
+| `start`, `resume`, `submit`, `fork`, `stop`, `artifact`, `verify` | Retained operations, using positional directories |
+
+`select` checks the package source and defaults to all unfinished targets when no
+names are supplied. `start` requires explicit `--target`/`--all-unfinished` with
+`--source`, or a saved binary `--selection`. `verify BUNDLE --package PACKAGE`
+independently checks a published bundle. `cache-probe RUN --config CONFIG` is the
+explicit four-call Responses diagnostic.
+
+```sh
+../.venv/bin/python -B -m midas select package --source Main.lean --output selection.bin
+../.venv/bin/python -B -m midas start run --package package --selection selection.bin --config config.json
+../.venv/bin/python -B -m midas status run
+../.venv/bin/python -B -m midas status run --nodes --state UNRESOLVED --limit 100 --json
+../.venv/bin/python -B -m midas stop run
+../.venv/bin/python -B -m midas resume run --raise-limits increase.json
+../.venv/bin/python -B -m midas export run export
+../.venv/bin/python -B -m midas verify export --package package
+```
+
+Live is the default workflow. `start --script manifest.json` selects scripted
+execution; `start --candidates candidate.bin` selects supplied execution. Both
+use the existing application/controller pipeline. `--workflow supplied` creates
+an unresolved run for later `submit RUN --candidates candidate.bin`; an unresolved
+idle run exits 1. `fork PARENT CHILD` creates a checkpoint; `resume CHILD` continues
+it. `--output DIR` on start/resume/submit publishes a successful verified bundle.
+`export --allow-sorry` explicitly permits incomplete proofs and keeps their proof
+state incomplete.
+
+`--config` reads the existing policy format. Responses credentials come from the
+configured environment variable. App-server routes require `--codex /path/to/codex`;
+the executable is resolved and hashed before dispatch. PATH, HOME and CODEX_HOME
+are passed to it; additional required variable names use repeatable `--codex-env`.
+Credential values are not written to run artifacts. `--instructions ROLE=FILE`
+accepts prover, reviewer and researcher instruction files, each at most 16 KiB.
+
+A script is a **16 KiB maximum** ordinary JSON manifest pointing to raw reply files:
+
+```json
+[{"role": "prover", "file": "reply.txt"}, {"role": "reviewer", "file": "review.txt"}]
+```
+
+Paths resolve relative to the manifest. Roles are prover, reviewer and research;
+there are at most 512 replies, each at most 4 MiB, and 64 MiB combined. Replies,
+candidate submissions, saved selections, source and evidence remain binary/raw
+payloads and never pass through CLI JSON serialization.
+
+`package OUTPUT --config package.json` accepts this small configuration. Paths
+resolve relative to its file; the package stores the environment once:
+
+```json
+{
+  "version": "4.35.0-rc3",
+  "toolchain": "/absolute/path/to/toolchain",
+  "roots": {"project": "project"},
+  "project_inputs": ["project/Main.lean"],
+  "search_paths": ["project", "toolchain/lib/lean"]
+}
+```
+
+Optional fields are `max_bytes` and `preflight_imports`. With `--base`, the config
+instead contains `name`, `path`, `module_paths`, `source_roots` and `prefixes` for
+the library being attached. Existing environment admission performs the checks.
+
+Status reads only committed storage and bounded application metadata. It does not
+construct compilers, providers, credentials or a writer, and node summaries read
+indexed columns without decoding proof history. `--owner ID` adds the owner's
+reason and artifact references; use `artifact RUN ID --output FILE` to stream and
+verify a payload. Output files are published only after verification and never
+replace existing files.
+
+Node filters are `--state`, `--roots`, `--owner`, `--after` and `--limit` (1–1000).
+Each page holds one database snapshot and returns its revision and next exclusive
+ID cursor. A subsequent page reads current state; its revision lets callers detect
+intervening changes. `--json` emits one bounded JSON record per line, including a
+page record after node rows. Each JSON operation is capped at 16 KiB. Long summary
+reasons are explicitly marked `reasons_truncated`; single-owner details preserve
+the saved reason. Unknown usage remains null, with known totals and unknown-report
+counts shown separately.
+
+Run progress uses the same status projection, is throttled to once per second,
+and goes to stderr. A single pending frame is replaced when output is slow;
+a blocked or broken progress sink cannot delay controller admission or draining.
+`--quiet` suppresses progress. Final output goes to stdout. Status/query success
+exits 0; run results retain policy exit codes (0 verified, 1 incomplete/blocked,
+2 setup/recovery error, 130 cooperative stop). SIGINT, SIGTERM and `stop` request
+controller cancellation/draining. Stop IPC checks the peer UID and exact run,
+session and epoch; it never signals an arbitrary PID.
+
+Validation on 2026-10-16: **460 offline regression tests and 17 focused status/CLI
+checks passed**. Real Lean 4.35.0-rc3/bubblewrap CLI checks passed package,
+selection, supplied/scripted execution, status, authenticated resume, fork reuse,
+complete and partial exports, and independent verification. No live model calls
+were made. Seven alternating timing medians measured new/v2 ratios of **0.729**
+for warm committed status reads and **0.920** for parser construction/argument
+handling. These are local command costs, not complete Lean/model throughput.
+
+```sh
+# From new/. The CLI tests need permission for local Unix sockets in this sandbox.
+../.venv/bin/python -B -m unittest tests.test_status tests.test_cli -q
+../.venv/bin/python -B -m tests.benchmark_status_cli
+# Requires permission for Lean/bubblewrap under the root AGENTS.md:
+../.venv/bin/python -B -m tests.check_cli_lean /absolute/path/to/toolchain/bin/lean
+```
 
 ## Application
 
@@ -89,7 +209,7 @@ nodes = app.nodes('run', limit=100)  # cursor: after=last.node.owner.obligation_
 ```
 
 `package(destination, PackageConfig(...))` prepares a frozen environment;
-`select`, `targets` and `preflight` return checked frozen selections. Start accepts
+`select` returns checked frozen selections. Start accepts
 either a selection request or an existing `FrozenSelection`. The package locator
 lives once in the frozen inputs; jobs, contexts and receipts carry the environment
 hash. Source inventories remain behind an explicit source-reader capability.

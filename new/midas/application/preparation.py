@@ -65,10 +65,11 @@ def select(checker, request, *, limits=DEFAULT_LIMITS, cancellation=None):
     return operate(lambda context: checker.inspect(request, context), limits=limits, cancellation=cancellation)
 
 
-def ready(checker, *, limits=DEFAULT_LIMITS):
+def ready(checker, *, limits=DEFAULT_LIMITS, cancellation=None):
     if checker.runtime is None:
         from ..checker.runtime import prepare_runtime
-        checker.runtime = operate(lambda context: prepare_runtime(checker.environment, context, checker.cache), limits=limits)
+        checker.runtime = operate(lambda context: prepare_runtime(checker.environment, context, checker.cache),
+                                  limits=limits, cancellation=cancellation)
     return checker
 
 

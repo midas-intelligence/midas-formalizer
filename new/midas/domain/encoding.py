@@ -95,7 +95,14 @@ def load_json(payload, *, ascii=False, limit=JSON_LIMIT):
     return decoded[0] if decoded else json.loads(payload.decode('utf-8'))
 
 
-def _load_json(payload, *, ascii):
+def load_metadata(payload):
+    """Read ordinary small JSON documents with the same size/shape admission."""
+    if type(payload) is not bytes or not 0 < len(payload) <= JSON_LIMIT:
+        raise ValueError('JSON metadata exceeds byte limit or is empty')
+    return _load_json(payload, ascii=False, exact=False)
+
+
+def _load_json(payload, *, ascii, exact=True):
     def pairs(items):
         result = {}
         for key, value in items:
@@ -132,7 +139,8 @@ def _load_json(payload, *, ascii):
                 raise ValueError('Persisted input exceeds structural limits')
             children = item.values() if isinstance(item, dict) else item if isinstance(item, list) else ()
             pending.extend((child, depth + 1) for child in children)
-        if canonical(value, ascii=ascii) != payload:
+        normalized = canonical(value, ascii=ascii)
+        if exact and normalized != payload:
             raise ValueError('Noncanonical persisted JSON')
         return value
     except (UnicodeError, RecursionError) as error:

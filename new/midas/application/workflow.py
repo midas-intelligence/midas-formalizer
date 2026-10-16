@@ -10,10 +10,11 @@ from ..domain import (ArtifactRef, JobKind, OwnerVersion, ProofGraph, ProofState
     Signature, accept_assembly)
 from ..domain import encoding as codec
 from ..export import AdmittedStage, Request, current
-from ..policy import ExportUsage, Failure, Progress, RunUsage, Services, Stage
+from ..policy import ExportUsage, Failure, RunUsage, Services, Stage
 from ..prompt import Options, Section, Snapshot as Display, subject
 from ..provider import Limits, ModelRequest, Route
 from ..storage import Changes
+from ..status import progress as committed_progress
 from ..strategy import Attempt, Context, Dispatch, Draft, Memory, Snapshot, Strategy, Turn, Version
 from . import candidates, records as r
 
@@ -339,7 +340,6 @@ class Workflow:
         if self._progress_cache is not None and self._progress_cache[0] == revision:
             return self._progress_cache[1]
         graph = self.graph(reader)
-        roots = [n for n in graph.nodes if n.owner.obligation_id in graph.roots]
         states = []
         for name in ('integration', 'verification'):
             stage = self.stage(reader, name)
@@ -347,7 +347,6 @@ class Workflow:
             states.append(Stage.VERIFIED if stage and current(stage, self.selection, graph,
                 allow_sorry=self.allow_sorry) else Stage.FAILED if raw and raw[0] == 'failed' and raw[-1] == graph.revision
                 else Stage.PENDING)
-        counts = dict(reader.status_snapshot().intents)
         # Locally ready transitions also keep the controller alive between ticks.
         local = 0
         for node in graph.nodes:
@@ -355,8 +354,8 @@ class Workflow:
             if state.submission:
                 saved = candidates.submission(reader, state.submission)
                 local += int(saved['current'] is None and saved['phase'] not in ('done', 'failed'))
-        result = Progress(len(roots), sum(n.state == ProofState.VERIFIED for n in roots), *states,
-            ready=counts.get('PENDING', 0)+local, waiting=counts.get('RUNNING', 0), allow_sorry=self.allow_sorry)
+        result = committed_progress(reader, integration=states[0], verification=states[1],
+                                    local_ready=local, allow_sorry=self.allow_sorry)
         self._progress_cache = revision, result
         return result
 

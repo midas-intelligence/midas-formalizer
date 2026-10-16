@@ -7,7 +7,7 @@ from ..domain import ArtifactRef, Invocation, OwnerVersion, ReceiptBinding, Sess
 from ..domain.records import natural, uuid
 from . import codec
 from .artifacts import ArtifactError, stream_file
-from .protocol import (Accounting, Conflict, ExecutionState, FrozenRun, Intent, NodeVersion, SavedNode, SavedRecord,
+from .protocol import (Accounting, Conflict, ExecutionState, FrozenRun, Intent, NodeSummary, NodeVersion, SavedNode, SavedRecord,
                        Status, StorageError, WorkSnapshot, name, page_limit)
 
 
@@ -44,6 +44,12 @@ class RunReader:
     def _check(self):
         if self._db is None or os.getpid() != self._pid or threading.get_ident() != self._thread:
             raise StorageError('Storage handle is closed or belongs to another process/thread')
+
+    @property
+    def cache_identity(self):
+        """Location and database inode for revision-bound read projections."""
+        self._check()
+        return getattr(self, '_pool_key', None), self.run_id
 
     @contextmanager
     def snapshot(self):
@@ -118,6 +124,37 @@ class RunReader:
             node = codec.unnode(codec.unpack(payload))
             result.append(SavedNode(NodeVersion(node.owner, revision), node))
         return tuple(result)
+
+    def root_counts(self):
+        self._check()
+        return tuple(self._db.execute('''SELECT n.state,count(*) FROM roots r
+            JOIN nodes n ON n.id=r.owner GROUP BY n.state'''))
+
+    def current_session(self):
+        """The recorded owner, which may need recovery after a process crash."""
+        self._check()
+        row = self._db.execute("SELECT id,epoch FROM sessions WHERE state='ACTIVE'").fetchone()
+        return Session(self.run_id, *row) if row else None
+
+    def node_summaries(self, *, after='', limit=100, state=None, owner=None, roots=False):
+        """Read compact current columns, without decoding proof history/payloads."""
+        self._check()
+        page_limit(limit)
+        if state is not None and state not in ('UNRESOLVED', 'CONDITIONAL', 'VERIFIED'):
+            raise ValueError('Unknown proof state')
+        clauses, params = ['n.id>?'], [after]
+        for column, value in (('n.state', state), ('n.id', owner)):
+            if value is not None:
+                clauses.append(column+'=?')
+                params.append(value)
+        if roots:
+            clauses.append('r.ordinal IS NOT NULL')
+        rows = self._db.execute('''SELECT n.id,n.generation,n.revision,n.state,
+            a.id,a.digest,a.size,r.ordinal FROM nodes n JOIN artifacts a ON a.id=n.interface
+            LEFT JOIN roots r ON r.owner=n.id WHERE '''+' AND '.join(clauses)+
+            ' ORDER BY n.id LIMIT ?', (*params, limit))
+        return tuple(NodeSummary(OwnerVersion(*row[:2]), row[2], row[3],
+                                 ArtifactRef(*row[4:7]), row[7]) for row in rows)
 
     def nodes(self, *, after='', limit=100, state=None):
         self._check()

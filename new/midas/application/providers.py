@@ -35,7 +35,7 @@ class Script:
         return ScriptedTransport({request.wire.sha256: output})(request, raw, setup, cancel, deadline)
 
 
-def construct(config, *, transports=None, script=None, roles=('prover', 'reviewer', 'research')):
+def construct(config, *, transports=None, script=None, codex=None, roles=('prover', 'reviewer', 'research')):
     bindings = {}
     for role in roles:
         setting = getattr(config, role)
@@ -49,7 +49,23 @@ def construct(config, *, transports=None, script=None, roles=('prover', 'reviewe
         transport = script or (transports or {}).get(route.scope)
         if transport is None:
             if route.transport == 'codex':
-                raise ValueError('Supply a pinned CodexTransport for route '+route.scope)
-            transport = ResponsesTransport(BearerCredentials.from_environment(route))
+                if codex is None:
+                    raise ValueError('Supply --codex or a pinned CodexTransport for route '+route.scope)
+                transport = codex_transport(*codex)
+            else:
+                transport = ResponsesTransport(BearerCredentials.from_environment(route))
         bindings[route.scope] = route, transport
     return Provider(tuple(bindings.values()))
+
+
+def codex_transport(executable, environment_names):
+    from hashlib import file_digest
+    from pathlib import Path
+    import os
+    from ..provider import CodexTransport
+    executable = Path(executable).resolve(strict=True)
+    with executable.open('rb') as source:
+        digest = file_digest(source, 'sha256').hexdigest()
+    names = ('PATH', 'HOME', 'CODEX_HOME', *environment_names)
+    return CodexTransport((str(executable),), executable_sha256=digest, cwd=Path.cwd(),
+                          environment={key: os.environ[key] for key in names if key in os.environ})
