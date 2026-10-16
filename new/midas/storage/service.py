@@ -7,10 +7,11 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 from uuid import uuid4
 
 from ..domain import ArtifactRef, ReceiptBinding, Session
-from . import artifacts as archive, codec, schema
+from . import artifacts as archive, codec, schema, readers
 from .ledger import Transaction
 from .protocol import Conflict, RunLocked, StaleSession, StorageError, USAGE_FIELDS
 from .queries import RunReader
@@ -24,21 +25,29 @@ def _path(directory, *, create=False):
     return path
 
 
-def _connect(path, *, readonly):
-    fd = archive.regular(path / 'run.sqlite3', os.O_RDONLY)
-    os.close(fd)
+def _connect(path, *, readonly, with_key=False):
+    # Opening and closing the DB outside SQLite can release this process's
+    # existing POSIX locks, including a concurrent writer's WAL locks.
+    info = (path / 'run.sqlite3').lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise StorageError('Database must be a regular file')
     for suffix in ('-wal', '-shm'):
         sidecar = path / ('run.sqlite3'+suffix)
         if sidecar.exists() or sidecar.is_symlink():
-            fd = archive.regular(sidecar, os.O_RDONLY)
-            os.close(fd)
+            if not stat.S_ISREG(sidecar.lstat().st_mode):
+                raise StorageError('Database sidecar must be a regular file')
+    key = path, info.st_dev, info.st_ino
+    if readonly:
+        pooled = readers.take(key)
+        if pooled is not None:
+            return (pooled, key) if with_key else pooled
     db = sqlite3.connect((path / 'run.sqlite3').as_uri() + ('?mode=ro' if readonly else '?mode=rw'),
-                         uri=True, isolation_level=None, timeout=0)
+                         uri=True, isolation_level=None, timeout=0, check_same_thread=not readonly)
     db.execute('PRAGMA foreign_keys=ON')
     db.execute('PRAGMA temp_store=FILE')
     if readonly:
         db.execute('PRAGMA query_only=ON')
-    return db
+    return (db, key) if with_key else db
 
 
 def _header(db):
@@ -50,10 +59,15 @@ def _header(db):
 
 def open_reader(directory):
     path = _path(directory)
-    db = _connect(path, readonly=True)
+    db, key = _connect(path, readonly=True, with_key=True)
     try:
         _header(db)
-        return RunReader(path, db)
+        reader = RunReader(path, db)
+        info = (path/'run.sqlite3').lstat()
+        if (path, info.st_dev, info.st_ino) != key:
+            raise StorageError('Database changed while opening the reader')
+        reader._pool_key = key
+        return reader
     except BaseException:
         db.close()
         raise
@@ -218,17 +232,11 @@ class RunWriter(RunReader):
             raise Conflict('Receipt seal is invalid')
 
     def verify_receipt(self, receipt, invocation, result):
-        self._check()
-        try:
-            result.validate_for(invocation)
-            if self.invocation(invocation.original_execution_id) != invocation or self.receipt(invocation.original_execution_id) != receipt:
-                return False
-            self._verify_seal(receipt, invocation, result)
-            if self.read_artifact(receipt.result_ref, max_bytes=65536) != codec.worker_payload(result):
-                return False
-            return True
-        except (ValueError, KeyError, StorageError):
-            return False
+        return super().verify_receipt(receipt, invocation, result)
+
+    def import_receipt(self, parent, execution_id):
+        from .receipts import import_receipt
+        return import_receipt(self, parent, execution_id)
 
     def validate(self, *, force_artifacts=False):
         """Structural validation only. Owning services validate saved semantics."""
@@ -276,6 +284,9 @@ class RunWriter(RunReader):
             raise StorageError('Inconsistent execution lifecycle')
         from .integrity import validate_views
         validate_views(self)
+        for (key,) in self._db.execute('SELECT execution FROM imported_receipts'):
+            if not self.verify_receipt(self.receipt(key), self.invocation(key), self.result(key)):
+                raise StorageError('Invalid imported receipt')
         # Changed file stamps force a full bounded stream/hash check. Unchanged
         # stamps only cache storage integrity, never semantic receipt admission.
         for key, digest, size, inline in self._db.execute('SELECT id,digest,size,inline FROM artifacts WHERE inline IS NOT NULL'):

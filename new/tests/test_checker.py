@@ -121,6 +121,15 @@ class Contracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare_binding(self.selection, 0, self.owner, parameters=('h', 'h'))
 
+    def test_rebinding_requires_the_explicit_subject_generation_fence(self):
+        rebound = OwnerVersion('obl_'+'c'*64, 2)
+        request = prepare_binding(self.selection, 0, self.owner, subject_owner=rebound)
+        invocation = issue(request, self.artifacts)
+        with self.assertRaisesRegex(ValueError, 'not fenced'):
+            request.validate_for(invocation.request, self.artifacts)
+        job = replace(invocation.request.job, expected_versions=(self.owner, rebound))
+        request.validate_for(replace(invocation.request, job=job), self.artifacts)
+
     def test_dependency_identity_and_interface_are_both_checked(self):
         child = ObligationIdentity(codec.encode(['const', name('False'), []]), codec.encode([]),
                                    codec.encode(['closed-telescope']), self.selection.environment_id)

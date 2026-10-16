@@ -257,13 +257,36 @@ class RunReader:
         row = self._db.execute('''SELECT e.intent,e.session,s.epoch,e.reservation FROM executions e
             JOIN sessions s ON s.id=e.session WHERE e.id=?''', (execution_id,)).fetchone()
         if row is None:
+            from .receipts import imported
+            saved = imported(self, execution_id)
+            if saved:
+                return saved[0]
             raise KeyError(execution_id)
         return Invocation(execution_id, Session(self.run_id, row[1], row[2]), self.intent(row[0]).request, self.artifact(row[3]))
 
     def receipt(self, execution_id):
         self._check()
         row = self._db.execute('SELECT request,result,seal FROM receipts WHERE execution=?', (execution_id,)).fetchone()
-        return ReceiptBinding(execution_id, *(self.artifact(r) for r in row)) if row else None
+        if row:
+            return ReceiptBinding(execution_id, *(self.artifact(r) for r in row))
+        from .receipts import imported
+        saved = imported(self, execution_id)
+        return saved[1] if saved else None
+
+    def verify_receipt(self, receipt, invocation, result):
+        from .receipts import verify
+        return verify(self, receipt, invocation, result)
+
+    def artifacts(self, *, after='', limit=100):
+        self._check()
+        return tuple(ArtifactRef(*row) for row in self._db.execute(
+            'SELECT id,digest,size FROM artifacts WHERE id>? ORDER BY id LIMIT ?', (after, page_limit(limit))))
+
+    def receipt_ids(self, *, after='', limit=100):
+        self._check()
+        return tuple(row[0] for row in self._db.execute('''SELECT execution FROM receipts WHERE execution>?
+            UNION SELECT execution FROM imported_receipts WHERE execution>? ORDER BY execution LIMIT ?''',
+            (after, after, page_limit(limit))))
 
     def execution(self, execution_id):
         self._check()
@@ -313,7 +336,11 @@ class RunReader:
     def close(self):
         if self._db is not None:
             self._check()
-            self._db.close()
+            if getattr(self, '_pool_key', None) is not None:
+                from .readers import release
+                release(self._pool_key, self._db)
+            else:
+                self._db.close()
             self._db = None
 
     def __enter__(self):

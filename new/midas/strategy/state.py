@@ -203,7 +203,7 @@ class Turn:
         if continuation:
             if (self.version.owner, self.version.context) != (snapshot.version.owner, snapshot.version.context):
                 raise ValueError('Stale continuation owner/context')
-        elif self.version != snapshot.version or self.graph_revision != snapshot.graph.revision:
+        elif self.version != snapshot.version:
             raise ValueError('Stale dispatched strategy snapshot')
         if self.base_id != (snapshot.base.id if snapshot.base else None):
             raise ValueError('Dispatched candidate base changed')

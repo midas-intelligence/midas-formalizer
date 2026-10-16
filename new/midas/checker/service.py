@@ -350,7 +350,10 @@ class Checker:
                         and r.byte_count == len(interface)]
             if not matching or read(reader, matching[0]) != interface:
                 raise ValueError('Missing checked binding interface')
-            admitted = AdmittedBinding(OwnerVersion(identity.id, value['owner'][1]), value['environment'], matching[0], receipt)
+            owner = OwnerVersion(*packet['bound_owner']) if packet.get('bound_owner') else OwnerVersion(identity.id, value['owner'][1])
+            if owner.obligation_id != identity.id:
+                raise ValueError('Rebound subject identity differs from elaboration')
+            admitted = AdmittedBinding(owner, value['environment'], matching[0], receipt)
             return Binding(admitted, identity, tuple(codec.encode(n) for n in bound['parameters']), reference)
         if operation == 'lookup':
             ev.lookup_for(codec.decode(payload), packet, digest)

@@ -1,6 +1,6 @@
 """The complete SQLite schema; no component outside storage owns SQL."""
 APPLICATION_ID = 0x4D494453
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE run (
@@ -102,6 +102,9 @@ CREATE TABLE receipts (
 CREATE TABLE receipt_artifacts (
     execution TEXT NOT NULL REFERENCES receipts(execution), artifact TEXT NOT NULL REFERENCES artifacts(id),
     PRIMARY KEY(execution,artifact)
+) STRICT;
+CREATE TABLE imported_receipts (
+    execution TEXT PRIMARY KEY, payload BLOB NOT NULL, seal TEXT NOT NULL REFERENCES artifacts(id)
 ) STRICT;
 CREATE TABLE usage_reports (
     execution TEXT NOT NULL REFERENCES executions(id), key TEXT NOT NULL, payload BLOB NOT NULL,

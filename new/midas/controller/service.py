@@ -55,9 +55,14 @@ class Controller:
         self._deadline = False
         self._draining = False
         self._resuming = False
+        self._waiting_reasons = {}
         if writer.counter(saved.SCOPE, 'stopped'):
             self._stop.set()
         _OWNERS[writer] = weakref.ref(self)
+
+    @property
+    def closed(self):
+        return self._closed
 
     @property
     def elapsed_ms(self):
@@ -394,6 +399,10 @@ class Controller:
                     raise ValueError('Operation returned invalid admission')
             except (ValueError, KeyError):
                 accepted = Accepted(failure=Failure.PROTOCOL)
+            if operation.observe is not None:
+                observation = operation.observe(self.writer, invocation, result)
+                if observation is not None:
+                    self._apply('observe:'+key, observation)
             if accepted.provider and accepted.request_id:
                 with self.writer.transaction(self.session) as tx:
                     tx.bind_provider(invocation, accepted.provider, accepted.request_id)
@@ -403,8 +412,9 @@ class Controller:
             if accepted.failure == Failure.CANCELLED and self._stopping():
                 continue  # Durable, unapplied receipt can be resumed explicitly.
             try:
-                if accepted.failure is not None and not self._stopping() and self._retry(
-                        invocation, result, accepted, resume=self._resuming or invocation.session != self.session):
+                if (accepted.failure is not None and not self._stopping()
+                        and (operation.retry_allowed is None or operation.retry_allowed(self.writer, invocation)) and self._retry(
+                        invocation, result, accepted, resume=self._resuming or invocation.session != self.session)):
                     continue
                 effect = operation.reduce(self.writer, invocation, accepted)
                 applied += self._apply('receipt:'+key, effect, receipt=receipt,
@@ -543,6 +553,8 @@ class Controller:
                                       Usage(0, 0, 0, 0), DeliveryCertainty.NOT_SENT, Termination.TERMINATED)
                 self._completed.append(Completion(invocation, result))
             dispatched += 1
+            self._waiting_reasons.pop(job.semantic_key, None)
+        self._waiting_reasons.update(waiting)
         return dispatched, tuple(waiting)
 
     def step(self):
@@ -597,6 +609,14 @@ class Controller:
             self.step()
             view = progress(self.writer)
             state = self.executor.state()
+            if not state.running and view.ready and self._waiting_reasons:
+                self._waiting_reasons = {key: reason for key, reason in self._waiting_reasons.items()
+                    if (self.writer.intent_state(key) or (None,))[0] == 'PENDING'}
+                pending = sum(n for _, n in self.writer.queue_counts())
+                reasons = tuple(dict.fromkeys(self._waiting_reasons.values()))
+                if pending and pending == len(self._waiting_reasons) and all(
+                        not self.policy.transient_admission(reason) for reason in reasons):
+                    view = replace(view, ready=max(0, view.ready-pending), reasons=reasons[:20])
             view = replace(view, elapsed_ms=self.elapsed_ms,
                 stopped=self._stop.is_set(), active=state.running+state.pending_completions+len(self._completed),
                 recovery_required=view.recovery_required or bool(state.unconfirmed) or self.writer.recovery_pending())

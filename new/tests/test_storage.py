@@ -17,7 +17,7 @@ from midas.domain import (AdmittedCheck, AdmittedReview, ArtifactRef, Candidate,
 from midas.storage import (ArtifactError, Changes, Conflict, CounterChange, FrozenRun, Intent,
     NodeChange, RecordChange, RunLocked, StaleSession, StorageError, claim_writer, create, open_reader,
     worker_payload)
-from midas.storage import artifacts
+from midas.storage import artifacts, codec
 
 ENV = 'env_'+'a'*64
 
@@ -580,6 +580,63 @@ class StorageTests(unittest.TestCase):
                     tx.apply('advance-again', Changes(counters=(CounterChange('run', 'count', 1, 2),)))
                 self.assertEqual(reader.status_snapshot(), pinned)
             self.assertGreater(reader.status_snapshot().revision, pinned.revision)
+
+    def test_pooled_reader_reuses_connection_with_a_fresh_snapshot_across_threads(self):
+        from midas.storage import readers
+        readers.clear()
+        with open_reader(self.path) as reader, reader.snapshot():
+            connection = reader._db
+            revision = reader.status_snapshot().revision
+        with self.w.transaction(self.w.session) as tx:
+            tx.apply('advance', Changes(counters=(CounterChange('test', 'counter', 0, 1),)))
+        def read():
+            with open_reader(self.path) as reader:
+                self.assertIs(reader._db, connection)
+                return reader.status_snapshot().revision
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            self.assertEqual(executor.submit(read).result(), revision+1)
+
+    def test_pooled_reader_does_not_follow_a_replaced_run_directory(self):
+        with open_reader(self.path) as reader:
+            old_id = reader.run_id
+        self.w.close()
+        self.path.rename(self.path.with_name('previous'))
+        with create(self.path) as replacement:
+            new_id = replacement.run_id
+            with open_reader(self.path) as reader:
+                self.assertEqual(reader.run_id, new_id)
+                self.assertNotEqual(reader.run_id, old_id)
+
+    def test_idle_read_connections_are_cleared_in_forked_children(self):
+        from midas.storage import readers
+        with open_reader(self.path):
+            pass
+        pid = os.fork()
+        if pid == 0:
+            os._exit(1 if readers._idle else 0)
+        self.assertEqual(os.waitpid(pid, 0)[1], 0)
+        with open_reader(self.path) as reader:
+            self.assertEqual(reader.run_id, self.w.run_id)
+
+    def test_receipt_import_is_authenticated_and_keeps_usage_with_the_parent(self):
+        inv = self.reserve()
+        result, receipt = self.receive(inv)
+        with create(self.path.with_name('child')) as child, open_reader(self.path) as parent, parent.snapshot():
+            for ref in parent.artifacts(limit=1000):
+                child.copy_artifact(parent, ref)
+            self.assertTrue(parent.verify_receipt(receipt, inv, result))
+            child.import_receipt(parent, inv.original_execution_id)
+            child.import_receipt(parent, inv.original_execution_id)
+            self.assertEqual(child.invocation(inv.original_execution_id), inv)
+            self.assertTrue(child.verify_receipt(receipt, inv, result))
+            self.assertEqual(child.status_snapshot().accounting.turns, 0)
+            self.assertEqual(parent.status_snapshot().accounting.turns, 1)
+            child.validate()
+            row = child._db.execute('SELECT payload FROM imported_receipts').fetchone()[0]
+            value = codec.unpack(row)
+            value[1] += 1
+            child._db.execute('UPDATE imported_receipts SET payload=?', (codec.pack(value),))
+            self.assertFalse(child.verify_receipt(receipt, inv, result))
 
     def test_not_sent_without_termination_keeps_reservation(self):
         inv = self.reserve()

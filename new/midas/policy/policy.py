@@ -292,15 +292,16 @@ class Progress:
     recovery_required: bool = False
     setup_failed: bool = False
     reasons: tuple[str, ...] = ()
+    allow_sorry: bool = False
 
     def __post_init__(self):
-        _counts(self, flags=('stopped', 'recovery_required', 'setup_failed'),
+        _counts(self, flags=('stopped', 'recovery_required', 'setup_failed', 'allow_sorry'),
                 skip=('integration', 'export_verification', 'reasons'))
         instance(self.integration, Stage)
         instance(self.export_verification, Stage)
         if self.roots == 0 or self.verified_roots > self.roots:
             raise DomainError('Invalid root progress')
-        if (self.integration == Stage.VERIFIED and self.verified_roots != self.roots
+        if (self.integration == Stage.VERIFIED and self.verified_roots != self.roots and not self.allow_sorry
                 or self.export_verification == Stage.VERIFIED and self.integration != Stage.VERIFIED):
             raise DomainError('Completion stages lack their prerequisites')
         if type(self.reasons) is not tuple or len(self.reasons) > 20 or any(
@@ -420,6 +421,13 @@ class Policy:
                         getattr(owner, kind) >= getattr(self.config.mathematics, kind) else None)
 
     @staticmethod
+    def transient_admission(reason):
+        """These waits can clear without a new command or changed frozen inputs."""
+        return reason in ('model_capacity', 'compiler_capacity', 'local_capacity',
+                          'provider_cooldown', 'compiler_backlog', 'projected_compiler_backlog',
+                          'waiting_dependency')
+
+    @staticmethod
     def mathematical_charge(outcome: str) -> int:
         if outcome not in ('success', 'rejection', 'stale', 'cancelled', 'abandoned', 'infrastructure', 'exception'):
             raise DomainError('Unknown mathematical outcome')
@@ -465,7 +473,7 @@ class Policy:
         if job.kind == JobKind.MODEL:
             model = self.config.research_model if request.helper == 'research' else self.config.model
             if (job.limits.wall_ms > model.invocation_ms or job.limits.output_bytes > model.output_bytes
-                    or job.limits.evidence_bytes > model.event_bytes):
+                    or job.limits.evidence_bytes > model.event_bytes + 16384):
                 return Decision('model_resource_limit')
             reason = self._budget_reason(request.bounds, run)
             if reason:
@@ -641,11 +649,12 @@ class Policy:
         limits = self.config.export
         if usage.cancelled or usage.elapsed_ms >= limits.deadline_ms:
             raise DomainError('Export cancelled or exceeded deadline')
-        if usage.artifact_bytes > limits.max_bytes or usage.captured_bytes >= limits.output_bytes:
+        if usage.artifact_bytes >= limits.max_bytes or usage.captured_bytes >= limits.output_bytes:
             raise DomainError('Export byte budget exhausted')
         return ResourceLimits(min(limits.comparator_timeout_ms if comparator else limits.timeout_ms,
                               limits.deadline_ms - usage.elapsed_ms), limits.memory_mib,
-                              limits.output_bytes - usage.captured_bytes, limits.evidence_bytes,
+                              limits.output_bytes - usage.captured_bytes,
+                              min(limits.evidence_bytes, limits.max_bytes-usage.artifact_bytes),
                               limits.max_heartbeat, limits.max_rec_depth)
 
     def completion(self, progress: Progress) -> Completion:

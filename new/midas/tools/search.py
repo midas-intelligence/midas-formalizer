@@ -293,8 +293,8 @@ def worker_payload(result):
 
 
 class SearchService:
-    def __init__(self, *, index=None, transport=hosted):
-        self.index, self.transport = index, transport
+    def __init__(self, *, index=None, transport=hosted, source_reader=None):
+        self.index, self.transport, self.source_reader = index, transport, source_reader
 
     def execute(self, frozen, context):
         invocation = context.capacity_grant.invocation
@@ -305,7 +305,7 @@ class SearchService:
         stage.validate_for(frozen, context.reader)
         status = ResultStatus.SUCCEEDED
         try:
-            result = execute_search(stage, context.reader, context.cancellation, context.deadline,
+            result = execute_search(stage, self.source_reader or context.reader, context.cancellation, context.deadline,
                                     index=self.index, transport=self.transport)
         except Exception as exc:
             status = ResultStatus.CANCELLED if context.cancellation.is_set() else ResultStatus.FAILED

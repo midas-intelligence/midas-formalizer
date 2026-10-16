@@ -98,7 +98,7 @@ class Export:
 
     def prepare_assembly(self, selection, graph, owner, parent_request, reader, *, maximum=16*1024**3):
         node = graph.node(owner)
-        if node.state != ProofState.CONDITIONAL:
+        if node.selected is None or node.selected.kind != CheckKind.CONDITIONAL:
             raise ValueError('Assembly requires a selected conditional plan')
         parent = node.selected
         value = parent_request.decode()
@@ -115,6 +115,8 @@ class Export:
                 raise ValueError('Assembly requires verified children')
             interface = codec.decode(read(reader, dependency.interface))
             codec.fields(interface, ('constant', 'signature'))
+            if dependency.origin.value == 'abstracted_lemma':
+                interface = dict(interface, constant=parse_identifier(dependency.alias))
             dependencies.append({'parameter': parse_identifier(dependency.alias),
                 'origin': dependency.origin.value, 'interface': interface})
             children.append(proofs.load(reader, child.evidence))

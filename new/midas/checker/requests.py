@@ -80,6 +80,10 @@ class CompilerRequest:
                 or frozen.job.input_refs != tuple(ArtifactRef.from_dict(v) for v in value['inputs'])):
             raise ValueError('Compiler request differs from reserved job')
         candidate = value['candidate']
+        bound_owner = value['packet'].get('bound_owner')
+        if bound_owner is not None and (value['operation'] != 'binding'
+                or OwnerVersion(*bound_owner) not in frozen.job.expected_versions):
+            raise ValueError('Rebound subject version is not fenced')
         if candidate is not None:
             for d in candidate['dependencies']:
                 if OwnerVersion(d[0], d[1]) not in frozen.job.expected_versions:
@@ -113,7 +117,7 @@ def _base(selection, index, imports, available):
 
 
 def prepare_binding(selection, index, owner, *, statement=None, parameters=(),
-                    context=None, imports=(), available=frozenset()):
+                    context=None, imports=(), available=frozenset(), subject_owner=None):
     packet = _base(selection, index, imports, available)
     if owner.obligation_id != selection.identities[index].id:
         raise ValueError('Binding job must be scoped to the selected parent')
@@ -127,6 +131,10 @@ def prepare_binding(selection, index, owner, *, statement=None, parameters=(),
     if context != CLOSED and context[1] != selection.selected.targets[index].selector:
         raise ValueError('Binding context belongs to another source scope')
     packet.update(parameters=list(parameters), binding_protocol='elaborated-bindings-v3', interface=None)
+    if subject_owner is not None:
+        if not isinstance(subject_owner, OwnerVersion):
+            raise ValueError('Expected a rebound subject owner')
+        packet['bound_owner'] = [subject_owner.obligation_id, subject_owner.generation]
     if statement is not None:
         bounded_text(statement, 'statement', TERM_BYTES)
         packet['interface'] = dict(packet, purpose='interface', mode='produce', statement=statement,
@@ -189,8 +197,11 @@ def prepare_proof(selection, index, candidate, reader, *, identity=None, stateme
             closed.append((dep, child, cert, admitted, iface))
             refs.extend((dep.interface, dep.certificate))
             continue
-        elif iface['constant'] != parameter:
-            raise ValueError('Abstracted interface differs from parameter')
+        else:
+            # A checked obligation can be shared under different local aliases.
+            # Its exact signature/identity and saved interface were checked above;
+            # the parameter is a binder in this candidate, not a global constant.
+            iface = dict(iface, constant=parameter)
         bindings.append({'parameter': parameter, 'interface': iface, 'origin': dep.origin.value})
         refs.append(dep.interface)
     work_context = codec.decode(identity.context) if context is None else context

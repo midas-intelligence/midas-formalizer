@@ -78,11 +78,16 @@ class Operation:
     progress: Callable | None = None
     retained: Callable | None = None
     route: Callable | None = None
+    observe: Callable | None = None
+    retry_allowed: Callable | None = None
 
     def __post_init__(self):
         for value in (self.execute, self.admit, self.reduce):
             if not callable(value):
                 raise ValueError('Operation requires execution, admission and reduction')
+        for value in (self.progress, self.retained, self.route, self.observe, self.retry_allowed):
+            if value is not None and not callable(value):
+                raise ValueError('Operation hooks must be callable')
 
 
 @dataclass(frozen=True, slots=True)

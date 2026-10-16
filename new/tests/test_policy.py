@@ -445,6 +445,8 @@ class AdmissionTests(unittest.TestCase):
         residual = self.policy.export_limits(ExportUsage(elapsed_ms=7_199_900, captured_bytes=1000))
         self.assertEqual(residual.wall_ms, 100)
         self.assertEqual(residual.output_bytes, 8 * 1024**2 - 1000)
+        self.assertEqual(self.policy.export_limits(ExportUsage(
+            artifact_bytes=self.policy.config.export.max_bytes-100)).evidence_bytes, 100)
         for used in (ExportUsage(cancelled=True), ExportUsage(elapsed_ms=7_200_000),
                      ExportUsage(captured_bytes=8 * 1024**2), ExportUsage(artifact_bytes=16 * 1024**3 + 1)):
             with self.assertRaises(DomainError):

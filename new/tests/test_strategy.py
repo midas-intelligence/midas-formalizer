@@ -463,6 +463,15 @@ class StateTests(unittest.TestCase):
             self.strategy.on_model(initial, self.policy, initial_dispatch,
                 admitted(artifacts, initial_dispatch, response(action)), artifacts, submission_id=uid('new'))
 
+    def test_unrelated_graph_commit_preserves_turn_but_owner_state_change_does_not(self):
+        artifacts, snapshot = fixture()
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        changed = replace(snapshot, graph=replace(snapshot.graph, revision=snapshot.graph.revision+1))
+        dispatched.turn.validate_for(changed)
+        with self.assertRaisesRegex(ValueError, 'Stale dispatched'):
+            dispatched.turn.validate_for(replace(changed,
+                version=replace(changed.version, revision=changed.version.revision+1)))
+
     def test_conditional_check_requires_independent_exact_review(self):
         artifacts, snapshot = fixture(conditional=True)
         checked = snapshot.attempt.checked

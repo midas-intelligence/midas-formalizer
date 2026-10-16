@@ -1,4 +1,4 @@
-# Clean Midas: domain, policy, storage, source, executor, environment, checker, provider, tools, prompt, strategy, export, and controller
+# Clean Midas: domain through application
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -46,6 +46,131 @@ admission, publication, receipt application, retries, cancellation and recovery.
 `midas/export` implements assembly, source/library integration, independent export
 verification and exact-file publication. LeanEval remains separate work for a
 wrapper around `cli`; it is not an export profile or a second controller loop.
+
+`midas/application` constructs these services and implements the complete run
+workflow. CLI argument handling and dedicated status presentation remain separate
+components.
+
+## Application
+
+`Application(cache_directory, transports=...)` owns command preparation and service
+construction. `Run` owns an exclusive storage session and the existing controller.
+Live, scripted and supplied candidates share binding, checking, review, activation,
+assembly, integration and independent export verification.
+
+| Module | Responsibility |
+| --- | --- |
+| `service.py` | Start/resume handles, inspection, submission, publication and semantic recovery validation |
+| `preparation.py` | Bounded package/selection preparation and frozen-source read capabilities |
+| `providers.py` | Route/credential construction and durable scripted turn bindings |
+| `records.py` | Shallow binary metadata, artifact pointers and complete frozen job envelopes |
+| `workflow.py` | Controller planning/reduction, prompt snapshots, completion and cumulative export accounting |
+| `candidates.py` | Dependency-ordered binding/proof stages, review and joint acceptance |
+| `helpers.py` | Search/lookup/probe/research, retrieval continuations and advisory pages |
+| `repairs.py` | Objections, direct-consumer retirement, cancellation and repair grants |
+| `forking.py` | Pinned checkpoints, authenticated evidence reuse and fresh local budgets |
+| `diagnostics.py` | Standalone bundle verification and explicit provider-cache diagnostics |
+
+```python
+from midas.application import Application
+from midas.domain import SelectionRequest
+
+app = Application('/tmp/midas-checker-cache')
+selection = app.select('package', SelectionRequest('Main.lean', all_unfinished=True))
+with app.start('run', package='package', selection=selection,
+               workflow='supplied') as run:
+    run.submit(candidate_bytes)  # domain.encode_submission(...) binary payload
+    result = run.run()
+    if result.exit_code == 0:
+        run.materialize('export')
+
+view = app.inspect('run')
+nodes = app.nodes('run', limit=100)  # cursor: after=last.node.owner.obligation_id
+```
+
+`package(destination, PackageConfig(...))` prepares a frozen environment;
+`select`, `targets` and `preflight` return checked frozen selections. Start accepts
+either a selection request or an existing `FrozenSelection`. The package locator
+lives once in the frozen inputs; jobs, contexts and receipts carry the environment
+hash. Source inventories remain behind an explicit source-reader capability.
+
+Live runs use `Config.prover`, `reviewer` and optional `research` routes. Supply
+pinned `CodexTransport` instances through the route-scope transport mapping;
+Responses credentials are resolved at service construction and never persisted.
+Research uses the app-server transport. Scripted runs take `(role, raw_bytes)`
+pairs, with roles `prover`, `reviewer` and `research`. Each distinct turn consumes
+one response, even when prompt bytes match another turn. Retries reuse the same
+saved binding. Instruction bytes and exact wire/schema bytes are frozen before
+dispatch. Supplied candidates schedule no model turns; conditional submissions
+must contain explicit approval and still pass compiler checks.
+
+Derived obligations are interned by checked identity. Helpers receive their exact
+inherited aliases; retired generations require new fenced bindings. Probe feedback
+contains the actual checked case results, and inspected lookup ranges resolve to
+hash-checked original source excerpts. Child prompts retain their own proof guidance,
+definitions and prerequisite interfaces. Conditional
+proofs require independent review in model workflows. Joint definition/property
+submissions check closed definitions first and publish the group atomically.
+Statement objections reach current direct consumers, preserve shared reachable
+work, and enter the repaired owner's memory. Mathematical and helper reservations
+settle once through controller transactions.
+
+`resume(directory, increases=...)` restores the package and re-admits selected and
+pending proof evidence, reviews and export stages before stepping. Policy increases
+are prospective; frozen requests retain their original bounds. Received model
+outputs keep their original accounting identity during recovery. `request_stop()`
+uses controller cancellation/draining. Inspection opens read-only storage without
+constructing providers or compilers. Eight idle read connections and revision-bound
+inspection/progress caches avoid repeated SQLite opens and decoding; reused readers
+still acquire fresh snapshots and reject replacement database inodes.
+
+`fork(parent, directory, config=..., workflow=..., script=...)` currently preserves
+the exact environment hash and selection, allowing package relocation. It streams
+artifacts from a pinned parent snapshot, authenticates imported receipts under the
+child's own key, and re-admits proof semantics without rerunning proof compilation.
+Selected proofs, reviews, assemblies, current exports and draft provenance survive.
+Pending execution is not copied. The workflow defaults to the parent's; scripted
+forks inherit remaining responses unless explicitly replaced. Local usage starts
+fresh and parent accounting remains unchanged. Forks remain verifiable after the
+parent moves; incomplete fork initialization cannot be resumed. Storage schema 2
+adds a separate imported-receipt ledger, without counting imports as executions.
+
+`export(run, destination, allow_sorry=True)` explicitly produces a checked partial
+bundle while keeping unresolved proof state. `verify(bundle, package=...)` performs
+a separate compiler audit without model services. Export receipts, including failed
+attempts, consume cumulative wall/output/evidence budgets exactly once; retries
+must fit the remaining allowance. `cache_probe(directory, config=...)` is a separate
+four-call Responses diagnostic and preserves unknown cache telemetry.
+
+Application source, candidate, evidence and wire payloads stay in bounded binary
+artifacts; no whole payload is passed through JSON serialization. Ordinary metadata
+is capped at 256 KiB, compiler/selection artifacts at 64 MiB, and instructions at
+16 KiB. Node inspection and checkpoint copies use bounded pages.
+
+Validation on 2026-10-16: **445 offline tests passed**, followed by **125 focused
+checks** after the final workflow refinements. Real Lean 4.35.0-rc3/bubblewrap
+checks passed supplied and scripted proofs, authenticated resume, independent
+reviews with research continuation, decomposition/assembly, evidence-preserving
+forks, partial exports and standalone verification, objections and generation
+rebinding, joint definition/property acceptance, and probes with inherited aliases
+while sibling work proceeds. Scripted/provider fixtures exercise the transport
+boundaries without calling an external model service.
+
+Validation commands, run from `new/` (use an absolute interpreter path for the full
+suite's executable-path checks):
+
+```sh
+/home/ubuntu/midas-formalizer-v2.1/.venv/bin/python -B -m unittest discover -s tests -t . -q
+../.venv/bin/python -B -m tests.benchmark_application
+# Requires permission for Lean/bubblewrap under the root AGENTS.md:
+../.venv/bin/python -B -m tests.check_application_lean /absolute/path/to/toolchain/bin/lean
+```
+
+The application benchmark compares warm inspection commands and idle
+application/controller ticks against v2 using seven alternating sample medians.
+On 2026-10-16 their new/v2 ratios were **0.634** and **0.768**, respectively.
+It does not measure complete model/Lean throughput. Fork checks additionally assert
+that compatible completed runs create no new compiler or model executions.
 
 ## Export
 
@@ -182,7 +307,7 @@ reads, and return `Effect` values. The application supplies those reducers, a
 bounded planner and the current root/export completion projection. Candidate
 lowering, graph selection, helper continuations and export algorithms remain with
 their owning services. `export_operation` connects the export service to the same
-loop. The application workflows and CLI remain separate work.
+loop. Application supplies the complete workflow above; CLI remains separate work.
 
 An `Effect` combines storage `Changes`, `Planned` frozen requests, streamed
 artifacts and post-commit cancellation. `publish(key, effect)` publishes bytes
@@ -551,7 +676,7 @@ proofs, decomposition, joint candidates, revisions, helpers and stopping. The
 reviewer returns `{verdict, rationale, findings, question, urls}`. Research returns
 `{answer, sources, unresolved}`, matching tools' existing research evidence
 admission. Response interpretation, semantic validation, helper lowering and
-budget enforcement belong to the future strategy/application layer. Replacing a
+budget enforcement belong to the strategy/application layer. Replacing a
 schema requires a matching interpreter there; transport never interprets actions.
 Research snapshots supply a question and their frozen web-call allowance.
 
@@ -1405,7 +1530,7 @@ execution and evidence admission:
 These replace the checker-owned portions of `check_protocol`, `checker_runtime`,
 `checking`, `extraction`, `interface_lookup`, `probe_runtime`, `proof_execution`,
 `proof_jobs`, `source_cache`, and `source_proof_admission`. No implementation imports
-v2. SQL, task publication, graph updates and scheduling stay with their future
+v2. SQL, task publication, graph updates and scheduling stay with their respective
 owners. V2's `cache_probe` is a model-provider diagnostic workflow, rather than a
 Lean checker operation. Export owns certificate composition, final layouts and
 export acceptance; checker supplies the independent whole-source kernel audit.
