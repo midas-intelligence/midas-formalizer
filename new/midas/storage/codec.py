@@ -102,7 +102,7 @@ def request(value):
     j, l = value.job, value.job.limits
     return [j.semantic_key, j.kind.value, owner(j.owner), [ref(r) for r in j.input_refs],
             [owner(o) for o in j.expected_versions],
-            [l.wall_ms, l.memory_mib, l.output_bytes, l.evidence_bytes, l.max_heartbeat],
+            [l.wall_ms, l.memory_mib, l.output_bytes, l.evidence_bytes, l.max_heartbeat, l.max_rec_depth],
             list(j.depends_on), value.environment_id, ref(value.operation_payload), ref(value.request_ref)]
 
 

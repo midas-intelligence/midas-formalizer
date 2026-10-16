@@ -123,7 +123,8 @@ class WorkerContext:
             return None
         return ResourceLimits(max(1, int((self.deadline - time.monotonic()) * 1000)),
                               self._limits.memory_mib, self._limits.output_bytes - self._output,
-                              self._limits.evidence_bytes - self._evidence, self._limits.max_heartbeat)
+                              self._limits.evidence_bytes - self._evidence, self._limits.max_heartbeat,
+                              self._limits.max_rec_depth)
 
     def _record(self, result):
         self._output += result.stdout.observed_bytes + result.stderr.observed_bytes

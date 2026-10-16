@@ -112,6 +112,7 @@ class Checker:
         outcome, termination = 'setup_failure', Termination.TERMINATED
         limits = frozen.job.limits
         runtime = self.runtime
+        clean_workspace = None
 
         def save(data, maximum=MAX_BYTES):
             if type(data) is not bytes or len(data) > maximum:
@@ -142,6 +143,7 @@ class Checker:
                            'termination': process.termination.value, **streams})
 
         def run(name, packet, native=None):
+            nonlocal diagnostics
             context.check()
             payload = codec.encode(packet)
             request_path = context.workspace / 'Packet.bin'
@@ -159,7 +161,10 @@ class Checker:
             fresh = runtime.launch(self.environment, limits.memory_mib, inputs=inputs)
             fresh = replace(fresh, mounts=(*fresh.mounts, Mount(str(channel), '/channel')),
                             variables=(*fresh.variables, ('MIDAS_EVIDENCE_PATH', '/channel/evidence')))
-            if self.retained and runtime.retained:
+            if clean_workspace is not None:
+                from .rebuild import clean_launch
+                fresh = clean_launch(fresh, clean_workspace)
+            if self.retained and runtime.retained and clean_workspace is None:
                 attempts = context.run_import(runtime.recipe(self.environment, limits.memory_mib, files),
                     fresh=fresh, evidence_path=channel / 'evidence').attempts
             else:
@@ -168,9 +173,12 @@ class Checker:
                 stage(name, result)
             result = attempts[-1]
             if result.outcome != Outcome.COMPLETED:
+                if phases[-1]['stderr'] is not None:
+                    diagnostics = ArtifactRef.from_dict(phases[-1]['stderr']['artifact'])
                 failure = result.outcome.value
                 if result.outcome == Outcome.COMPILER_ERROR:
-                    failure = ('resource_limit' if b'MIDAS_EVIDENCE_LIMIT\n' in result.stderr.data else
+                    failure = ('recursion_depth' if b'MIDAS_RECURSION_DEPTH\n' in result.stderr.data else
+                               'resource_limit' if b'MIDAS_EVIDENCE_LIMIT\n' in result.stderr.data else
                                'invalid_candidate' if b'MIDAS_CHECK_REJECTED\n' in result.stderr.data else 'crash')
                 raise _Rejected(failure)
             if (result.returncode != 0 or result.termination != Termination.TERMINATED
@@ -190,7 +198,7 @@ class Checker:
             runtime = runtime or prepare_runtime(self.environment, context, self.cache)
             self.runtime = runtime
             operation, packet, digest = value['operation'], value['packet'], request.sha256
-            packet.update(request=digest, max_heartbeat=limits.max_heartbeat)
+            packet.update(request=digest, max_heartbeat=limits.max_heartbeat, max_rec_depth=limits.max_rec_depth)
             if operation == 'proof':
                 cert, binaries = run('produce', dict(packet, mode='produce'))
                 ev.proof_for(cert, packet, digest)
@@ -202,6 +210,17 @@ class Checker:
                 result, _ = run('replay', replay, native)
                 if result != expected:
                     raise ValueError('Kernel replay receipt differs')
+                accepted = save(codec.encode(cert), limits.evidence_bytes)
+            elif operation == 'replay':
+                cert = dict(packet['certificate'], request=digest)
+                ev.certificate(cert, digest)
+                if cert['format'] != ev.PROOF or 'assumptions' in cert:
+                    raise ValueError('Assembly requires a closed source certificate')
+                expected = ev.replay_receipt(cert, digest)
+                result, _ = run('replay', dict(packet, mode='replay', candidate=None,
+                    certificate=cert, replay_receipt=expected))
+                if result != expected:
+                    raise ValueError('Assembly kernel replay receipt differs')
                 accepted = save(codec.encode(cert), limits.evidence_bytes)
             elif operation == 'binding':
                 if packet['interface'] is not None:
@@ -222,7 +241,15 @@ class Checker:
                 result, _ = run('lookup', dict(packet, mode='lookup'))
                 ev.lookup_for(result, packet, digest)
                 accepted = save(codec.encode(result), limits.evidence_bytes)
-            elif operation == 'audit':
+            elif operation in ('audit', 'integrate'):
+                if operation == 'audit' and 'modules' in packet:
+                    from .rebuild import rebuild
+                    clean_workspace, built = rebuild(self.environment, packet, context,
+                        maximum=value.get('export', {}).get('maximum', 16*1024**3))
+                    stage('build', built)
+                    if built.outcome != Outcome.COMPLETED or built.returncode != 0:
+                        diagnostics = ArtifactRef.from_dict(phases[-1]['stderr']['artifact'])
+                        raise _Rejected('invalid_candidate' if built.outcome == Outcome.COMPILER_ERROR else built.outcome.value)
                 result, _ = run('audit', dict(packet, mode='audit'))
                 self._audit_result(result, packet, digest)
                 accepted = save(codec.encode(result), limits.evidence_bytes)
@@ -289,7 +316,10 @@ class Checker:
             raise ValueError('Unstaged proof evidence')
         operation, packet, digest = value['operation'], value['packet'], request.sha256
         expected = (['produce', 'replay'] if operation == 'proof' or operation == 'binding' and packet['interface']
-                    else ['produce'] if operation == 'binding' else [operation] if operation in ('lookup', 'audit')
+                    else ['replay'] if operation == 'replay'
+                    else ['build', 'audit'] if operation == 'audit' and 'modules' in packet
+                    else ['audit'] if operation in ('audit', 'integrate')
+                    else ['produce'] if operation == 'binding' else [operation] if operation == 'lookup'
                     else ['probe:' + c['id'] for c in packet['cases']])
         outputs = self._admit_phases(report['phases'], expected, result, invocation, reader)
         payload = read(reader, reference, invocation.request.job.limits.evidence_bytes)
@@ -301,6 +331,13 @@ class Checker:
                 raise ValueError('Proof evidence differs from producer/replay')
             return AdmittedCheck(candidate, CheckKind.CONDITIONAL if candidate.logical_dependencies else CheckKind.DIRECT,
                                  receipt, reference)
+        if operation == 'replay':
+            cert = dict(packet['certificate'], request=digest)
+            ev.certificate(cert, digest)
+            if (cert['format'] != ev.PROOF or 'assumptions' in cert
+                    or codec.encode(cert) != payload or outputs[0] != ev.replay_receipt(cert, digest)):
+                raise ValueError('Assembly evidence differs from kernel replay')
+            return Advisory(operation, reference, receipt)
         if operation == 'binding':
             bound = ev.binding_for(codec.decode(payload), packet, digest)
             if any(codec.encode(o) != payload for o in outputs):
@@ -319,7 +356,10 @@ class Checker:
             ev.lookup_for(codec.decode(payload), packet, digest)
             if codec.encode(outputs[0]) != payload:
                 raise ValueError('Lookup evidence differs from execution')
-        elif operation == 'audit':
+        elif operation in ('audit', 'integrate'):
+            if operation == 'audit' and 'modules' in packet:
+                from .rebuild import admit_build
+                admit_build(outputs.pop(0), packet)
             self._audit_result(codec.decode(payload), packet, digest)
             if codec.encode(outputs[0]) != payload:
                 raise ValueError('Audit evidence differs from execution')
@@ -340,7 +380,8 @@ class Checker:
     @staticmethod
     def _audit_result(result, packet, digest):
         codec.fields(result, ('format', 'request', 'targets'))
-        if (result['format'] != 'midas-source-audit-v1' or result['request'] != digest
+        expected = 'midas-source-audit-sorry-v1' if packet.get('allow_sorry', False) else 'midas-source-audit-v1'
+        if (result['format'] != expected or result['request'] != digest
                 or codec.encode(result['targets']) != codec.encode(packet['targets'])):
             raise ValueError('Source audit differs from requested targets')
 

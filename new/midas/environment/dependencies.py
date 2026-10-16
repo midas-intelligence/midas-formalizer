@@ -367,7 +367,8 @@ def replay_dependencies(environment, modules, dependencies, context, *, options=
             path.write_bytes(b'')
 
         def run(arguments):
-            recipe = environment.launch(tuple(arguments), build=workspace, max_heartbeat=context.limits.max_heartbeat)
+            recipe = environment.launch(tuple(arguments), build=workspace, max_heartbeat=context.limits.max_heartbeat,
+                                        max_rec_depth=context.limits.max_rec_depth)
             # Prepared dependency objects are excluded from both mounts and search.
             mounts = tuple(m for m in recipe.mounts if m.target in ('/toolchain', '/runtime', '/build'))
             variables = tuple((k, '/build/lib:/toolchain/lib/lean' if k == 'LEAN_PATH' else v) for k, v in recipe.variables)

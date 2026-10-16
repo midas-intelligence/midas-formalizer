@@ -2,6 +2,26 @@ import Lean
 open Lean Elab Command Meta Frontend
 namespace Midas.Check
 
+-- Elaboration can recover a runtime error into a synthetic sorry. Preserve the
+-- tagged error before an axiom audit or the Frontend IO boundary obscures it.
+def recursionDepthMessages (messages : MessageLog) : Bool :=
+  let isDepth := fun message : Message => message.severity == .error &&
+    message.data.hasTag (· == `runtime.maxRecDepth)
+  messages.unreported.any isDepth || messages.reported.any isDepth
+
+def withRecursionFailure (action : CommandElabM α) : CommandElabM α := do
+  let _ := MonadAlwaysExcept.except (m := CommandElabM)
+  try
+    let result ← action
+    if recursionDepthMessages (← get).messages then
+      throwMaxRecDepthAt Syntax.missing
+    return result
+  catch error =>
+    if error.isMaxRecDepth || recursionDepthMessages (← get).messages then
+      IO.eprintln "MIDAS_RECURSION_DEPTH"
+      IO.eprintln s!"Lean maximum recursion depth reached (maxRecDepth={(← get).maxRecDepth})."
+    throw error
+
 def allowedAxiom (n : Name) : Bool :=
   n == `propext || n == `Classical.choice || n == `Quot.sound
 
@@ -434,6 +454,8 @@ partial def seek (offset : Nat) : FrontendM Command.State := do
   let done ← processCommand
   let cmd := (← get).commands.back!
   if (← getCommandState).messages.hasErrors then
+    if recursionDepthMessages (← getCommandState).messages then
+      IO.eprintln "MIDAS_RECURSION_DEPTH"
     throw (IO.userError "source prefix failed to elaborate")
   if ((cmd.getPos?).getD 0).byteIdx == offset then
     return before
@@ -946,6 +968,8 @@ def checkBindings (packet : Json) (original : Environment) : CommandElabM Json :
 partial def finishSource : FrontendM Unit := do
   let done ← processCommand
   if (← getCommandState).messages.hasErrors then
+    if recursionDepthMessages (← getCommandState).messages then
+      IO.eprintln "MIDAS_RECURSION_DEPTH"
     for message in (← getCommandState).messages.toList do
       IO.eprintln (← message.toString)
     throw (IO.userError "export source failed to elaborate")
@@ -972,11 +996,11 @@ def sourceRuntimeImplementation (before env : Environment) (ci : ConstantInfo) :
       | _ => false
     | none => false
 
-def auditSourceDeclarations (before : Environment) : CommandElabM Unit := do
+def auditSourceDeclarations (before : Environment) (assumptions : List Name := []) : CommandElabM Unit := do
   let after ← getEnv
   let source := after.constants.map₂.toList.filter (fun (n, _) => !before.contains n)
   for (_, ci) in source do
-    if sourceRuntimeImplementation before after ci then auditConstant ci
+    if sourceRuntimeImplementation before after ci then auditConstant ci assumptions
   let mut pending := source.filter (fun (_, ci) => !sourceRuntimeImplementation before after ci)
   let mut replay := before
   for (_, ci) in pending do
@@ -987,7 +1011,7 @@ def auditSourceDeclarations (before : Environment) : CommandElabM Unit := do
     | .ctorInfo d => unless !d.isUnsafe do throwError "unsafe constructor"
     | .recInfo d => unless !d.isUnsafe do throwError "unsafe recursor"
     | _ => throwError "unsupported source declaration kind"
-    auditConstant ci
+    auditConstant ci assumptions
   while !pending.isEmpty do
     let mut rest := []
     let mut progressed := false
@@ -1024,15 +1048,17 @@ def auditSource (packet : Json) (before : Environment) : CommandElabM Json := do
   -- Anonymous is a prefix of every declaration name. Apply the same safe
   -- declaration/axiom audit and independent kernel replay to the whole source,
   -- including its non-target declarations, without a candidate-name restriction.
-  auditSourceDeclarations before
+  let allowSorry := (packet.getObjValAs? Bool "allow_sorry").toOption.getD false
+  let assumptions := if allowSorry then [`sorryAx] else []
+  auditSourceDeclarations before assumptions
   let targets ← checked ((← checked (field packet "targets")).getArr?)
   for target in targets do
     let n ← checked (readName (← checked (field target "constant")))
     let ci ← getConstInfo n
     unless (← signature ci.type ci.levelParams) == (← checked (field target "signature")) do
       throwError "export target signature mismatch: {n}"
-    audit n
-  return Json.mkObj [("format", toJson "midas-source-audit-v1"),
+    auditConstant ci assumptions
+  return Json.mkObj [("format", toJson (if allowSorry then "midas-source-audit-sorry-v1" else "midas-source-audit-v1")),
     ("request", ← checked (field packet "request")), ("targets", toJson targets)]
 
 end Midas.Check
@@ -1044,6 +1070,8 @@ def main (args : List String) : IO UInt32 := do
   let logical ← IO.ofExcept (Midas.Check.str packet "logical")
   let offset ← IO.ofExcept (Midas.Check.nat packet "offset")
   let maxHeartbeat ← IO.ofExcept (Midas.Check.nat packet "max_heartbeat")
+  let maxRecDepth ← IO.ofExcept (Midas.Check.nat packet "max_rec_depth")
+  if maxRecDepth == 0 then throw (IO.userError "recursion-depth limit must be positive")
   unsafe enableInitializersExecution
   initSearchPath (← findSysroot)
   let ictx := Parser.mkInputContext source logical
@@ -1058,11 +1086,14 @@ def main (args : List String) : IO UInt32 := do
   let action : FrontendM Json := do
     if (← IO.ofExcept (Midas.Check.str packet "mode")) == "audit" then
       Midas.Check.finishSource
-      return ← runCommandElabM (Midas.Check.auditSource packet env)
+      return ← runCommandElabM <| Midas.Check.withRecursionFailure (Midas.Check.auditSource packet env)
     let before ← Midas.Check.seek offset
     let original := (← getCommandState).env
     setCommandState before
-    runCommandElabM do
+    runCommandElabM <| Midas.Check.withRecursionFailure do
+      -- Source options cannot replace the invocation's candidate limit.
+      modify fun state => { state with maxRecDepth := maxRecDepth }
+      modifyScope fun scope => { scope with opts := Lean.maxRecDepth.set scope.opts maxRecDepth }
       if (← Midas.Check.checked (Midas.Check.str packet "mode")) == "lookup" then
         unless (Midas.Check.str packet "format").toOption == some "midas-lookup-packet-v3" do
           throwError "unsupported lookup packet format"
@@ -1074,7 +1105,7 @@ def main (args : List String) : IO UInt32 := do
   try
     let (result, _) ← (action.run {inputCtx := ictx}).run {
       commandState := Command.mkState env messages
-        (maxHeartbeats.set (({} : Options).setBool `Elab.async false) maxHeartbeat),
+        (Lean.maxRecDepth.set (maxHeartbeats.set (({} : Options).setBool `Elab.async false) maxHeartbeat) maxRecDepth),
       parserState := ps, cmdPos := ps.pos }
     let artifacts ← Midas.Check.nativeOutputs.get
     let some path ← IO.getEnv "MIDAS_EVIDENCE_PATH"

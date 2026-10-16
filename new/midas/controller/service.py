@@ -45,6 +45,7 @@ class Controller:
         self._stop = threading.Event()
         self._active, self._retained_files = {}, {}
         self._progress_seen = {}
+        self._pending_progress = deque()
         self._completed = deque()
         self._ready_cursor = self._receipt_cursor = None
         self._planned_revision = None
@@ -254,12 +255,17 @@ class Controller:
 
     def _progress(self):
         count = 0
-        for message in self.executor.poll_progress(limit=self.batch):
+        # Keep at most one batch until publication and commit acknowledge it.
+        # An I/O failure must retain both this message and the rest of the batch.
+        if not self._pending_progress:
+            self._pending_progress.extend(self.executor.poll_progress(limit=self.batch))
+        while self._pending_progress:
+            message = self._pending_progress[0]
             owned = self._active.get(message.invocation_id)
             if owned is None:
+                self._pending_progress.popleft()
                 continue
             invocation, staging, _ = owned
-            self._progress_seen[message.invocation_id] = message.sequence+1
             operation = self.operations.for_kind(invocation.request.job.kind)
             try:
                 if operation.progress is None:
@@ -275,6 +281,10 @@ class Controller:
             except (ValueError, KeyError, Conflict):
                 # A blocked emitter wakes through cooperative cancellation.
                 self.executor.cancel(message.invocation_id)
+            # Durable messages and explicit rejections both release the worker's
+            # completion fence. Exceptions above leave the message for replay.
+            self._progress_seen[message.invocation_id] = message.sequence+1
+            self._pending_progress.popleft()
         return count
 
     def _retire(self, invocation, retained_id=None):
@@ -587,11 +597,13 @@ class Controller:
             self.step()
             view = progress(self.writer)
             state = self.executor.state()
-            completion = self.policy.completion(replace(view, elapsed_ms=self.elapsed_ms,
+            view = replace(view, elapsed_ms=self.elapsed_ms,
                 stopped=self._stop.is_set(), active=state.running+state.pending_completions+len(self._completed),
-                recovery_required=view.recovery_required or bool(state.unconfirmed) or self.writer.recovery_pending()))
+                recovery_required=view.recovery_required or bool(state.unconfirmed) or self.writer.recovery_pending())
+            completion = self.policy.completion(view)
             if completion.exit_code is not None:
-                self.drain(timeout=0)
+                if not self.drain(timeout=0):
+                    return self.policy.completion(replace(view, recovery_required=True))
                 return completion
             self._stop.wait(poll_interval) if not self._stop.is_set() else time.sleep(poll_interval)
 
@@ -608,7 +620,7 @@ class Controller:
             if not state.running and not state.pending_completions:
                 ended = self.executor.drain(timeout=0)
                 self._collect_retired()
-                if ended and not self._completed and not self._active:
+                if ended and not self._completed and not self._active and not self._pending_progress:
                     self._closed = True
                     _OWNERS.pop(self.writer, None)
                     return True

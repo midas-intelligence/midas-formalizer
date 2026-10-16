@@ -105,6 +105,7 @@ class ProcessConfig:
     output_bytes: int = 8 * MIB
     evidence_bytes: int = 64 * MIB
     max_heartbeat: int = 2_000_000
+    max_rec_depth: int = 1000
 
     def __post_init__(self):
         _integers(self, zero=('max_heartbeat',))
@@ -115,7 +116,7 @@ class ProcessConfig:
 
     def limits(self):
         return ResourceLimits(self.wall_ms, self.memory_mib, self.output_bytes, self.evidence_bytes,
-                              self.max_heartbeat)
+                              self.max_heartbeat, self.max_rec_depth)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,7 @@ class ExportConfig:
     output_bytes: int = 8 * MIB
     evidence_bytes: int = 64 * MIB
     max_heartbeat: int = 2_000_000
+    max_rec_depth: int = 1000
 
     def __post_init__(self):
         _integers(self, zero=('max_heartbeat',))
@@ -138,7 +140,8 @@ class ExportConfig:
 
     def limits(self, *, comparator=False):
         return ResourceLimits(self.comparator_timeout_ms if comparator else self.timeout_ms,
-                              self.memory_mib, self.output_bytes, self.evidence_bytes, self.max_heartbeat)
+                              self.memory_mib, self.output_bytes, self.evidence_bytes,
+                              self.max_heartbeat, self.max_rec_depth)
 
 
 @dataclass(frozen=True, slots=True)

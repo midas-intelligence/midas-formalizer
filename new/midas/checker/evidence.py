@@ -11,10 +11,14 @@ INTERFACE = 'midas-elaborated-interface-v1'
 NATIVE = b'MIDAS_NATIVE_V2\n'
 
 
-def closed(value):
+def _closed(value):
     validate_signature(value, _validated_graph=True)
     if value['context'] != CLOSED and value['context'][0] != 'declaration-context-v2':
         raise ValueError('Expected a closed signature')
+
+
+def closed(value):
+    _closed(value)
     return Signature(*(codec.encode(value[k]) for k in ('target', 'universes', 'context')))
 
 
@@ -64,6 +68,11 @@ def decode_output(payload, *, maximum):
 def certificate(value, digest):
     if type(value) is not dict:
         raise ValueError('Expected a certificate record')
+    checked_signatures = {}
+    def check_signature(sig):
+        if checked_signatures.get(id(sig)) is not sig:
+            _closed(sig)
+            checked_signatures[id(sig)] = sig
     extra = ('imports',) if 'imports' in value else ()
     validate_imports(value.get('imports', []))
     if value.get('format') == INTERFACE:
@@ -71,14 +80,14 @@ def certificate(value, digest):
         if value['request'] != digest or value['purpose'] != 'interface':
             raise ValueError('Interface binding differs')
         bounded_text(value['statement'], 'bound statement', 1024**2)
-        closed(value['signature'])
+        check_signature(value['signature'])
         return value
     if 'assumptions' in value:
         extra += ('assumptions',)
     codec.fields(value, ('format', 'request', 'purpose', 'signature', 'declarations', *extra))
     if value['format'] != PROOF or value['request'] != digest or value['purpose'] != 'proof':
         raise ValueError('Proof certificate binding differs')
-    closed(value['signature'])
+    check_signature(value['signature'])
     assumptions = value.get('assumptions', [])
     if type(assumptions) is not list or len(assumptions) > 128 or 'assumptions' in value and not assumptions:
         raise ValueError('Invalid conditional assumptions')
@@ -90,7 +99,7 @@ def certificate(value, digest):
         if row['parameter'] == ['anonymous'] or key in names:
             raise ValueError('Anonymous or duplicate assumption')
         names.add(key)
-        closed(row['signature'])
+        check_signature(row['signature'])
     rows = value['declarations']
     if type(rows) is not list or not 1 <= len(rows) <= 4096 or assumptions and len(rows) != 1:
         raise ValueError('Invalid certificate declarations')
@@ -101,7 +110,7 @@ def certificate(value, digest):
         key = codec.encode(row['name'])
         if row['name'] == ['anonymous'] or key in seen:
             raise ValueError('Duplicate or anonymous proof declaration')
-        closed(row['signature'])
+        check_signature(row['signature'])
         bounded_text(row['source'], 'proof source', 1024**2)
         if type(row['requires']) is not list or len(row['requires']) > 4096:
             raise ValueError('Invalid declaration dependencies')

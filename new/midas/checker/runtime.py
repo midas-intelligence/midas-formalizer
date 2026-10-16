@@ -135,7 +135,8 @@ def prepare_runtime(environment, context, cache):
                     (src / name).write_bytes(data)
                 def launch(arguments, *, executable=None):
                     base = environment.launch(arguments, build=build, executable=executable,
-                        max_heartbeat=context.limits.max_heartbeat if executable is None else None)
+                        max_heartbeat=context.limits.max_heartbeat if executable is None else None,
+                        max_rec_depth=context.limits.max_rec_depth if executable is None else None)
                     return replace(base, mounts=(*base.mounts, Mount(str(src), '/checker-source')))
                 if not native:
                     output(context.run_process(launch(('--root=/checker-source', '-o', '/build/MidasCheck.olean',

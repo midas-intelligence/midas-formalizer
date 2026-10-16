@@ -49,6 +49,23 @@ def result_for(req, *, status=ResultStatus.FAILED, delivery=DeliveryCertainty.NO
 
 
 class ConfigTests(unittest.TestCase):
+    def test_recursion_depth_config_projects_and_round_trips(self):
+        config = load_config(b'''{"format":"midas-config-v1",
+            "checker":{"max_rec_depth":256}, "local":{"max_rec_depth":512},
+            "export":{"max_rec_depth":2048}}''')
+        self.assertEqual(load_config(config.encode()), config)
+        self.assertNotEqual(config.id, Config().id)
+        for name, count in (('checker', 256), ('local', 512), ('export', 2048)):
+            section = getattr(config, name)
+            self.assertEqual(section.limits().max_rec_depth, count)
+            for invalid in (0, -1, True, 1.5, None, 2**63):
+                with self.subTest(name=name, value=invalid), self.assertRaises(DomainError):
+                    replace(section, max_rec_depth=invalid)
+            with self.assertRaises(DomainError):
+                config.increase({name: {'max_rec_depth': count + 1}})
+        self.assertEqual(config.export.limits(comparator=True).max_rec_depth, 2048)
+        self.assertEqual(Policy(config).export_limits(ExportUsage(elapsed_ms=100)).max_rec_depth, 2048)
+
     def test_heartbeat_config_projects_and_round_trips(self):
         config = load_config(b'''{"format":"midas-config-v1",
             "checker":{"max_heartbeat":12345}, "local":{"max_heartbeat":0},
@@ -278,6 +295,20 @@ class ConfigTests(unittest.TestCase):
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_recursion_depth_cannot_exceed_the_configured_profile(self):
+        config = Config()
+        for profile, kind in (('checker', JobKind.CHECK_PROOF), ('checker', JobKind.CHECK_BINDING),
+                              ('checker', JobKind.PROBE), ('export', JobKind.EXPORT_VERIFY)):
+            policy = Policy(replace(config, **{profile: replace(getattr(config, profile), max_rec_depth=256)}))
+            for count in (1, 256, 257):
+                req = request(kind)
+                req = replace(req, job=replace(req.job, limits=replace(req.job.limits, max_rec_depth=count)))
+                decision = policy.admit(req, RunUsage(), OwnerUsage(), Capacity(), Services())
+                with self.subTest(kind=kind, count=count):
+                    self.assertEqual(decision.allowed, count <= 256)
+                    if not decision.allowed:
+                        self.assertEqual(decision.reason, 'process_resource_limit')
+
     def test_heartbeat_admission_respects_finite_and_unlimited_profiles(self):
         config = Config()
         for profile, kind in (('checker', JobKind.CHECK_PROOF), ('checker', JobKind.PROBE),
@@ -513,6 +544,11 @@ class RetryAndCompletionTests(unittest.TestCase):
         self.assertTrue(resumed.eligible)
         self.assertEqual((resumed.turn_charge, resumed.transport_charge, resumed.unknown_charge), (1, 0, 0))
         self.assertEqual(self.retry(failure=Failure.REJECTION).reason, 'revision_required')
+        depth = self.retry(kind=JobKind.CHECK_PROOF, failure=Failure.RECURSION_DEPTH)
+        self.assertEqual(depth, self.retry(kind=JobKind.CHECK_PROOF, failure=Failure.TIMEOUT))
+        self.assertEqual(depth, self.retry(kind=JobKind.CHECK_PROOF, failure=Failure.MEMORY))
+        self.assertEqual(self.retry(kind=JobKind.CHECK_PROOF, failure=Failure.RECURSION_DEPTH,
+            history=RetryHistory(local_retries=2)).reason, 'local_retry_exhausted')
         self.assertEqual(self.retry(failure=Failure.PROTOCOL).reason, 'revision_required')
         self.assertEqual(self.retry(termination=Termination.UNKNOWN).reason, 'termination_unconfirmed')
         local = self.retry(kind=JobKind.CHECK_PROOF, failure=Failure.MEMORY)

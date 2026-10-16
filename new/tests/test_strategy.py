@@ -546,6 +546,27 @@ class StateTests(unittest.TestCase):
         self.assertFalse(result.work)
         self.assertIn('exhausted', result.reason)
 
+    def test_recursion_depth_uses_elaboration_revision_allowance_and_retains_output(self):
+        _, snapshot = fixture(conditional=True)
+        diagnostic = 'maximum recursion depth has been reached (maxRecDepth=256)'
+        result = self.strategy.on_failure(snapshot, self.policy, 'recursion_depth',
+            evidence=artifact('depth'), diagnostics=(diagnostic,))
+        self.assertEqual((result.decision.outcome, result.decision.charge, result.decision.exception),
+                         ('exception', 0, 'elaboration'))
+        self.assertEqual(result.revision_charge, 'elaboration')
+        self.assertTrue(result.work)
+        observation = result.memory.observations[-1]
+        self.assertEqual(observation.status, 'recursion_depth')
+        self.assertEqual(observation.messages, (diagnostic,))
+        restored = Memory.load(result.memory.payload)
+        self.assertEqual(restored.observations[-1], observation)
+        exhausted = replace(snapshot, usage=OwnerUsage(elaboration=self.policy.config.mathematics.elaboration))
+        result = self.strategy.on_failure(exhausted, self.policy, 'recursion_depth',
+            evidence=artifact('depth'), diagnostics=(diagnostic,))
+        self.assertFalse(result.work)
+        self.assertEqual(result.reason, 'elaboration_revision_allowance_exhausted')
+        self.assertEqual(result.decision.charge, 0)
+
     def test_replacement_schema_requires_explicit_interpreter(self):
         artifacts, snapshot = fixture()
         work = self.strategy.plan(snapshot, self.policy).work[0]

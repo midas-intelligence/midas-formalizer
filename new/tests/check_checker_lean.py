@@ -80,7 +80,7 @@ def main():
                         data = artifacts.data[ref.id]
                         if data.startswith(codec.MAGIC) and len(data) < 10000:
                             print(codec.decode(data), flush=True)
-                        elif data and data[0] >= 32 and len(data) < 10000:
+                        elif data and data[0] >= 32 and b'\0' not in data and len(data) < 10000:
                             print(data.decode(errors='replace'), flush=True)
                     raise AssertionError(label)
                 if expected_outcome is not None:
@@ -105,6 +105,42 @@ def main():
                 return result, admitted
 
             candidate = Candidate(str(uuid4()), owner, selected.environment_id, artifacts.save(b'by trivial'))
+            def recursion_checks(label):
+                from midas.policy import load_config, Failure
+                from midas.controller import checker_operation
+                policy = load_config(b'{"format":"midas-config-v1","checker":{"max_rec_depth":256}}')
+                limits = policy.checker.limits()
+                for count in (256, 2048):
+                    code = ('by\n  run_tac do\n'
+                            '    unless Lean.maxRecDepth.get (← Lean.getOptions) == ' + str(count) + ' do\n'
+                            '      throwError "recursion option mismatch"\n'
+                            '    unless (← Lean.MonadRecDepth.getMaxRecDepth) == ' + str(count) + ' do\n'
+                            '      throwError "recursion context mismatch"\n  trivial').encode()
+                    proof = replace(candidate, id=str(uuid4()), source=artifacts.save(code))
+                    check(label + ' configured recursion depth ' + str(count),
+                        checker.prepare('proof', selected, 0, proof, artifacts), candidate=proof,
+                        limits=replace(limits, max_rec_depth=count))
+                nested = ('(id ' * 400 + 'True.intro' + ')' * 400).encode()
+                proof = replace(candidate, id=str(uuid4()), source=artifacts.save(nested))
+                request = checker.prepare('proof', selected, 0, proof, artifacts)
+                result, _ = check(label + ' genuine recursion exhaustion', request, candidate=proof,
+                    valid=False, limits=limits, expected_outcome='recursion_depth')
+                diagnostic = artifacts.data[result.diagnostics.id].decode()
+                assert 'recursion depth' in diagnostic and 'maxRecDepth=256' in diagnostic, diagnostic
+                # Authenticate the same classification at the controller handoff.
+                inv = requests[result.invocation_id][1]
+                receipt = ReceiptBinding(inv.original_execution_id, inv.request.request_ref,
+                    artifacts.save(worker_payload(result)), artifacts.save(b'test-controller-seal'))
+                accepted = checker_operation(checker, lambda *a: None).admit(inv, result, receipt, artifacts, authority)
+                assert accepted.failure == Failure.RECURSION_DEPTH, accepted
+                check(label + ' same proof within larger recursion limit', request, candidate=proof,
+                    limits=replace(limits, max_rec_depth=2048))
+                bad = replace(candidate, id=str(uuid4()), source=artifacts.save(
+                    b'by run_tac throwError "maximum recursion depth has been reached"'))
+                check(label + ' diagnostic prose is not a recursion exception',
+                    checker.prepare('proof', selected, 0, bad, artifacts), candidate=bad,
+                    valid=False, limits=limits, expected_outcome='invalid_candidate')
+
             def heartbeat_checks(label):
                 from midas.policy import load_config
                 policy = load_config(b'{"format":"midas-config-v1","checker":{"max_heartbeat":12345}}')
@@ -126,9 +162,11 @@ def main():
                 assert '12345' in outcome['diagnostic'] and 'heartbeat' in outcome['diagnostic'], outcome
 
             heartbeat_checks('retained')
+            recursion_checks('retained')
             check('direct proof with native replay', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             checker.retained = False
             heartbeat_checks('fresh')
+            recursion_checks('fresh')
             check('explicit fresh proof with native replay', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             checker.retained = True
             for code in (b'by sorry', b'by exact False.elim (by trivial)',
@@ -200,6 +238,7 @@ def main():
             candidate = replace(candidate, environment_id=configured.id, owner=OwnerVersion(selected.identities[0].id, 0))
             check('configured interpreted checker', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             heartbeat_checks('interpreted')
+            recursion_checks('interpreted')
     print('checker Lean checks passed', flush=True)
 
 

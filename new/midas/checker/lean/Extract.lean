@@ -96,9 +96,11 @@ partial def scan (imports : Environment) (records : Array Json := #[])
 end Midas.Extract
 
 def main (args : List String) : IO UInt32 := do
-  let [inputPath, logicalPath, outputPath, heartbeat] := args
-    | throw (IO.userError "expected snapshot source, logical source path, output path, and heartbeat limit")
+  let [inputPath, logicalPath, outputPath, heartbeat, recursionDepth] := args
+    | throw (IO.userError "expected snapshot source, logical source path, output path, heartbeat and recursion-depth limits")
   let some maxHeartbeat := heartbeat.toNat? | throw (IO.userError "invalid heartbeat limit")
+  let some maxRecDepth := recursionDepth.toNat? | throw (IO.userError "invalid recursion-depth limit")
+  if maxRecDepth == 0 then throw (IO.userError "recursion-depth limit must be positive")
   unsafe enableInitializersExecution
   initSearchPath (← findSysroot)
   let input ← IO.FS.readFile inputPath
@@ -111,7 +113,7 @@ def main (args : List String) : IO UInt32 := do
     return 1
   let ((records, external), _) ← ((Midas.Extract.scan env).run {inputCtx := ictx}).run {
     commandState := Command.mkState env messages
-      (maxHeartbeats.set (({} : Options).setBool `Elab.async false) maxHeartbeat),
+      (Lean.maxRecDepth.set (maxHeartbeats.set (({} : Options).setBool `Elab.async false) maxHeartbeat) maxRecDepth),
     parserState := ps, cmdPos := ps.pos }
   let output ← IO.ofExcept (Midas.Binary.encode (Json.mkObj [
     ("format", toJson "midas-source-inventory-v1"), ("declarations", toJson records),

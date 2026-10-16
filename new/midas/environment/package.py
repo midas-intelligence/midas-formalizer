@@ -203,6 +203,11 @@ class Environment:
     def id(self):
         return self.manifest.id
 
+    @property
+    def toolchain_id(self):
+        """Portable pin without copying the environment/toolchain inventory."""
+        return self._toolchain_key.hex()
+
     @classmethod
     def prepare(cls, destination, config, context, *, bootstrap=None, _before_publish=None):
         """Freeze caller-prepared roots; publish only after isolated version/source checks."""
@@ -275,7 +280,7 @@ class Environment:
             for source in settings.project_inputs:
                 if source.endswith('.lean'):
                     checked = output(context.run_process(environment.launch(('--root=/project', '/' + source),
-                        max_heartbeat=context.limits.max_heartbeat)))
+                        max_heartbeat=context.limits.max_heartbeat, max_rec_depth=context.limits.max_rec_depth)))
                     checks.append((source.encode(), checked))
             if config.preflight_imports:
                 with tempfile.TemporaryDirectory(prefix='imports-', dir=context.workspace) as temp:
@@ -284,7 +289,8 @@ class Environment:
                     inputs = environment.materialize((AuthorizedInput('Imports.lean', source,
                         file_hash(source), source.stat().st_size),), Path(temp) / 'inputs', check=context.check)
                     checks.append((b'imports', output(context.run_process(environment.launch(('/inputs/Imports.lean',),
-                        inputs=inputs, max_heartbeat=context.limits.max_heartbeat)))))
+                        inputs=inputs, max_heartbeat=context.limits.max_heartbeat,
+                        max_rec_depth=context.limits.max_rec_depth)))))
             environment.validate(hash_toolchain=True, fresh=True, check=context.check)
             if _before_publish is not None:
                 _before_publish(environment)
@@ -402,7 +408,7 @@ class Environment:
         fd = open_root(path.parent)
         os.close(fd)
 
-    def launch(self, arguments, *, inputs=None, build=None, executable=None, max_heartbeat=None):
+    def launch(self, arguments, *, inputs=None, build=None, executable=None, max_heartbeat=None, max_rec_depth=None):
         """Lower admitted files to executor recipes; no compiler execution or scheduling."""
         self._admit()
         spec = self.manifest.settings
@@ -411,6 +417,10 @@ class Environment:
             natural(max_heartbeat, 'max_heartbeat')
             if executable != spec.lean_executable:
                 raise EnvironmentError('Only Lean executables accept a heartbeat limit')
+        if max_rec_depth is not None:
+            natural(max_rec_depth, 'max_rec_depth', positive=True)
+            if executable != spec.lean_executable:
+                raise EnvironmentError('Only Lean executables accept a recursion-depth limit')
         item = self.manifest.inventory.by_path.get(logical(executable))
         if item is None or not item.executable:
             raise EnvironmentError('Executable is outside the admitted inventory')
@@ -440,6 +450,7 @@ class Environment:
         argv = ('/' + spec.runtime_loader, '--inhibit-cache', '--library-path', libraries, '/' + executable,
                 *('-D' + k + '=' + v for k, v in spec.options),
                 *(('-DmaxHeartbeats=' + str(max_heartbeat),) if max_heartbeat is not None else ()),
+                *(('-DmaxRecDepth=' + str(max_rec_depth),) if max_rec_depth is not None else ()),
                 *('--plugin=/' + p for p in spec.plugins), *arguments)
         if executable == 'toolchain/bin/leanc':
             if build is None:

@@ -405,11 +405,12 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual((stopped.outcome, stopped.limit), (Outcome.RESOURCE_LIMIT, 'output'))
             return success(request, context)
         with patch('midas.executor.workers._launch', side_effect=launch):
-            self.start(work, inv=invocation(limits=ResourceLimits(2000, 128, 4096, 4096, 12345)))
+            self.start(work, inv=invocation(limits=ResourceLimits(2000, 128, 4096, 4096, 12345, 321)))
             done, = self.complete()
         self.assertEqual(done.result.status, ResultStatus.SUCCEEDED, done.detail)
         self.assertEqual([x.output_bytes for x in observed], [4096, 1096])
         self.assertEqual([x.max_heartbeat for x in observed], [12345, 12345])
+        self.assertEqual([x.max_rec_depth for x in observed], [321, 321])
         self.assertLessEqual(observed[1].wall_ms, observed[0].wall_ms)
 
     def test_unconsumed_completions_bound_dispatch(self):

@@ -30,7 +30,7 @@ def model_operation(provider, reduce):
 
 def checker_operation(checker, reduce, *, candidate=None):
     def request(invocation, reader):
-        return CompilerRequest(reader.read_artifact(invocation.request.operation_payload, max_bytes=8*1024**2))
+        return CompilerRequest(reader.read_artifact(invocation.request.operation_payload, max_bytes=64*1024**2))
 
     def admit(invocation, result, receipt, reader, authority):
         exact = request(invocation, reader)
@@ -42,8 +42,13 @@ def checker_operation(checker, reduce, *, candidate=None):
                 if report.get('request') != invocation.request.operation_payload.to_dict():
                     raise ValueError('Failed compiler report differs from request')
                 failure = (Failure.CANCELLED if result.status == ResultStatus.CANCELLED else
-                    {'invalid_candidate': Failure.REJECTION, 'resource_limit': Failure.TIMEOUT,
+                    {'invalid_candidate': Failure.REJECTION, 'recursion_depth': Failure.RECURSION_DEPTH,
+                     'resource_limit': Failure.TIMEOUT,
                      'setup_failure': Failure.PERMANENT}.get(report.get('outcome'), Failure.CRASH))
+                if failure == Failure.TIMEOUT:
+                    phases = report['phases']
+                    if phases and phases[-1]['limit'] == 'memory':
+                        failure = Failure.MEMORY
             return Accepted(failure=failure)
         value = checker.admit_receipt(exact, invocation, result, receipt, reader, authority,
             candidate=candidate(reader, invocation) if candidate else None)
@@ -66,3 +71,24 @@ def search_operation(search, reduce):
             Failure.CANCELLED if result.status == ResultStatus.CANCELLED else Failure.CRASH)
         return Accepted(value, failure)
     return Operation(search.execute, admit, reduce)
+
+
+def export_operation(export, reduce, inputs):
+    """Resolve current selection/graph and optional parent/integration for admission."""
+    from ..export import Request
+    from ..domain import JobKind
+    compiler = checker_operation(export.checker, reduce)
+
+    def admit(invocation, result, receipt, reader, authority):
+        request = Request(reader.read_artifact(invocation.request.operation_payload, max_bytes=64*1024**2))
+        request.validate_for(invocation.request, reader)
+        if result.status != ResultStatus.SUCCEEDED:
+            return compiler.admit(invocation, result, receipt, reader, authority)
+        value = export.admit_receipt(request, invocation, result, receipt, reader, authority,
+                                    **inputs(reader, invocation))
+        return Accepted(value)
+
+    def retained(frozen):
+        return None if frozen.job.kind == JobKind.EXPORT_VERIFY else compiler.retained(frozen)
+
+    return Operation(export.execute, admit, reduce, retained=retained)

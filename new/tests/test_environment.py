@@ -290,6 +290,18 @@ class EnvironmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.env.launch((), executable='toolchain/bin/leanc', max_heartbeat=12345)
 
+    def test_recursion_depth_limit_is_a_launch_option(self):
+        original = self.env.id
+        recipe = self.env.launch(('--run', '/checker/Resource.lean'), max_rec_depth=321)
+        self.assertIn('-DmaxRecDepth=321', recipe.argv)
+        self.assertLess(recipe.argv.index('-DmaxRecDepth=321'), recipe.argv.index('--run'))
+        self.assertEqual(self.env.id, original)
+        for invalid in (0, -1, True, 1.5):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                self.env.launch((), max_rec_depth=invalid)
+        with self.assertRaises(ValueError):
+            self.env.launch((), executable='toolchain/bin/leanc', max_rec_depth=321)
+
     def test_materialize_rejects_shadowing_overlaps_hashes_and_extras(self):
         source = write(self.root / 'source', b'x')
         item = AuthorizedInput('Proof.lean', source, sha256(b'x').hexdigest(), 1)

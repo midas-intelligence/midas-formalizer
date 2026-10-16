@@ -10,12 +10,12 @@ import unittest
 from unittest.mock import patch
 
 from midas.controller import (Accepted, Artifact, Controller, Effect, Operation, Operations, Planned,
-                              model_operation)
+                              checker_operation, model_operation)
 from midas.controller import records
 from midas.domain import (DeliveryCertainty, FrozenRequest, Job, JobKind, OwnerVersion, ProofNode,
                           ResourceLimits, ResultStatus, Termination, Usage, WorkerProgress, WorkerResult)
-from midas.executor import Completion, Executor, ExecutorState
-from midas.policy import AdmissionRequest, Config, Failure, Policy
+from midas.executor import Completion, Executor, ExecutorState, RetainedWorker
+from midas.policy import AdmissionRequest, Config, Failure, Policy, Progress, Stage
 from midas.storage import (Changes, Conflict, CounterChange, FrozenRun, Intent, NodeChange,
                            RecordChange, claim_writer, create)
 
@@ -358,6 +358,68 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.step().received, 1)
         self.assertEqual(len(self.writer.progress(invocation.original_execution_id)), 3)
 
+    def finish_with_progress(self):
+        invocation = self.executor.started[-1]
+        staging = self.executor.active[invocation.original_execution_id][1]
+        messages = tuple(WorkerProgress(invocation.original_execution_id, index, 'probe',
+            (staging.write_bounded(f'case {index}'.encode(), max_bytes=100),)) for index in range(3))
+        self.executor.messages.extend(messages)
+        self.executor.finish(progress=len(messages))
+        return invocation, messages
+
+    def test_progress_publication_failure_replays_rest_of_batch(self):
+        c = self.build(self.operation(progress=lambda *args: None), batch=3)
+        self.publish(self.planned(kind=JobKind.PROBE))
+        c.step()
+        invocation, messages = self.finish_with_progress()
+        publish = self.writer.publish_staged
+        calls = 0
+        def interrupted(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError('progress publication interrupted')
+            return publish(*args)
+        with patch.object(self.writer, 'publish_staged', interrupted), self.assertRaises(OSError):
+            c.step()
+        self.assertEqual(self.writer.progress(invocation.original_execution_id), messages[:1])
+        self.assertEqual(c._progress_seen[invocation.original_execution_id], 1)
+        self.assertEqual(tuple(c._pending_progress), messages[1:])
+        tick = c.step()
+        self.assertEqual((tick.progress, tick.received, tick.applied), (2, 1, 1))
+        self.assertEqual(self.writer.progress(invocation.original_execution_id), messages)
+        self.assertEqual(len(self.executor.started), 1)
+        self.assertTrue(c.drain(timeout=0))
+
+    def test_progress_commit_failure_replays_without_duplicate_records(self):
+        c = self.build(self.operation(progress=lambda *args: None), batch=2)
+        for failure in ('before_commit', 'after_commit'):
+            with self.subTest(failure=failure):
+                self.publish(self.planned(failure, kind=JobKind.PROBE))
+                c.step()
+                invocation, messages = self.finish_with_progress()
+                commits = 0
+                def interrupted(stage):
+                    nonlocal commits
+                    if stage == failure:
+                        commits += 1
+                        # First publish artifact metadata, then record progress.
+                        if commits == 2:
+                            raise OSError('progress commit interrupted')
+                with patch('midas.storage.artifacts.checkpoint', interrupted), self.assertRaises(OSError):
+                    c.step()
+                self.assertEqual(len(self.writer.progress(invocation.original_execution_id)),
+                                 int(failure == 'after_commit'))
+                self.assertEqual(c._progress_seen.get(invocation.original_execution_id, 0), 0)
+                self.assertEqual(tuple(c._pending_progress), messages[:2])
+                self.assertEqual(c.step().received, 0)
+                self.assertEqual(c.step().received, 1)
+                self.assertEqual(self.writer.progress(invocation.original_execution_id), messages)
+                self.assertFalse(c._pending_progress)
+        self.assertEqual(len(self.executor.started), 2)
+        self.assertEqual(self.writer.counter('test', 'applied'), 2)
+        self.assertTrue(c.drain(timeout=0))
+
     def test_duplicate_completion_with_progress_does_not_wait_on_retired_staging(self):
         c = self.build(self.operation(progress=lambda *args: None))
         self.publish(self.planned(kind=JobKind.PROBE))
@@ -381,6 +443,35 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(tick.applied, 0)
         self.assertEqual(self.writer.counter(records.SCOPE, 'stopped'), 1)
         self.assertEqual(len(self.writer.pending_receipts()), 1)
+
+    def test_run_reports_recovery_when_retained_worker_cannot_drain(self):
+        c = self.build()
+        worker = RetainedWorker('retained', 128, ENV, 'a'*64)
+        workspace = self.root/'retained-workspace'
+        workspace.mkdir()
+        c._retained_files[worker.id] = [workspace]
+        state = ExecutorState(0, 0, 1, 128, (worker,))
+        complete = Progress(roots=1, verified_roots=1, integration=Stage.VERIFIED,
+                            export_verification=Stage.VERIFIED)
+        with patch.object(self.executor, 'state', return_value=state), \
+                patch.object(self.executor, 'drain', return_value=False):
+            result = c.run(lambda reader: complete)
+            self.assertEqual((result.outcome, result.exit_code), ('recovery_required', 2))
+            self.assertIn('recovery_required', result.reasons)
+            self.assertFalse(c._closed)
+            self.assertTrue(workspace.exists())
+            self.assertEqual(self.executor.state().compiler_memory_mib, 128)
+            with self.assertRaises(ValueError):
+                Controller(self.writer, self.executor, self.policy, Operations())
+        self.assertTrue(c.drain(timeout=0))
+        self.assertFalse(workspace.exists())
+
+    def test_run_returns_success_after_confirmed_drain(self):
+        c = self.build()
+        result = c.run(lambda reader: Progress(roots=1, verified_roots=1,
+            integration=Stage.VERIFIED, export_verification=Stage.VERIFIED))
+        self.assertEqual((result.outcome, result.exit_code), ('export_verified', 0))
+        self.assertTrue(c._closed)
 
     def test_reducer_rejection_is_bounded_and_does_not_stop_other_receipts(self):
         def reject(*args):
@@ -600,6 +691,54 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.writer.counter('test', 'applied'), 1)
         key = self.writer.executions('RECEIVED')[0]
         self.assertEqual(len(self.writer.progress(key)), 8)
+
+
+class CheckerOperationTests(unittest.TestCase):
+    def test_resource_failures_preserve_limits_and_recursion_diagnostics(self):
+        from midas.checker import Checker, prepare_proof, worker_payload
+        from midas.domain import Candidate, ReceiptBinding
+        from midas.domain.encoding import load_record
+        from midas.executor import Diagnostic, LaunchSpec, Outcome, ProcessResult
+        from tests.test_checker import Artifacts, issue, selection
+        from uuid import uuid4
+
+        artifacts, selected = Artifacts(), selection()
+        owner = OwnerVersion(selected.identities[0].id, 0)
+        candidate = Candidate(str(uuid4()), owner, selected.environment_id, artifacts.save(b'by trivial'))
+        request = prepare_proof(selected, 0, candidate, artifacts)
+        invocation = issue(request, artifacts)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = SimpleNamespace(id=selected.environment_id, materialize=lambda *a, **k: None)
+            runtime = SimpleNamespace(id='4'*64, environment_id=environment.id, retained=False,
+                launch=lambda *a, **k: LaunchSpec(('/compiler',), (), '/usr/bin/false', '0'*64))
+            checker = Checker(environment, root, runtime=runtime, retained=False)
+            operation = checker_operation(checker, lambda *args: Effect())
+            for limit, failure, stderr in (
+                    ('memory', Failure.MEMORY, b''), ('wall', Failure.TIMEOUT, b''),
+                    ('output', Failure.TIMEOUT, b''), ('evidence', Failure.TIMEOUT, b''),
+                    (None, Failure.RECURSION_DEPTH, b'MIDAS_RECURSION_DEPTH\nmaximum recursion depth reached\n'),
+                    (None, Failure.REJECTION, b'MIDAS_CHECK_REJECTED\nmaximum recursion depth reached\n'),
+                    (None, Failure.CRASH, b'maximum recursion depth reached\n')):
+                with self.subTest(limit=limit):
+                    process = ProcessResult(Outcome.RESOURCE_LIMIT if limit else Outcome.COMPILER_ERROR,
+                        -9 if limit else 1, 1, 100, 100, limit,
+                        Diagnostic(b'', 0, False), Diagnostic(stderr, len(stderr), False))
+                    context = SimpleNamespace(workspace=root, invocation_id=invocation.original_execution_id,
+                        request_hash=invocation.request.request_hash, reader=artifacts, staging=artifacts,
+                        check=lambda: None, run_process=lambda *a, **k: process)
+                    result = checker.execute(invocation.request, context)
+                    self.assertEqual(result.status, ResultStatus.FAILED)
+                    report = load_record(artifacts.read_artifact(result.output, max_bytes=65536), limit=65536)
+                    self.assertEqual(report['phases'][-1]['limit'], limit)
+                    self.assertEqual(artifacts.read_artifact(result.diagnostics, max_bytes=65536), stderr)
+                    for status, expected in ((result.status, failure), (ResultStatus.CANCELLED, Failure.CANCELLED)):
+                        reported = replace(result, status=status)
+                        receipt = ReceiptBinding(invocation.original_execution_id, invocation.request.request_ref,
+                            artifacts.save(worker_payload(reported)), artifacts.save(b'seal'))
+                        accepted = operation.admit(invocation, reported, receipt, artifacts,
+                            SimpleNamespace(verify_receipt=lambda *a: True))
+                        self.assertEqual(accepted.failure, expected)
 
 
 if __name__ == '__main__':

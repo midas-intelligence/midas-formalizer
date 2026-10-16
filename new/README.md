@@ -1,4 +1,4 @@
-# Clean Midas: domain, policy, storage, source, executor, environment, checker, provider, tools, prompt, strategy, and controller
+# Clean Midas: domain, policy, storage, source, executor, environment, checker, provider, tools, prompt, strategy, export, and controller
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -43,6 +43,121 @@ dependency is domain; compression uses the existing `zstandard` dependency.
 `midas/controller` implements one run loop over these components. It owns
 admission, publication, receipt application, retries, cancellation and recovery.
 
+`midas/export` implements assembly, source/library integration, independent export
+verification and exact-file publication. LeanEval remains separate work for a
+wrapper around `cli`; it is not an export profile or a second controller loop.
+
+## Export
+
+Four implementation modules plus `__init__.py` own export responsibilities:
+
+| Module | Responsibility |
+| --- | --- |
+| `protocol.py` | Binary requests, exact proof/receipt references, file inventories and admitted stages |
+| `proofs.py` | Shared source declarations, polymorphic and frozen-peer composition, definition replay and source integration |
+| `layout.py` | Capture replayed libraries, stream exact files, publish without replacement and read standalone bundles |
+| `service.py` | Stage eligibility, request preparation, current-proof checks and authenticated stage admission |
+
+Construct `Export(checker)` and call `plan(selection, graph, ...)` with the current
+admitted integration and verification, if present. Planning reads selected proof
+metadata only. It returns ready assemblies first, then integration when all roots
+are verified, then independent verification. Changed root receipts, child proofs,
+generations, selection or profile invalidate their dependent stages.
+
+Set `allow_sorry=True` on both `plan` and `prepare_integration` to export incomplete
+work. This path integrates immediately: unresolved goals become typed `sorry`
+helpers, and conditional parent proofs are composed using those helpers and any
+available verified children. Shared dependencies are emitted once; deep graphs use
+an iterative traversal. Unselected unfinished declarations remain in the source.
+The default remains `allow_sorry=False`.
+
+```python
+work = export.plan(selection, graph, allow_sorry=True)
+request = export.prepare_integration(selection, graph, reader, staging, allow_sorry=True)
+```
+
+The option is saved in `Request.allow_sorry`, follows independent verification and
+standalone rechecking, and produces distinct audit evidence. The audit allows
+`sorryAx` while still checking target signatures, elaboration errors, other axioms,
+and kernel replay. Partial export does not admit assemblies or change node proof
+states. Its flat snapshots fence every consumed node, including unresolved leaves;
+changes to their versions, interfaces, states or selected receipts invalidate the
+export. `current(..., allow_sorry=False)` only accepts the strict mode.
+
+`prepare_assembly` takes the selected conditional check's original compiler request
+and exact verified children. Composition shares named declarations and discharges
+polymorphic assumptions without expanding transitive proof trees. Earlier selected
+definition values are replayed before dependent frozen-peer checks. Checker kernel
+replay produces an `AdmittedCheck(ASSEMBLY)` for `domain.accept_assembly`.
+
+`prepare_integration` renders checked roots through the shared source renderer and
+writes raw source to the supplied staging capability. Authored scopes, attributes,
+definitions and source suffixes survive replacement. Strict export rejects
+unselected unfinished work. Its compiler stage audits the integrated source but does not complete an
+export. `prepare_verification` binds the exact admitted integration and file set.
+`Request.inputs`, `expected_versions`, `kind` and `payload` supply the frozen job.
+
+Independent verification uses a fresh compiler workspace. It rebuilds library
+sources in dependency order, checks their compiled hashes against the admitted
+interfaces, and rechecks every source/output after the final writable compiler
+process. Only the trusted toolchain/runtime, verifier and newly built library are
+visible to the final audit. The audit elaborates the complete entry and independently
+kernel-replays its declarations, including non-target declarations. Selected target
+signatures must match exactly. Native proof caches and retained import workers are
+not used for this stage.
+
+`prepare_library(environment, modules, replay, dependencies, staging)` captures an
+environment-admitted source closure. That earlier replay supplies provenance and
+build order; export still performs its own rebuild. The source profile uses the
+toolchain alone. The library profile adds dependency sources and compiled hashes.
+Plugins and compiler/environment overrides are outside these source profiles.
+
+`export_operation(export, reduce, inputs)` connects all three stages to the existing
+controller. `inputs(reader, invocation)` supplies current `selection` and `graph`,
+plus `parent_request` for assembly or `integration` for verification. Admission
+authenticates the controller receipt, exact request and compiler evidence before
+returning a proof or stage handoff. Reducers commit under the usual version fences;
+failed finalization preserves accepted proofs. Policy still owns retries and whole
+export budgets: the application passes `Policy.export_limits(usage)` to each job and
+the configured `max_bytes` to preparation. Every build subprocess shares its job's
+cumulative wall, memory, output and evidence limits.
+
+`Export.materialize` publishes only a current independently verified stage. Pass the
+run directory in `protected`; frozen environment roots are protected automatically.
+It streams and hashes files into a sibling staging directory, fsyncs them and uses
+an atomic rename without replacement. An existing exact destination is idempotent;
+different files, symlinks, extra directories and publication races are rejected.
+Cancellation removes only private staging. Successful publication can then be
+recorded by the application/controller.
+
+Bundles contain `src/` Lean sources, `lean-toolchain`, `request.bin`, `audit.bin` and
+`manifest.bin`. File metadata and requests use the binary codec; source is never
+hex-encoded or passed through JSON. Only environment/toolchain hashes cross these
+boundaries. Generated proof names have fixed namespace depth. `read_bundle` checks
+the exact inventory, and `Export.prepare_recheck` prepares a fresh checker audit
+from the bundle's files using any admitted environment with the same toolchain
+hash. This needs no original project, compiled library or run database and grants
+no authority to mutate the original run.
+
+Validation (from `new/`):
+
+```sh
+python3 -B -m unittest tests.test_export -v
+python3 -B -m tests.benchmark_export
+# Requires the Lean permission specified by root AGENTS.md:
+python3 -B -m tests.check_export_lean /path/to/lean/bin/lean
+```
+
+Validation passed: **420 Python tests**, including **10 export contract tests**,
+and the real Lean export suite. The contract checks cover stage ordering, exact child/root fences, false seals,
+missing build evidence, dropped target signatures, stale completion, library hash
+mismatches, standalone bundles and publication conflicts/cancellation. Real Lean
+checks cover ordinary proofs, structures and recursive definitions, polymorphic
+assembly, joint definition/property proofs, direct and composed definition peers,
+and library reconstruction. Alternating seven-sample medians against v2 measured
+new/v2 ratios of **0.92** for small integration, **0.44** for 2 MiB integration and **0.79** for polymorphic
+assembly. These measure Python preparation/rendering, not compiler wall time.
+
 ## Controller
 
 Five implementation modules plus `__init__.py` replace the controller lifecycle
@@ -61,12 +176,13 @@ the run. One controller owns each writer. `Operations` has explicit slots for
 model, binding, proof, lookup, probe, search, assembly, integration and export
 verification. There is no dynamic registration or separate live/scripted loop.
 `model_operation`, `checker_operation` and `search_operation` use the existing
-owning services. Their reducers receive authenticated results and current storage
+owning services. Compiler memory-limit failures retain their distinct policy
+classification. Their reducers receive authenticated results and current storage
 reads, and return `Effect` values. The application supplies those reducers, a
 bounded planner and the current root/export completion projection. Candidate
 lowering, graph selection, helper continuations and export algorithms remain with
-their owning services. The export/application components are still separate work;
-this package does not implement a CLI or an export engine.
+their owning services. `export_operation` connects the export service to the same
+loop. The application workflows and CLI remain separate work.
 
 An `Effect` combines storage `Changes`, `Planned` frozen requests, streamed
 artifacts and post-commit cancellation. `publish(key, effect)` publishes bytes
@@ -84,9 +200,11 @@ applies effects, plans changed state, then dispatches ready jobs. Ready and rece
 pages have cursors, so a blocked first page cannot starve later work. Completed
 workers report their final progress count: their staging survives until every
 queued message has been processed, even with a full progress channel. Invalid
-progress cancels the emitter. Proof state changes only through the owning semantic
-reducer after receipt authentication; saving a successful result alone selects
-nothing.
+progress cancels the emitter. Progress publication and commit acknowledgement
+failures retain at most one batch for replay. Its completion fence advances only
+after durable recording or explicit rejection. Proof state changes only through
+the owning semantic reducer after receipt authentication; saving a successful
+result alone selects nothing.
 
 Local workspace/input preparation finishes before admission. Policy is rechecked
 under the write transaction, and reservation plus the dispatch marker commit
@@ -123,9 +241,11 @@ capacity. That confirmation does not grant proof authority.
 `drain(timeout=...)` keeps polling progress while cancelling and returns `False`
 if workers or uncertain processes remain. `run(progress)` uses the application's
 current root/export projection with policy completion and the controller's actual
-worker/recovery state. The writer remains application-owned. Controller metadata
-contains artifact references and environment hashes, with no environment inventory,
-large JSON operation or recursive persisted structure.
+worker/recovery state. A failed final drain returns `recovery_required` with exit
+code 2 and retains controller ownership until termination is confirmed. The writer
+remains application-owned. Controller metadata contains artifact references and
+environment hashes, with no environment inventory, large JSON operation or
+recursive persisted structure.
 
 Validation and benchmark commands (from `new/`):
 
@@ -361,7 +481,7 @@ allowances remain separate. An explicit statement objection targets only current
 direct consumers. Repair proposes graph retirement and a policy-sized grant in
 one effect; cancellation occurs after commit and preserves shared reachable work.
 Transport retry, receipt authentication, durable recovery and export execution
-remain with their existing/future owners.
+remain with controller, checker/provider and export.
 
 Model JSON is parsed with the shared bounded, chunked decoder; fences and prose
 wrappers are rejected. Responses, contexts and submissions are capped at **8 MiB**;
@@ -646,6 +766,16 @@ the heartbeat limit while wall-time and memory limits still apply. The shared
 `local` process profile also carries this field, though search jobs do not use
 Lean. `limits()` freezes the value into `ResourceLimits`; policy admission rejects
 compiler jobs above a finite configured limit, including unlimited requests.
+
+`checker.max_rec_depth` and `export.max_rec_depth` set Lean's `maxRecDepth`.
+Both default to `1000` and require a positive integer. The shared `local` profile
+also carries the field. The limit is saved in each request and survives recovery;
+compiler admission rejects requests exceeding their configured profile.
+Recursion exhaustion has failure type `recursion_depth` and follows the same
+local recovery policy as timeout/OOM. Strategy uses `mathematics.elaboration`
+for its revision allowance, without spending a mathematical attempt. Lean's
+diagnostic output is retained, including the configured limit; no special model
+prompt instructions are added.
 
 `Policy` and `Config` are immutable. `config.increase(...)` produces a new snapshot
 for prospective run/mathematical increases. It does not reset usage, move the
@@ -1155,9 +1285,10 @@ These replace environment ownership in `environment`, `toolchains`, `packaging`,
 Run bindings, artifact publication and run-cache retirement from `problem` and
 `shared_package` belong to storage/application integration. Checker
 resource compilation and proof receipt admission belong to checker. Lake's
-freshness/hash gates, workspace layout, kernel comparison and final LeanEval
-acceptance belong to checker/export; provenance or successful source replay alone
-does not report a verified export.
+freshness/hash gates and independent source audits belong to environment and
+checker/export. Benchmark workspace layout, comparator execution and final LeanEval
+acceptance belong to the separate CLI wrapper; provenance or successful source
+replay alone does not report a verified export.
 
 `Environment.prepare(destination, config, worker_context)` consumes a
 `PackageConfig` with one pinned release, one installed toolchain, explicit
@@ -1297,6 +1428,18 @@ probes; retained workers read it separately for each request. Source inspection,
 runtime compilation, environment preflights and dependency replay receive the
 reserved limit as well. Heartbeat limits are execution settings and do not
 change the environment identity.
+
+`max_rec_depth` follows the same propagation path. The checker recognizes Lean's
+tagged recursion-depth exception, including errors recovered into the message
+log before a later axiom audit fails. Ordinary error text mentioning recursion
+does not change its failure classification. Failed compiler stderr is exposed
+through `WorkerResult.diagnostics` as well as the phase's artifact reference.
+
+Recursion-depth validation: **410 offline tests passed**. Lean 4.35.0-rc3 checks
+passed in retained, fresh and interpreted workers: the same nested proof exhausts
+`max_rec_depth=256` and succeeds at `2048`; ordinary diagnostics mentioning
+recursion retain their original classification. The controller benchmark remained
+below v2 at **0.978×** lifecycle time and **0.448–0.514×** idle time.
 
 Heartbeat validation: **117 focused Python tests passed**. Lean 4.35.0-rc3
 integration checks passed for fresh, retained and interpreted execution,

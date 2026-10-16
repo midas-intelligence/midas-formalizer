@@ -9,17 +9,24 @@ from graphlib import CycleError, TopologicalSorter
 
 from ..domain import ByteSpan, Signature
 from ..domain import encoding as graph
+from ..domain.cache import Memo
 from ..domain.identity import CLOSED, extends, validate_signature
 from .context import Context, _render_context, add_imports, context_opens
 from .names import lean_name, parse_identifier
 from .terms import RenderPolicy, _Renderer
 from .text import Builder, Edit, GeneratedSource, MAX_BYTES, SourceFile, apply_edits
 
+_SIGNATURES = Memo(max_entries=128, max_bytes=16*1024**2)
+
 
 def _signature(signature):
-    value = {key: graph.decode(getattr(signature, key)) for key in ('target', 'universes', 'context')}
-    validate_signature(value, _validated_graph=True)
-    return value
+    def build():
+        value = {key: graph.decode(getattr(signature, key)) for key in ('target', 'universes', 'context')}
+        validate_signature(value, _validated_graph=True)
+        return value
+    # Private decoded values are read-only throughout this module. Reuse the
+    # same closed type across declaration rendering and its proof application.
+    return _SIGNATURES.get(b'', signature, build)
 
 
 def _target(renderer, signature):
@@ -173,7 +180,7 @@ def _references(expression):
 
 
 def declarations(values: tuple[CheckedDeclaration, ...], *, external=frozenset(),
-                 policy=RenderPolicy(), maximum=MAX_BYTES):
+                 policy=RenderPolicy(), maximum=MAX_BYTES, emitted=None):
     """Emit each context and named declaration once, with dependencies first."""
     if type(values) is not tuple or type(external) is not frozenset:
         raise ValueError('Expected immutable declarations and external names')
@@ -202,7 +209,8 @@ def declarations(values: tuple[CheckedDeclaration, ...], *, external=frozenset()
         order = tuple(TopologicalSorter({name: sorted(dependencies[name]) for name in sorted(by_name)}).static_order())
     except CycleError as error:
         raise ValueError('Cyclic source declarations') from error
-    writer, emitted = Builder(maximum), {}
+    writer = Builder(maximum)
+    emitted = {} if emitted is None else emitted
     for name in order:
         _render_context(_named_context(signatures[name]), writer, emitted)
     for name in order:

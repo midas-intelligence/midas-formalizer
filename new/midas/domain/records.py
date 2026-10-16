@@ -255,11 +255,13 @@ class ResourceLimits:
     output_bytes: int
     evidence_bytes: int
     max_heartbeat: int = 2_000_000
+    max_rec_depth: int = 1000
 
     def __post_init__(self) -> None:
         for field in ("wall_ms", "memory_mib", "output_bytes", "evidence_bytes"):
             natural(getattr(self, field), field, positive=True)
         natural(self.max_heartbeat, "max_heartbeat")
+        natural(self.max_rec_depth, "max_rec_depth", positive=True)
 
 
 @dataclass(frozen=True, slots=True)

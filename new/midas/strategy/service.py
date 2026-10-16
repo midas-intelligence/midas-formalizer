@@ -307,12 +307,13 @@ class Strategy:
         Provider retries stay in policy/controller. Exceptions have separate
         revision counters and do not spend a mathematical attempt.
         """
-        if kind not in ('rejection', 'timeout', 'memory', 'elaboration', 'protocol',
+        if kind not in ('rejection', 'recursion_depth', 'timeout', 'memory', 'elaboration', 'protocol',
                         'cancelled', 'stale', 'infrastructure'):
             raise ValueError('Unknown strategy failure')
         observation = Observation.select(source or ('checker' if snapshot.attempt else 'protocol'), kind, evidence, diagnostics)
         memory = update_memory(snapshot.memory, observation=observation)
-        exception = kind if kind in ('timeout', 'memory', 'elaboration', 'protocol') else None
+        exception = ('elaboration' if kind == 'recursion_depth' else
+                     kind if kind in ('timeout', 'memory', 'elaboration', 'protocol') else None)
         outcome = 'exception' if exception else kind
         decision = AttemptDecision(snapshot.attempt.candidate.id, outcome,
             policy.mathematical_charge(outcome), exception) if snapshot.attempt else None

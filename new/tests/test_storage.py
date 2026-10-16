@@ -313,6 +313,20 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(self.w.ready(49))
         self.assertEqual(len(self.w.ready(50)), 1)
 
+    def test_recursion_limit_survives_saved_intent_and_reservation(self):
+        intent = self.intent(kind=JobKind.CHECK_PROOF)
+        intent = replace(intent, request=replace(intent.request,
+            job=replace(intent.request.job, limits=replace(intent.request.job.limits, max_rec_depth=321))))
+        with self.w.transaction(self.w.session) as tx:
+            tx.apply('depth', Changes(intents=(intent,)))
+        self.reopen()
+        self.assertEqual(self.w.intent('job').request, intent.request)
+        with self.w.transaction(self.w.session) as tx:
+            invocation = tx.reserve('job', self.ref, expected_revision=self.w.status_snapshot().revision)
+        self.assertEqual(invocation.request.job.limits.max_rec_depth, 321)
+        self.reopen()
+        self.assertEqual(self.w.invocation(invocation.original_execution_id), invocation)
+
     def test_prepared_release_and_recovery_charges(self):
         self.reserve('prepared', dispatch=False, bounds=Usage(20, 5, 10, 100))
         sent = self.reserve('sent', bounds=Usage(20, 5, 10, 100))

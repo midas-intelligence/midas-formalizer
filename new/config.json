@@ -40,14 +40,16 @@
     "memory_mib": 4096,
     "output_bytes": 8388608,
     "evidence_bytes": 67108864,
-    "max_heartbeat": 2000000
+    "max_heartbeat": 2000000,
+    "max_rec_depth": 1000
   },
   "local": {
     "wall_ms": 60000,
     "memory_mib": 4096,
     "output_bytes": 8388608,
     "evidence_bytes": 67108864,
-    "max_heartbeat": 2000000
+    "max_heartbeat": 2000000,
+    "max_rec_depth": 1000
   },
   "export": {
     "timeout_ms": 90000,
@@ -57,7 +59,8 @@
     "max_bytes": 17179869184,
     "output_bytes": 8388608,
     "evidence_bytes": 67108864,
-    "max_heartbeat": 2000000
+    "max_heartbeat": 2000000,
+    "max_rec_depth": 1000
   },
   "model": {
     "invocation_ms": 600000,

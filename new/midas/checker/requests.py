@@ -14,7 +14,8 @@ MAX_BYTES = 64 * 1024**2
 TERM_BYTES = 1024**2
 FORMAT = 'midas-compiler-request-v1'
 OPERATIONS = {'binding': JobKind.CHECK_BINDING, 'proof': JobKind.CHECK_PROOF,
-              'lookup': JobKind.LOOKUP, 'probe': JobKind.PROBE, 'audit': JobKind.EXPORT_VERIFY}
+              'lookup': JobKind.LOOKUP, 'probe': JobKind.PROBE, 'audit': JobKind.EXPORT_VERIFY,
+              'replay': JobKind.ASSEMBLE, 'integrate': JobKind.INTEGRATE}
 _SIGNATURES = Memo(max_entries=128, max_bytes=16 * 1024**2)
 
 
@@ -48,15 +49,19 @@ class CompilerRequest:
     def __post_init__(self):
         value = codec.decode(self.payload)
         codec.fields(value, ('format', 'operation', 'environment', 'selection', 'owner',
-                             'candidate', 'inputs', 'packet'))
+                             'candidate', 'inputs', 'packet', *(('export',) if 'export' in value else ())))
         if value['format'] != FORMAT or value['operation'] not in OPERATIONS:
             raise ValueError('Unknown compiler request')
         from ..domain.records import identifier
         identifier(value['environment'], 'env_')
         identifier(value['selection'], 'sel_')
         OwnerVersion(*value['owner'])
+        if 'allow_sorry' in value['packet'] and (value['operation'] not in ('audit', 'integrate')
+                or type(value['packet']['allow_sorry']) is not bool):
+            raise ValueError('Sorry is an explicit source-audit option only')
         refs = tuple(ArtifactRef.from_dict(v) for v in value['inputs'])
-        if len(refs) > 256 or len(set(refs)) != len(refs):
+        maximum = 40016 if 'export' in value else 20000 if value['operation'] == 'audit' else 256
+        if len(refs) > maximum or len(set(refs)) != len(refs):
             raise ValueError('Invalid compiler inputs')
 
     @property
@@ -271,10 +276,14 @@ def prepare_probe(selection, index, owner, cases, *, goal=None, aliases=(),
     return _request('probe', selection, owner, packet)
 
 
-def prepare_audit(selection, owner, source, reader, *, available=frozenset()):
+def prepare_audit(selection, owner, source, reader, *, available=frozenset(), allow_sorry=False):
     """Prepare independent whole-source kernel auditing for the export owner."""
     data = read(reader, source).decode()
     packet = {'source': data, 'logical': selection.selected.request.source, 'offset': 0,
               'targets': [{'constant': codec.load_json(target.constant), 'signature': signature(identity)}
                           for target, identity in zip(selection.selected.targets, selection.identities)]}
+    if type(allow_sorry) is not bool:
+        raise ValueError('Expected a boolean sorry option')
+    if allow_sorry:
+        packet['allow_sorry'] = True
     return _request('audit', selection, owner, packet, inputs=(source,))

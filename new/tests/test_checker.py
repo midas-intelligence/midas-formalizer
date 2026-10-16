@@ -213,7 +213,7 @@ class Contracts(unittest.TestCase):
 
     def test_full_execution_receipt_and_failure_admission(self):
         request = prepare_proof(self.selection, 0, self.candidate, self.artifacts)
-        inv = issue(request, self.artifacts, limits=ResourceLimits(120000, 4096, 1024**2, 64*1024**2, 12345))
+        inv = issue(request, self.artifacts, limits=ResourceLimits(120000, 4096, 1024**2, 64*1024**2, 12345, 321))
         with TemporaryDirectory() as temp:
             root = Path(temp)
             environment = SimpleNamespace(id=self.selection.environment_id,
@@ -225,6 +225,7 @@ class Contracts(unittest.TestCase):
             def run(spec, **kwargs):
                 packet = codec.decode((root / 'Packet.bin').read_bytes())
                 self.assertEqual(packet['max_heartbeat'], 12345)
+                self.assertEqual(packet['max_rec_depth'], 321)
                 value = (certificate(packet, request.sha256) if packet['mode'] == 'produce'
                          else ev.replay_receipt(packet['certificate'], request.sha256))
                 data = codec.encode(value)

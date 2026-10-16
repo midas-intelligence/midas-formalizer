@@ -48,7 +48,7 @@ scheduling; workers return results without a controller or SQLite connection.
 | `provider` | Backend routing, provider protocols, one model invocation, delivery certainty and usage | Invoke one frozen request; normalize its result |
 | `prompt` | Instructions, schemas, mathematical presentation, evidence selection for display, exact wire construction | Render an immutable turn snapshot |
 | `strategy` | Candidate generation policy, response interpretation, decomposition, review, repair, objections, memory and continuations | Plan work; reduce validated outcomes into proposed changes |
-| `export` | Assembly and integration plans, source/library/LeanEval layouts, independent export verification | Plan stages, render output, verify it, validate stage receipts |
+| `export` | Assembly and integration plans, source/library layouts, independent export verification | Plan stages, render output, verify it, validate stage receipts |
 | `controller` | One run loop, admission transactions, dispatch, receipt application, cancellation and recovery coordination | Step, drain, resume, apply external commands |
 | `status` | Stable status views, reasons, node queries, terminal and JSON presentation | Read and format; preserve unknown values |
 | `application` | Command workflows and construction of concrete services | Start, resume, submit, fork, inspect inputs, package, export, verify |
@@ -591,15 +591,27 @@ See `new/README.md` for its handoff contracts and offline validation results.
 ## Export
 
 Export planning uses the selected proof graph and exact dependency versions.
-Source, library, and LeanEval profiles share lifecycle and resource accounting;
-each retains its required layout, build, and audit rules.
+Source and library profiles share lifecycle and resource accounting; each retains
+its required layout, build, and audit rules. LeanEval is a separate wrapper around
+`cli`, not a profile inside export. Its benchmark workspace and comparator-specific
+acceptance remain with that wrapper.
+
+The default export requires verified roots. The explicit `allow_sorry=True` option
+on planning and integration also supports incomplete graphs: preserve conditional
+parent sources, compose available children, and emit unresolved goals as typed
+`sorry` helpers. This path does not admit proof assemblies or mark nodes verified.
+Its flat snapshot fences every consumed node and invalidates the export when any
+used interface, version, state or proof receipt changes. The option survives
+publication and standalone rechecking; independent audits allow `sorryAx` only in
+this mode and produce distinct evidence. Other axiom, signature, elaboration and
+kernel checks still apply. Unselected unfinished declarations remain in the source.
 
 ```python
 class Export:
-    def plan(self, snapshot):
-        if a_selected_conditional_plan_has_verified_children(snapshot):
+    def plan(self, snapshot, *, allow_sorry=False):
+        if not allow_sorry and a_selected_conditional_plan_has_verified_children(snapshot):
             return JobPlan(ASSEMBLE(exact_plan_and_child_validations(snapshot)))
-        if roots_are_verified_and_integration_is_missing(snapshot):
+        if (allow_sorry or roots_are_verified(snapshot)) and integration_is_missing(snapshot, allow_sorry):
             return JobPlan(INTEGRATE(exact_root_validations(snapshot)))
         if current_integration_needs_independent_verification(snapshot):
             return JobPlan(EXPORT_VERIFY(exact_integrated_output(snapshot)))
@@ -881,7 +893,8 @@ module has one primary destination below.
 | `tools` (9) | `combined_retrieval`, `discovery`, `discovery_helpers`, `lookup_helpers`, `lookup_source`, `probe_helpers`, `research_helpers`, `research_protocol`, `retrieval_helpers` |
 | `prompt` (10) | `model_evidence`, `model_math`, `prompt_display`, `strategy_context`, `strategy_contract`, `strategy_formats`, `strategy_history`, `strategy_instructions`, `strategy_presentation`, `strategy_prompts` |
 | `strategy` (16) | `proof_script`, `strategy_archive`, `strategy_archive_guard`, `strategy_compact`, `strategy_decomposition`, `strategy_driver`, `strategy_evidence`, `strategy_feedback`, `strategy_helpers`, `strategy_input`, `strategy_memory`, `strategy_objections`, `strategy_protocol`, `strategy_repairs`, `strategy_review`, `strategy_runtime` |
-| `export` (10) | `comparator`, `export_io`, `finalization`, `finalization_events`, `leaneval_audit`, `leaneval_finalization`, `leaneval_layout`, `leaneval_verify`, `leaneval_workspace`, `portable` |
+| `export` (4) | `export_io`, `finalization`, `finalization_events`, `portable` |
+| LeanEval CLI wrapper (6) | `comparator`, `leaneval_audit`, `leaneval_finalization`, `leaneval_layout`, `leaneval_verify`, `leaneval_workspace` |
 | `controller` (12) | `controller`, `lean_run`, `live_finalization`, `live_run`, `live_timing`, `pending_checks`, `probe_progress`, `proof_driver`, `script_run`, `strategy_checks`, `strategy_dispatch`, `strategy_lifecycle` |
 | `status` (5) | `cli_output`, `live_cli_status`, `live_status`, `node_details`, `nodes` |
 | `application` (5) | `cache_probe`, `forking`, `live_initialization`, `preparation`, `run_cli` |
