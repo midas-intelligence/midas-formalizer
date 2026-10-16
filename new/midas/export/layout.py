@@ -132,6 +132,13 @@ def materialize(stage, reader, destination, *, protected=(), check=lambda: None)
     files['manifest.bin'] = reference(manifest)
     extra[files['manifest.bin']] = manifest
     maximum = stage.request.decode()['export']['maximum']
+    return publish_files(files, _Reader(reader, extra), destination, maximum=maximum,
+                         protected=protected, check=check)
+
+
+def publish_files(files, reader, destination, *, maximum=16*1024**3, protected=(), check=lambda: None):
+    """Publish an exact file set atomically; callers own semantic acceptance."""
+    files = file_rows([[p, r.to_dict()] for p, r in files.items()], maximum)
     if sum(r.byte_count for r in files.values()) > maximum:
         raise ValueError('Export metadata exceeds total byte limit')
     destination = Path(destination).absolute()
@@ -147,9 +154,8 @@ def materialize(stage, reader, destination, *, protected=(), check=lambda: None)
         return destination
     temporary = Path(tempfile.mkdtemp(prefix='.midas-export-', dir=destination.parent))
     try:
-        combined = _Reader(reader, extra)
         for path, ref in files.items():
-            _write(combined, ref, temporary / path, check)
+            _write(reader, ref, temporary / path, check)
         inventory = _inventory(temporary, files, maximum, check)
         for folder in sorted(inventory.directories, key=lambda p: p.count('/'), reverse=True):
             sync_directory(temporary / folder)

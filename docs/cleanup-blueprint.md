@@ -596,6 +596,14 @@ its required layout, build, and audit rules. LeanEval is a separate wrapper arou
 `cli`, not a profile inside export. Its benchmark workspace and comparator-specific
 acceptance remain with that wrapper.
 
+This wrapper is implemented in `new/midas/leaneval`. Ordinary commands delegate
+to `midas.cli`; `prepare` binds an admitted benchmark and source library to an
+existing package, `start --workspace` supplies them to the ordinary application,
+and `finalize` / `verify-submission` add comparator and judge-layout acceptance.
+Source auditing, executor reservations and atomic file publication use the
+existing components. Workspace library payloads use flat content-hash filenames;
+archives and diagnostics use raw binary framing. See `new/README.md` for commands.
+
 The default export requires verified roots. The explicit `allow_sorry=True` option
 on planning and integration also supports incomplete graphs: preserve conditional
 parent sources, compose available children, and emit unresolved goals as typed

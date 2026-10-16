@@ -1,7 +1,7 @@
 """Small verifier configuration and flat raw-byte trusted benchmark archives.
 
-This freezes provenance and target metadata. Running Lake, comparing kernels,
-accepting proofs and publishing export results remain checker/export operations.
+This freezes provenance and target metadata. The LeanEval CLI wrapper owns Lake
+and comparator commands; proof acceptance and source exports remain checker/export operations.
 """
 from dataclasses import dataclass
 from functools import cached_property

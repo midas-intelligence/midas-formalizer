@@ -1,4 +1,4 @@
-# Clean Midas: domain through CLI
+# Clean Midas: domain through CLI and LeanEval
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
@@ -44,12 +44,118 @@ dependency is domain; compression uses the existing `zstandard` dependency.
 admission, publication, receipt application, retries, cancellation and recovery.
 
 `midas/export` implements assembly, source/library integration, independent export
-verification and exact-file publication. LeanEval remains separate work for a
-wrapper around `cli`; it is not an export profile or a second controller loop.
+verification and exact-file publication. `midas/leaneval` wraps the existing CLI
+and adds benchmark preparation, comparator execution, judge publication and fresh
+submission verification. It is not an export profile or a second controller loop.
 
 `midas/application` constructs these services and implements the complete run
 workflow. `midas/status` owns committed views, node queries and presentation;
 `midas/cli` owns arguments, signals, stop IPC, output routing and exit handling.
+
+## LeanEval
+
+`python -B -m midas.leaneval` passes ordinary commands to `midas.cli`. Its extra
+commands are `prepare`, `finalize`, and `verify-submission`; `start --workspace`
+supplies a prepared selection and source library to the ordinary start workflow.
+No v2 modules are imported by the implementation.
+
+First freeze a package with the existing `package` command. Its project contains
+the exact generated benchmark starter, and its project inputs include
+`project/Submission.lean`. Search paths must include compiled local helpers and
+the configured dependencies. The package command checks those inputs; LeanEval
+does not fetch or build missing external dependencies. Prepared helper objects
+must include the sidecars produced by Lean's `-o` and `-i` options. A normal Lake
+build supplies them. Use the existing package/attachment functions to prepare
+these inputs.
+
+```sh
+# From new/; package.json uses the ordinary package configuration below.
+../.venv/bin/python -B -m midas.leaneval package package --config package.json
+../.venv/bin/python -B -m midas.leaneval prepare workspace --package package --verification-config verification.json
+../.venv/bin/python -B -m midas.leaneval start run --workspace workspace --config config.json --output bundle
+../.venv/bin/python -B -m midas.leaneval status run
+../.venv/bin/python -B -m midas.leaneval resume run --output bundle
+../.venv/bin/python -B -m midas.leaneval finalize bundle result --workspace workspace --verification-config verification.json --runtime /absolute/path/to/regular-usr
+../.venv/bin/python -B -m midas.leaneval verify-submission result --workspace workspace --verification-config verification.json --runtime /absolute/path/to/regular-usr --evidence-output verification.bin
+```
+
+`start --workspace` also accepts the ordinary scripted and supplied-candidate
+options. It selects every archived benchmark output, including definitions, and
+rejects competing package/source/target flags. Resume, fork, stop, status, artifact,
+and export use the ordinary CLI and its saved run records. `finalize` takes an
+ordinary **export bundle**, produced by `--output` or `export RUN BUNDLE`.
+`verify` remains the ordinary source-bundle command; `verify-submission` checks the
+LeanEval result, including its submission and judge copies.
+
+The verifier config is the existing environment format, capped at 16 KiB. Paths
+resolve relative to the config file. For example:
+
+```json
+{
+  "format": "midas-verification-config-v2",
+  "benchmark": "/absolute/path/to/benchmark-checkout",
+  "revision": "<40 lowercase hex digits>",
+  "problem": "sample",
+  "tools": {
+    "landrun": {"path": "/tools/landrun", "sha256": "<64 lowercase hex digits>"},
+    "lean4export": {"path": "/tools/lean4export", "sha256": "<64 lowercase hex digits>"},
+    "comparator": {"path": "/tools/comparator", "sha256": "<64 lowercase hex digits>"},
+    "nanoda_bin": {"path": "/tools/nanoda_bin", "sha256": "<64 lowercase hex digits>"}
+  },
+  "dependencies": [],
+  "allow_archived_fixture": false
+}
+```
+
+Each dependency entry supplies `name`, `path`, `module_paths`, and `source_roots`.
+Its name must identify the matching frozen package root. Preparation reuses
+environment Git/closure admission and source replay, and export library capture.
+It binds the starter bytes, complete target selection, dependency objects and
+toolchain to the existing package hash. The workspace stores `archive.bin`,
+`selection.bin`, `library.bin`, a small `workspace.bin`, and flat
+`library/<source-hash>.lean` files. It does not copy the environment manifest.
+
+Finalization first independently audits the ordinary bundle, then runs the
+archived `lake test` harness with the existing executor. The explicit runtime is
+a regular-file tree representing `/usr`, including its shell, Git, dynamic loader
+and required native libraries. Source, tools, toolchain and frozen dependencies
+are mounted read-only; only the private Lake build directory is writable. Lake
+uses the archived dependency lock and generated path overrides. Both kernels and
+the comparator must report acceptance, with successful exit and complete output.
+Compiler limits, cancellation, capture bounds and export byte limits use the
+existing services and policy configuration.
+
+The result contains `bundle/`, `submission/`, `verification.bin`, `manifest.bin`,
+and, for active problems, `judge-submission/<problem>/`. Only verified active
+benchmarks produce judge files; archived fixtures stay non-ready. Partial
+`--allow-sorry` bundles are rejected. Publication uses the shared atomic exporter
+and never overwrites conflicting files. Use a new result directory for a new
+verification report.
+
+`verify-submission` checks all inventories and copies, then performs fresh source
+auditing and comparator execution. Historical report contents grant no acceptance.
+It needs the workspace and its frozen package; `--package` permits relocation to
+an identical package. The original benchmark checkout is needed only for
+preparation. Sources, archives, library records, inventories and diagnostic output
+use raw/binary framing; only bounded configuration, Lake metadata and CLI summaries
+use JSON. The raw evidence uses the environment's flat `read_rows` framing with
+magic `MIDASEVL\x01`: metadata followed by audit/comparator or stdout/stderr fields.
+
+Validation on 2026-10-16: **476 regression tests passed**, including 14 focused
+LeanEval checks. Real Lean 4.35.0-rc3/bubblewrap checks passed source replay for a
+local helper, supplied CLI execution, library export, comparator acceptance by
+Lean and nanoda, fresh independent verification, tamper rejection, and verified
+archived fixtures without judge files. No live model calls were made. Seven
+alternating timing medians measured new/v2 ratios of **0.148** for repeated
+100-helper overlays and **0.010** for framing 3 MB of comparator diagnostics.
+These measure local wrapper costs, not full benchmark or model throughput.
+
+```sh
+# Permission is required by the root AGENTS.md for Lean-related tests.
+../.venv/bin/python -B -m unittest tests.test_leaneval tests.test_export tests.test_environment tests.test_cli -q
+../.venv/bin/python -B -m tests.benchmark_leaneval
+../.venv/bin/python -B -m tests.check_leaneval_lean /absolute/path/to/toolchain/bin/lean /absolute/path/to/verifier-tools /absolute/path/to/lean4export
+```
 
 ## Status and CLI
 
