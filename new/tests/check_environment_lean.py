@@ -116,6 +116,25 @@ def dependency_checks(env, context, root):
         variables = tuple((key, '/build:' + value if key == 'LEAN_PATH' else value) for key, value in recipe.variables)
         output(context.run_process(replace(recipe, variables=variables)))
     dependency = Dependency('dep', dep, ('.lake/build/lib/lean',))
+    referenced = Environment.prepare(root / 'referenced-package', PackageConfig(
+        env.manifest.settings.version, env.toolchain,
+        (('project', env.roots['project']), ('dep', dep)), ('project/Main.lean',),
+        ('project', 'dep/.lake/build/lib/lean', 'toolchain/lib/lean'),
+        preflight_imports=('Dep',)), context)
+    assert referenced.roots['dep'] == dep
+    assert not (referenced.directory / 'dep').exists()
+    assert Environment.restore(referenced.directory).id == referenced.id
+    original = (dep / 'Base.lean').read_bytes()
+    (dep / 'Base.lean').write_bytes(b'def baseValue : Nat := 2\n')
+    try:
+        referenced.validate()
+    except EnvironmentError:
+        pass
+    else:
+        raise AssertionError('Changed referenced dependency was accepted')
+    finally:
+        (dep / 'Base.lean').write_bytes(original)
+    print('referenced dependency, isolated import and mutation rejection: passed', flush=True)
     pin = Pin('dep', revision, 'https://example.invalid/dep', 'lakefile.toml')
     closure = resolve_closure(lock((pin,)), ('dep',), (dependency,), context)
     modules = inventory_modules(closure, (dependency,), context, required=('Dep',),

@@ -26,7 +26,7 @@ def attach(environment, destination, dependency, prefixes, context, *, bootstrap
         raise EnvironmentError('Library attachment does not admit compiler overrides/plugins')
     if dependency.name in environment.roots:
         raise EnvironmentError('Library root conflicts with an existing package root')
-    inventory, observed = scan(dependency.path, maximum=max_bytes, check=context.check)
+    inventory, observed = scan(dependency.path, links=True, maximum=max_bytes, check=context.check)
     modules = set()
     for path in dependency.module_paths:
         prefix = '' if path == '.' else path + '/'
@@ -52,13 +52,13 @@ def attach(environment, destination, dependency, prefixes, context, *, bootstrap
     searches += ('toolchain/lib/lean',)
     config = PackageConfig(spec.version, environment.toolchain, (*roots, (dependency.name, dependency.path)),
                            spec.project_inputs, searches, max_bytes, tuple(sorted(modules)))
-    # Preparation checks all imported modules before atomic publication. Old roots
-    # are copied from the exact admitted package; preflight cannot modify them.
+    # Preparation checks imports before publication. Dependency roots retain their
+    # admitted locations; only the project/runtime are local snapshots.
     def admit(prepared):
         for name in environment.roots:
             if name not in ('runtime', 'toolchain') and environment._inventories[name] != prepared._inventories[name]:
                 raise EnvironmentError('Attachment changed an original package pin')
-        _, after = scan(dependency.path, hash_content=False, maximum=max_bytes, check=context.check)
+        _, after = scan(dependency.path, hash_content=False, links=True, maximum=max_bytes, check=context.check)
         if observed != after:
             raise EnvironmentError('Library changed during attachment')
     prepared = Environment.prepare(destination, config, context, bootstrap=bootstrap, _before_publish=admit)

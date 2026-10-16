@@ -65,7 +65,7 @@ def fixture(base):
     manifest = Manifest(spec, inventory, sha256(b'launcher').hexdigest())
     with (package / 'environment.bin').open('wb') as output:
         manifest.save(output)
-    (package / 'location.json').write_bytes(canonical({'toolchain': str(toolchain)}))
+    (package / 'location.json').write_bytes(canonical({'toolchain': str(toolchain), 'roots': {}}))
     return Environment(package, manifest, toolchain, str(launcher))
 
 
@@ -348,6 +348,60 @@ class EnvironmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.prepare(prepared.directory)
 
+    def test_dependencies_are_referenced_without_copying_and_changes_are_rejected(self):
+        dependency = self.env.roots['checker']
+        write(dependency / 'large.bin', b'x' * (2 * 1024**2))
+        from midas.environment.package import copy_file
+        def copy(source, *args, **kwargs):
+            self.assertFalse(Path(source).is_relative_to(dependency), 'dependency was copied')
+            return copy_file(source, *args, **kwargs)
+        with patch('midas.environment.package.copy_file', side_effect=copy):
+            prepared = self.prepare(self.root / 'referenced')
+        self.assertEqual(prepared.roots['checker'], dependency)
+        self.assertFalse((prepared.directory / 'checker').exists())
+        self.assertLess(sum(p.stat().st_size for p in prepared.directory.rglob('*') if p.is_file()), 16384)
+        recipe = prepared.launch(('--version',))
+        mount = next(m for m in recipe.mounts if m.target == '/checker')
+        self.assertEqual(mount.source, str(dependency))
+        self.assertFalse(mount.writable)
+        restored = Environment.restore(prepared.directory, launcher=prepared.launcher)
+        self.assertEqual(restored.id, prepared.id)
+        self.assertEqual(restored.roots['checker'], dependency)
+        write(dependency / 'large.bin', b'y' * (2 * 1024**2))
+        with self.assertRaises(ValueError):
+            restored.validate()
+        with self.assertRaises(ValueError):
+            Environment.restore(prepared.directory, launcher=prepared.launcher)
+
+    def test_referenced_dependencies_relocate_only_with_matching_content(self):
+        prepared = self.prepare(self.root / 'referenced')
+        dependency = self.root / 'moved-checker'
+        shutil.copytree(prepared.roots['checker'], dependency)
+        moved = Environment.restore(prepared.directory, launcher=prepared.launcher,
+                                    references={'checker': dependency})
+        self.assertEqual(moved.id, prepared.id)
+        self.assertEqual(moved.roots['checker'], dependency)
+        write(dependency / 'extra')
+        with self.assertRaises(ValueError):
+            Environment.restore(prepared.directory, launcher=prepared.launcher,
+                                references={'checker': dependency})
+        with self.assertRaises(ValueError):
+            Environment.restore(prepared.directory, launcher=prepared.launcher,
+                                references={'project': prepared.roots['project']})
+
+    def test_referenced_internal_file_aliases_need_no_materialized_copy(self):
+        dependency = self.env.roots['checker']
+        (dependency / 'alias.txt').symlink_to('Resource.lean')
+        prepared = self.prepare(self.root / 'referenced')
+        prepared.validate()
+        self.assertTrue((dependency / 'alias.txt').is_symlink())
+        self.assertEqual(prepared.manifest.inventory.by_path['checker/alias.txt'].sha256,
+                         prepared.manifest.inventory.by_path['checker/Resource.lean'].sha256)
+        (dependency / 'alias.txt').unlink()
+        (dependency / 'alias.txt').symlink_to('/etc/passwd')
+        with self.assertRaises(ValueError):
+            prepared.validate()
+
     def test_prepare_failure_budget_and_changing_inputs_do_not_publish(self):
         destination = self.root / 'new-package'
         with self.assertRaises(ValueError):
@@ -361,6 +415,15 @@ class EnvironmentTests(unittest.TestCase):
                 self.prepare(destination)
         self.assertFalse(destination.exists())
         self.assertEqual(list(self.root.glob('.midas-package-*')), [])
+
+    def test_missing_package_references_fail_before_large_inventory_or_copy(self):
+        for config in (replace(self.config(), search_paths=('checker/missing',)),
+                       replace(self.config(), project_inputs=('project/Missing.lean',))):
+            with self.subTest(config=config), patch('midas.environment.package.scan',
+                    side_effect=AssertionError('unnecessary inventory')):
+                with self.assertRaisesRegex(ValueError, 'Missing referenced'):
+                    self.prepare(self.root / 'missing', config=config)
+            self.assertFalse((self.root / 'missing').exists())
 
     def test_publication_race_preserves_existing_destination(self):
         destination = self.root / 'race'
@@ -413,15 +476,43 @@ class DependencyTests(unittest.TestCase):
         with patch.object(GitReader, 'head', return_value=self.pin.revision), patch.object(GitReader, 'committed', side_effect=lambda _, path, **kwargs: self.metadata[path]):
             return resolve_closure(lock((self.pin,)), required, mappings or (self.dep,), self.context)
 
-    def test_lake_metadata_cap_pins_and_transitive_conflict(self):
+    def test_lake_metadata_cap_pins_and_root_lock_overrides(self):
         self.assertEqual(lake_pins(lock((self.pin,)))['dep'], self.pin)
         with patch('json.loads', side_effect=AssertionError('large JSON')), self.assertRaises(ValueError):
             lake_pins(b' ' * 16385)
         with self.assertRaises(ValueError):
             lake_pins(lock((self.pin, self.pin)))
         self.metadata['lake-manifest.json'] = lock((replace(self.pin, revision='2' * 40),))
+        write(self.dep.path / 'lake-manifest.json', self.metadata['lake-manifest.json'])
+        self.assertEqual(self.closure().pins, (self.pin,))
+        self.metadata['lake-manifest.json'] = lock((replace(self.pin, name='missing'),))
         with self.assertRaises(ValueError):
             self.closure()
+
+    def test_lake_quoted_names_are_normalized_without_accepting_unsafe_roots(self):
+        quoted = lock((self.pin,)).replace(b'"dep"', '"«lean-pool»"'.encode())
+        expected = replace(self.pin, name='lean-pool')
+        self.assertEqual(lake_pins(quoted), {'lean-pool': expected})
+        for name in ('«../dep»', '«dep/sub»', '«dep.name»', '««dep»»', '«dep'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                lake_pins(lock((self.pin,)).replace(b'"dep"', ('"' + name + '"').encode()))
+        duplicate = lock((self.pin, self.pin)).replace(b'"dep"', '"«dep»"'.encode(), 1)
+        with self.assertRaisesRegex(ValueError, 'Duplicate Lake dependency'):
+            lake_pins(duplicate)
+
+    def test_source_listing_ignores_unrelated_links_but_rejects_lean_links(self):
+        tree = (b'100644 blob ' + b'1' * 40 + b'\tRoot.lean\0' +
+                b'100644 blob ' + b'2' * 40 + b'\tDir/Child.lean\0' +
+                b'120000 blob ' + b'3' * 40 + b'\tdocs/README.md\0')
+        reader = GitReader(self.dep.path, self.context)
+        with patch.object(GitReader, 'run', return_value=tree):
+            self.assertEqual(set(reader.listing(self.pin.revision, suffixes=('.lean',))),
+                             {'Root.lean', 'Dir/Child.lean'})
+            with self.assertRaisesRegex(ValueError, 'Unsafe Git'):
+                reader.listing(self.pin.revision)
+        with patch.object(GitReader, 'run', return_value=tree.replace(b'docs/README.md', b'Alias.lean')):
+            with self.assertRaisesRegex(ValueError, 'Unsafe Git'):
+                reader.listing(self.pin.revision, suffixes=('.lean',))
 
     def test_closure_exact_mapping_and_development_toolchain_provenance(self):
         self.metadata['lean-toolchain'] = b'leanprover/lean4:v4.20.0'
@@ -466,7 +557,7 @@ class DependencyTests(unittest.TestCase):
         closure = self.closure()
         data = (self.dep.path / 'Dep.lean').read_bytes()
         oid = sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-        def changed(*args):
+        def changed(*args, **kwargs):
             write(self.dep.path / 'lakefile.toml', b'changed during admission')
             return {'Dep.lean': (False, oid)}
         with patch.object(GitReader, 'head', return_value=self.pin.revision), patch.object(GitReader, 'listing', side_effect=changed):
@@ -531,6 +622,10 @@ class ArchiveTests(unittest.TestCase):
             load_archive(payload.getvalue().replace(b'-- source', b'-- SOURCE'), expected_id=archive.id)
 
     def test_config_relocation_tool_pins_and_bounded_loading(self):
+        import json
+        value = dict(json.loads(self.config.identity_bytes()), benchmark=str(self.config.benchmark),
+            tools={t.name: dict(path=str(t.path), sha256=t.sha256) for t in self.config.tools})
+        self.assertEqual(load_config((json.dumps(value, indent=2) + '\n').encode()), self.config)
         archive = benchmark_archive(self.config)
         relocated = replace(self.config, benchmark=self.root / 'gone')
         self.assertEqual(match_relocation(relocated, archive).targets, (('Submission.goal', 'theorem'),))

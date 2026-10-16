@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import tomllib
 
-from ..domain.encoding import canonical, fields, load_json
+from ..domain.encoding import canonical, fields, load_json, load_metadata
 from ..source import parse_identifier
 from .dependencies import Dependency, GitReader, lake_pins
 from .inventory import (EnvironmentError, chunks, file_hash, read_rows,
@@ -85,7 +85,7 @@ class VerificationConfig:
 
 
 def load_config(payload, *, base=Path('.')):
-    value = load_json(payload)  # Hard 16 KiB cap before JSON decoding.
+    value = load_metadata(payload)  # External configuration; capped before decoding.
     fields(value, ('format', 'benchmark', 'revision', 'problem', 'tools', 'dependencies', 'allow_archived_fixture'))
     if value['format'] != FORMAT:
         raise EnvironmentError('Unsupported verifier configuration')
@@ -197,8 +197,8 @@ def describe(archive):
         archived = catalog['status'] == 'archived'
         if archived and not config.allow_archived_fixture:
             raise EnvironmentError('Archived fixture requires explicit opt-in')
-        holes = load_json(files[prefix + 'holes.json'])
-        settings = load_json(files[prefix + 'config.json'])
+        holes = load_metadata(files[prefix + 'holes.json'])
+        settings = load_metadata(files[prefix + 'config.json'])
         if type(holes) is not dict or holes.get('id') != config.problem or holes.get('module') != catalog.get('module'):
             raise EnvironmentError('Catalog and starter metadata disagree')
         hole_list, catalog_holes = holes.get('holes'), catalog.get('holes')

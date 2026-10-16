@@ -9,6 +9,7 @@ from ..application.preparation import operate
 from ..domain import encoding as codec
 from ..environment import File, match_relocation, scan
 from ..environment.inventory import chunks, copy_file, relative
+from ..environment.dependencies import lake_name
 from ..environment.package import output
 from ..executor import LaunchSpec, Mount
 from .workspace import evidence, starter
@@ -38,17 +39,18 @@ def overlay(trusted, submission):
 def lake_metadata(archive, dependencies):
     trusted = starter(archive)
     lake = tomllib.loads(trusted['lakefile.toml'].decode())
-    lock = codec.load_json(next(f.data for f in archive.files if f.path == 'lake-manifest.json'))
+    lock = codec.load_metadata(next(f.data for f in archive.files if f.path == 'lake-manifest.json'))
     if type(lock.get('version')) is not str:
         raise ValueError('Trusted Lake lock requires a version')
     direct = [r['name'] for r in lake.get('require', ())]
     if len(set(direct)) != len(direct) or not set(direct) <= set(dependencies):
         raise ValueError('Missing or duplicate starter dependencies')
-    packages = [dict(p, inherited=p['name'] not in direct) for p in lock['packages'] if p['name'] in dependencies]
-    if {p['name'] for p in packages} != set(dependencies):
+    packages = [dict(p, inherited=lake_name(p['name']) not in direct)
+                for p in lock['packages'] if lake_name(p['name']) in dependencies]
+    if {lake_name(p['name']) for p in packages} != set(dependencies):
         raise ValueError('Workspace dependencies differ from the trusted lock')
     lock = dict(lock, name=lake['name'], packagesDir='.lake/packages', lakeDir='.lake', fixedToolchain=False, packages=packages)
-    overrides = dict(version=lock['version'], packages=[dict(type='path', dir='/deps/'+p['name'],
+    overrides = dict(version=lock['version'], packages=[dict(type='path', dir='/deps/'+lake_name(p['name']),
         name=p['name'], manifestFile=p.get('manifestFile', 'lake-manifest.json'),
         configFile=p['configFile'], inherited=p['inherited']) for p in packages])
     payload = codec.canonical(lock)

@@ -2,6 +2,7 @@
 from dataclasses import replace
 from hashlib import sha256
 import io
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
@@ -47,6 +48,30 @@ class Contracts(unittest.TestCase):
             with self.subTest(supplied=supplied), self.assertRaises(ValueError):
                 comparator.overlay(starter, supplied)
 
+    def test_external_json_formatting_preserves_archive_bytes_and_comparator_inputs(self):
+        files = tuple(replace(f, data=(json.dumps(codec.load_json(f.data), indent=2) + '\n').encode())
+                      if f.path.endswith('.json') else f for f in self.archive.files)
+        archive = Archive(self.archive.config, files)
+        self.assertEqual(describe(archive), describe(self.archive))
+        self.assertEqual(archive.files, files)
+        self.assertNotEqual(archive.id, self.archive.id)
+        self.assertEqual(comparator.lake_metadata(archive, ()), comparator.lake_metadata(self.archive, ()))
+        # Internal persisted identities still require canonical bytes.
+        with self.assertRaisesRegex(ValueError, 'Noncanonical'):
+            Archive(b' ' + archive.config, files)
+
+    def test_external_json_rejects_duplicate_keys_and_oversized_metadata(self):
+        original = json.loads
+        def bounded(payload, **kwargs):
+            self.assertLessEqual(len(payload), 16384)
+            return original(payload, **kwargs)
+        for name in ('generated/sample/holes.json', 'generated/sample/config.json', 'lake-manifest.json'):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'Duplicate'):
+                changed(self.archive, name, b'{"id":"sample", "id":"sample"}')
+            with self.subTest(name=name), patch('json.loads', side_effect=bounded):
+                with self.assertRaisesRegex(ValueError, 'byte limit'):
+                    changed(self.archive, name, b' ' * 16385)
+
     def test_markers_require_success_and_complete_capture(self):
         success = Diagnostic(b'\n'.join(comparator.MARKERS), 128, False)
         empty = Diagnostic(b'', 0, False)
@@ -80,6 +105,20 @@ class Contracts(unittest.TestCase):
         archive = Archive(self.archive.config, tuple(sorted(files, key=lambda f: f.path)))
         with self.assertRaisesRegex(ValueError, 'conflicts'):
             comparator.lake_metadata(archive, ())
+
+    def test_workspace_overrides_use_root_labels_for_quoted_lake_names(self):
+        package = dict(name='«lean-pool»', type='git', rev='1' * 40,
+                       url='https://example.test/pool', configFile='lakefile.toml')
+        lock = dict(version='1.3.0', packagesDir='.lake/packages', packages=[package])
+        archive = changed(self.archive, 'lake-manifest.json', (json.dumps(lock, indent=2) + '\n').encode())
+        archive = changed(archive, 'generated/sample/lakefile.toml',
+            ('name="sample"\n[[require]]\nname="lean-pool"\ngit="https://example.test/pool"\nrev="' + '1' * 40 + '"\n').encode())
+        self.assertEqual(describe(archive).required_dependencies, ('lean-pool',))
+        encoded, overrides = comparator.lake_metadata(archive, ('lean-pool',))
+        self.assertEqual(codec.load_json(encoded)['packages'][0]['name'], '«lean-pool»')
+        entry = codec.load_json(overrides)['packages'][0]
+        self.assertEqual(entry['dir'], '/deps/lean-pool')
+        self.assertFalse(entry['inherited'])
 
     def test_large_publication_is_raw_atomic_and_never_overwrites(self):
         files = {'Submission.lean': b'--'+b'x'*2_000_000,

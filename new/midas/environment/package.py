@@ -147,8 +147,9 @@ def _publish(stage, destination):
     sync_directory(destination.parent)
 
 
-def _locator(directory, toolchain):
-    payload = canonical({'toolchain': str(toolchain)})
+def _locator(directory, toolchain, references):
+    payload = canonical({'toolchain': str(toolchain),
+                         'roots': {name: str(path) for name, path in references.items()}})
     with (directory / 'location.json').open('xb') as target:
         target.write(payload)
         target.flush()
@@ -185,13 +186,25 @@ def _runtime(bootstrap, context, toolchain):
 class Environment:
     """The sole owner of the manifest and physical input roots for one environment."""
 
-    def __init__(self, directory, manifest, toolchain, launcher):
+    def __init__(self, directory, manifest, toolchain, launcher, *, references=None):
         self.directory = absolute(directory)
         self.manifest = manifest
         self.toolchain = absolute(toolchain)
         self.launcher = str(absolute(launcher))
-        self.roots = MappingProxyType({name: self.toolchain if name == 'toolchain' else self.directory / name
-                                       for name in manifest.roots})
+        references = dict(references or {})
+        if (len(references) > 32 or set(references) - set(manifest.roots)
+                or set(references) & {'toolchain', 'runtime', 'project'}):
+            raise EnvironmentError('Invalid referenced dependency roots')
+        references = {label(name): absolute(path) for name, path in references.items()}
+        for name, path in references.items():
+            if path.is_relative_to(self.directory) or self.directory.is_relative_to(path):
+                raise EnvironmentError('Referenced dependency overlaps package')
+            if (self.directory / name).exists() or (self.directory / name).is_symlink():
+                raise EnvironmentError('Package has both local and referenced dependency: ' + name)
+        self.shared_roots = frozenset(references)
+        self.roots = MappingProxyType({name: self.toolchain if name == 'toolchain'
+                                      else references.get(name, self.directory / name)
+                                      for name in manifest.roots})
         self._inventories = {name: subset(manifest.inventory, name) for name in manifest.roots}
         digest = sha256()
         for block in chunks(manifest.toolchain.rows(), b'TOOLCHAIN\x01'):
@@ -219,6 +232,7 @@ class Environment:
             raise EnvironmentError('Package destination exists')
         toolchain = absolute(config.toolchain)
         sources = {name: absolute(path) for name, path in config.roots}
+        references = {name: path for name, path in sources.items() if name != 'project'}
         all_roots = [toolchain, *sources.values()]
         for index, path in enumerate(all_roots):
             fd = open_root(path)
@@ -232,6 +246,17 @@ class Environment:
         settings = Settings(version_number(config.version), 'linux-' + platform.machine(),
                             'ELF-' + platform.machine(), config.project_inputs, config.search_paths,
                             'runtime/' + loader.name)
+        # Reject bad references before scanning or copying multi-gigabyte roots.
+        input_roots = dict(sources, toolchain=toolchain)
+        for paths, directory in ((settings.project_inputs, False), (settings.search_paths, True)):
+            for path in paths:
+                name, _, tail = path.partition('/')
+                if name == 'runtime':
+                    continue  # The small compiler runtime is assembled below.
+                root = input_roots.get(name)
+                target = root / tail if root is not None else None
+                if target is None or not (target.is_dir() if directory else target.is_file()):
+                    raise EnvironmentError('Missing referenced ' + ('directory: ' if directory else 'file: ') + path)
         tool_inventory, observed = scan(toolchain, links=True, check=context.check)
         with tempfile.TemporaryDirectory(prefix='.midas-package-', dir=destination.parent) as temporary:
             stage = Path(temporary) / 'package'
@@ -240,19 +265,22 @@ class Environment:
             entries_left = MAX_ENTRIES - len(tool_inventory.files) - len(tool_inventory.directories) - 1
             for name, source in sources.items():
                 context.check()
-                # Scan metadata then hash while copying, avoiding two full content reads.
-                inventory, before = scan(source, hash_content=False, maximum=remaining,
+                shared = name in references
+                # Dependencies are pinned in place. Only the project is copied.
+                inventory, before = scan(source, hash_content=shared, links=shared, maximum=remaining,
                                          max_entries=entries_left, check=context.check)
                 entries_left -= len(inventory.files) + len(inventory.directories)
                 observations[name] = before
-                target = stage / name
-                target.mkdir()
-                for path in inventory.directories:
-                    (target / path).mkdir(parents=True, exist_ok=True)
-                files = tuple(copy_file(source / item.path, target / item.path, item, check=context.check)
-                              for item in inventory.files)
-                remaining -= sum(f.size for f in files)
-                inventories[name] = Inventory(inventory.directories, files)
+                if not shared:
+                    target = stage / name
+                    target.mkdir()
+                    for path in inventory.directories:
+                        (target / path).mkdir(parents=True, exist_ok=True)
+                    files = tuple(copy_file(source / item.path, target / item.path, item, check=context.check)
+                                  for item in inventory.files)
+                    inventory = Inventory(inventory.directories, files)
+                remaining -= sum(f.size for f in inventory.files)
+                inventories[name] = inventory
             target = stage / 'runtime'
             target.mkdir()
             files = []
@@ -266,14 +294,15 @@ class Environment:
             inventories['runtime'] = Inventory(('.',), tuple(sorted(files, key=lambda f: f.path)))
             inventories['toolchain'] = tool_inventory
             for name, source in sources.items():
-                _, after = scan(source, hash_content=False, maximum=config.max_bytes, check=context.check)
+                _, after = scan(source, hash_content=False, links=name in references,
+                                maximum=config.max_bytes, check=context.check)
                 if observations[name] != after:
                     raise EnvironmentError('Source changed while freezing package')
             _, after = scan(toolchain, hash_content=False, links=True, check=context.check)
             if observed != after:
                 raise EnvironmentError('Toolchain changed while freezing package')
             manifest = Manifest(settings, combine(inventories), bootstrap.launcher_sha256)
-            environment = cls(stage, manifest, toolchain, bootstrap.launcher)
+            environment = cls(stage, manifest, toolchain, bootstrap.launcher, references=references)
             report = output(context.run_process(environment.launch(('--version',)))).decode()
             check_version(report, settings.version)
             checks = [(b'version', report.encode())]
@@ -303,22 +332,22 @@ class Environment:
                     target.write(block)
                 target.flush()
                 os.fsync(target.fileno())
-            _locator(stage, toolchain)
+            _locator(stage, toolchain, references)
             # Account for metadata as well as copied payloads before publication.
             extra = sum((stage / p).stat().st_size for p in ('environment.bin', 'preflight.bin', 'location.json'))
             if extra > remaining:
                 raise EnvironmentError('Package metadata exceeds remaining byte allowance')
             for name, inventory in inventories.items():
-                if name != 'toolchain':
+                if name not in ('toolchain', *references):
                     for path in sorted(inventory.directories, key=lambda p: p.count('/'), reverse=True):
                         sync_directory(stage / name / path)
             sync_directory(stage)
             _publish(stage, destination)
-        return cls(destination, manifest, toolchain, bootstrap.launcher)
+        return cls(destination, manifest, toolchain, bootstrap.launcher, references=references)
 
     @classmethod
     def restore(cls, directory, *, manifest=None, expected_id=None, toolchain=None,
-                launcher='/usr/bin/bwrap', hash_toolchain=None, check=lambda: None):
+                references=None, launcher='/usr/bin/bwrap', hash_toolchain=None, check=lambda: None):
         directory = absolute(directory)
         if manifest is None:
             manifest = load_manifest(safe_read(directory / 'environment.bin', MAX_INVENTORY), expected_id=expected_id)
@@ -328,14 +357,18 @@ class Environment:
             raise EnvironmentError('Saved environment identity mismatch')
         if toolchain is None:
             toolchain = os.environ.get('MIDAS_SHARED_TOOLCHAIN')
-        if toolchain is None:
-            locator = load_json(safe_read(directory / 'location.json', 8192))
-            if type(locator) is not dict or set(locator) != {'toolchain'} or not isinstance(locator['toolchain'], str) or not Path(locator['toolchain']).is_absolute():
-                raise EnvironmentError('Invalid shared toolchain locator')
-            toolchain = locator['toolchain']
+        if toolchain is None or references is None:
+            locator = load_json(safe_read(directory / 'location.json', 16384))
+            if (type(locator) is not dict or set(locator) != {'toolchain', 'roots'}
+                    or type(locator['roots']) is not dict or len(locator['roots']) > 32
+                    or any(type(p) is not str or not Path(p).is_absolute()
+                           for p in (locator['toolchain'], *locator['roots'].values()))):
+                raise EnvironmentError('Invalid shared input locator')
+            toolchain = toolchain or locator['toolchain']
+            references = locator['roots'] if references is None else references
         if (directory / 'toolchain').exists() or (directory / 'toolchain').is_symlink():
             raise EnvironmentError('Package has both local and shared toolchains')
-        environment = cls(directory, manifest, toolchain, launcher)
+        environment = cls(directory, manifest, toolchain, launcher, references=references)
         environment.validate(hash_toolchain=hash_toolchain, check=check)
         return environment
 
@@ -356,7 +389,7 @@ class Environment:
                     _verified.popitem(last=False)
         for name, path in self.roots.items():
             if name != 'toolchain':
-                _check_root(path, self._inventories[name], check=check)
+                _check_root(path, self._inventories[name], links=name in self.shared_roots, check=check)
         self._admitted = (os.getpid(), content)
         return self.id
 

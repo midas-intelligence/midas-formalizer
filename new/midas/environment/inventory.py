@@ -211,7 +211,7 @@ def _inventory(directories, files):
 
 def scan(root, *, hash_content=True, links=False, maximum=MAX_BYTES,
          max_entries=MAX_ENTRIES, check=lambda: None, exclude=(), suffixes=()):
-    """No-follow traversal; only toolchain callers opt into internal file aliases.
+    """No-follow traversal; shared input callers can opt into internal file aliases.
 
     Iteration depth, enumeration, bytes and file counts are independently bounded.
     The caller owns snapshot stability; stamps detect changes during admission.
@@ -250,7 +250,7 @@ def scan(root, *, hash_content=True, links=False, maximum=MAX_BYTES,
             if links and stat.S_ISLNK(info.st_mode):
                 target = (root / path).resolve(strict=True)
                 if not target.is_relative_to(root) or not target.is_file():
-                    raise EnvironmentError('External or directory toolchain link')
+                    raise EnvironmentError('External or directory input link')
                 observed[path + '/@link'] = original
                 info = target.stat()
             if stat.S_ISDIR(info.st_mode):

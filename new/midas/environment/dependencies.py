@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import tempfile
 
-from ..domain.encoding import load_json
+from ..domain.encoding import load_metadata
 from ..executor import Mount
 from ..source.context import module_name
 from .inventory import (BLOCK, EnvironmentError, File, Inventory, MAX_BYTES, _open_file,
@@ -59,9 +59,16 @@ class Pin:
             raise EnvironmentError('Unsupported Lake configuration path')
 
 
+def lake_name(value):
+    """Map Lake's quoted single-component names to admitted root labels."""
+    if isinstance(value, str) and value.startswith('«') and value.endswith('»'):
+        value = value[1:-1]
+    return label(value)
+
+
 def lake_pins(payload):
     """Lake lockfiles are small metadata: reject above 16 KiB before JSON parsing."""
-    value = load_json(payload)
+    value = load_metadata(payload)
     if (type(value) is not dict or value.get('packagesDir') != '.lake/packages'
             or type(value.get('packages')) is not list or len(value['packages']) > 32):
         raise EnvironmentError('Unsupported Lake lock inventory')
@@ -70,7 +77,7 @@ def lake_pins(payload):
         if (type(item) is not dict or item.get('type') != 'git' or item.get('subDir') is not None
                 or item.get('manifestFile', 'lake-manifest.json') != 'lake-manifest.json'):
             raise EnvironmentError('Unsupported dependency source or metadata paths')
-        pin = Pin(item.get('name'), item.get('rev'), item.get('url'), item.get('configFile'))
+        pin = Pin(lake_name(item.get('name')), item.get('rev'), item.get('url'), item.get('configFile'))
         if pin.name in result:
             raise EnvironmentError('Duplicate Lake dependency')
         result[pin.name] = pin
@@ -94,7 +101,7 @@ class GitReader:
     def head(self):
         return self.run('rev-parse', '--verify', 'HEAD').decode().strip()
 
-    def listing(self, revision, *paths):
+    def listing(self, revision, *paths, suffixes=()):
         if re.fullmatch('[0-9a-f]{40}', revision) is None:
             raise EnvironmentError('Invalid pinned Git revision')
         result = {}
@@ -107,6 +114,8 @@ class GitReader:
                 path = relative(path.decode())
             except (ValueError, UnicodeError) as error:
                 raise EnvironmentError('Invalid Git tree record') from error
+            if suffixes and not path.endswith(suffixes):
+                continue
             if path in result or mode not in (b'100644', b'100755') or kind != b'blob' or not re.fullmatch(b'[0-9a-f]{40}', oid):
                 raise EnvironmentError('Unsafe Git tree entry, link or submodule')
             result[path] = (mode == b'100755', oid.decode())
@@ -159,9 +168,12 @@ def resolve_closure(lock, required, dependencies, context, *, bootstrap=None):
             observations.append((name, path, metadata[path]))
         if not metadata['lean-toolchain'].strip():
             raise EnvironmentError('Missing dependency development toolchain pin')
-        for child, child_pin in lake_pins(metadata['lake-manifest.json']).items():
-            if locked.get(child) != child_pin:
-                raise EnvironmentError('Transitive dependency pin differs from root lock')
+        # Lake materializes the entire workspace from the root lock. A dependency's
+        # development lock can pin older revisions; retain it as provenance, but
+        # resolve its names to the root pins and verify those actual checkouts.
+        for child in lake_pins(metadata['lake-manifest.json']):
+            if child not in locked:
+                raise EnvironmentError('Transitive dependency absent from root lock')
             pending.append(child)
         admitted[name] = pin
     if set(mappings) != set(admitted):
@@ -270,14 +282,14 @@ def inventory_modules(closure, dependencies, context, *, required=(), standard=f
     remaining = max_bytes
     for dep in dependencies:
         if source_only:
-            native, _ = scan(dep.path, hash_content=False, maximum=remaining, check=context.check,
+            native, _ = scan(dep.path, hash_content=False, links=True, maximum=remaining, check=context.check,
                              exclude=('.git', '.lake/packages'))
             if any(f.path.endswith(('.so', '.dll', '.dylib')) or '.so.' in f.path for f in native.files):
                 raise EnvironmentError('Source-only dependency contains a native plugin')
         reader = GitReader(dep.path, context, bootstrap=bootstrap)
         if reader.head() != pins[dep.name].revision:
             raise EnvironmentError('Dependency HEAD differs from admitted closure')
-        listing = reader.listing(pins[dep.name].revision)
+        listing = reader.listing(pins[dep.name].revision, suffixes=('.lean',))
         expected = {p: value for p, value in listing.items() if p.endswith('.lean')}
         source, before = scan(dep.path, hash_content=False, exclude=('.git', '.lake'),
                               suffixes=('.lean',), maximum=remaining, check=context.check)

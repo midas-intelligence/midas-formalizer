@@ -101,8 +101,9 @@ def prepare(application, destination, *, package, verification, config, cancella
                                     max_bytes=config.export.max_bytes, source_only=True)
         for dependency in verification.dependencies:
             if (dependency.name not in environment.roots or
-                    scan(dependency.path, maximum=config.export.max_bytes, check=context.check)[0] !=
-                    scan(environment.roots[dependency.name], maximum=config.export.max_bytes, check=context.check)[0]):
+                    scan(dependency.path, links=True, maximum=config.export.max_bytes, check=context.check)[0] !=
+                    scan(environment.roots[dependency.name], links=True,
+                         maximum=config.export.max_bytes, check=context.check)[0]):
                 raise ValueError('Frozen dependency differs from admitted benchmark dependency')
         # Local starter helpers use their archived sources and the package's object inventory.
         local = []

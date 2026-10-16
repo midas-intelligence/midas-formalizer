@@ -68,6 +68,17 @@ must include the sidecars produced by Lean's `-o` and `-i` options. A normal Lak
 build supplies them. Use the existing package/attachment functions to prepare
 these inputs.
 
+Dependency roots are referenced in place, including large Mathlib trees. Package
+preparation copies only the project and compiler runtime, and pins dependency
+contents in the binary manifest. Keep referenced directories available and stable;
+restoring or explicitly validating a package rejects changed dependency inputs.
+
+Measured on the Morley fixture (2026-10-16): ordinary CLI package preparation
+completed in **67.08 seconds**, referencing **8.28 GB** across ten dependencies.
+The package contained **27.62 MB**, mostly its binary inventory, and a **1,033-byte**
+locator. The previous copying attempt exceeded the CLI's ten-minute allowance.
+This measures package preparation and Lean source preflight, not proof generation.
+
 ```sh
 # From new/; package.json uses the ordinary package configuration below.
 ../.venv/bin/python -B -m midas.leaneval package package --config package.json
@@ -106,6 +117,11 @@ resolve relative to the config file. For example:
   "allow_archived_fixture": false
 }
 ```
+
+External JSON configuration, benchmark metadata and Lake lockfiles accept ordinary
+JSON whitespace and key ordering, with the 16 KiB cap checked before parsing.
+Duplicate keys remain invalid, and archived files retain their exact original
+bytes. Lake's quoted package names map to the corresponding plain root labels.
 
 Each dependency entry supplies `name`, `path`, `module_paths`, and `source_roots`.
 Its name must identify the matching frozen package root. Preparation reuses
@@ -1649,17 +1665,22 @@ executor reservation; installation probes, preflight, native builds and replay
 all use that context's cumulative process limits and cancellation. There is no
 second process runner or scheduler inside environment.
 
-Preparation shares the installed toolchain and copies other roots. It checks
+Preparation references the installed toolchain and dependency directories, and
+copies only the project and compiler runtime. Missing configured files or search
+directories are rejected before large inventories are scanned. It checks
 source stability, records exact file hashes/modes/directories, freezes the runtime
 closure for Lean and native build tools, and checks the reported compiler version
 and selected sources under bubblewrap. Only successful preflight publishes the
 package, using an atomic rename that cannot replace an existing destination.
-Copied bytes, runtime files and package metadata consume the package allowance;
-the shared toolchain is inventoried separately. Internal toolchain file aliases
+Referenced dependency bytes, copied bytes, runtime files and package metadata
+consume the input allowance; the toolchain is inventoried separately. Internal
+file aliases in referenced inputs
 are allowed; external links, directory links and special files are rejected.
 
 The package contains `environment.bin`, `preflight.bin`, a small `location.json`,
-and the original roots. Its manifest is a flat binary record stream beginning
+and local `project/` and `runtime/` snapshots. The locator records the toolchain
+path and a flat dependency-name-to-directory map, capped at 16 KiB. No dependency
+tree, hardlink farm or shared copy is created. Its manifest is a flat binary record stream beginning
 with `MIDASENV` and byte `2`. Paths, settings and file metadata have explicit
 lengths; hashes remain raw 32-byte fields. `env_…` hashes the canonical manifest.
 Loading validates canonical record ordering, bounded lengths/counts, directories,
@@ -1672,8 +1693,12 @@ supplied locations. A supplied saved manifest is authoritative; a package's loos
 manifest cannot replace it. Opening a standalone package reads its binary manifest.
 The explicit toolchain argument, `MIDAS_SHARED_TOOLCHAIN`, or the small package
 locator selects an installation. Relocation does not change the environment ID.
+`references={name: directory, ...}` supplies a replacement dependency location map
+to `Environment.restore`; each directory must match the saved content inventory.
 
-Frozen package files receive exact content checks. Shared toolchains retain v2's
+Local snapshots and referenced dependencies receive exact content checks, including
+added files, modes and directories. Dependencies are mounted read-only for Lean;
+the original directories must remain stable during a run. Shared toolchains retain v2's
 default metadata admission and optional content policy
 (`MIDAS_VERIFY_TOOLCHAIN=1`, or `validate(hash_toolchain=True)`). Successful
 toolchain admissions are bounded, process-local and keyed by location, exact
@@ -1697,9 +1722,12 @@ bubblewrap hash is also checked at execution; missing isolation never enables a
 host fallback. Trusted bootstrap inspection uses an explicit Linux system runtime
 under bubblewrap; compiler jobs use the frozen runtime.
 
-Dependency closure admission compares pinned commits, committed Lake metadata,
-transitive pins, mapping membership and source/module paths. Development
-toolchain metadata is provenance, so it may differ from the workspace compiler.
+Dependency closure admission compares checkouts against the workspace root lock,
+committed Lake metadata, mapping membership and source/module paths. Like Lake,
+it resolves transitive dependencies using the root lock; dependency development
+locks may pin older versions, but cannot introduce names absent from the root
+lock. Development toolchain metadata is provenance, so it may differ from the
+workspace compiler.
 Module admission checks complete committed Lean source bytes, required modules,
 unambiguous source mappings, sidecars and module conflicts. It rechecks metadata
 and HEAD after scanning; its source-only profile also rejects native libraries.
