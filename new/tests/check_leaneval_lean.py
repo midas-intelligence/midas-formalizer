@@ -1,6 +1,7 @@
 """Opt-in Lean/bubblewrap/comparator integration; requires AGENTS.md permission."""
 import io
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -8,6 +9,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+from unittest.mock import patch
 
 from midas.application import Application
 from midas.domain import encode_submission
@@ -57,15 +59,33 @@ def main():
     lean4export = Path(sys.argv[3]).resolve(strict=True) if len(sys.argv) > 3 else tool_root/'lean4export'
     with TemporaryDirectory(prefix='midas-leaneval-lean-') as temporary:
         root = Path(temporary)
+        dependency = root/'dependency'
+        dependency.mkdir()
+        (dependency/'Fixture.lean').write_text('def Fixture.value : Nat := 7\n')
+        (dependency/'lakefile.toml').write_text('name="fixture"\n[[lean_lib]]\nname="Fixture"\n')
+        (dependency/'lean-toolchain').write_text('leanprover/lean4:v4.35.0-rc3\n')
+        (dependency/'.gitignore').write_text('.lake/\n')
+        subprocess.run([str(toolchain/'bin/lake'), 'build', 'Fixture'], cwd=dependency,
+            env=dict(os.environ, PATH=str(toolchain/'bin')+os.pathsep+os.environ.get('PATH', '')),
+            check=True, capture_output=True, timeout=120)
+        def git_at(directory, *args):
+            return subprocess.run(['/usr/bin/git', '-C', str(directory), '-c', 'user.name=Fixture',
+                '-c', 'user.email=fixture@example.test', '-c', 'core.hooksPath=/dev/null', *args],
+                check=True, capture_output=True, timeout=30).stdout
+        git_at(dependency, 'init')
+        git_at(dependency, 'add', '.')
+        git_at(dependency, 'commit', '-m', 'dependency fixture')
+        dependency_revision = git_at(dependency, 'rev-parse', 'HEAD').decode().strip()
+        dependency_url = 'https://example.invalid/fixture'
         repo = root/'benchmark'
         starter = repo/'generated/sample'
         starter.mkdir(parents=True)
-        source = b'import Lean\nimport Submission.Helper\nnamespace Submission\ntheorem goal : True := by sorry\nend Submission\n'
+        source = b'import Lean\nimport Submission.Helper\nnamespace Submission\ntheorem goal : Fixture.value = 7 := by sorry\nend Submission\n'
         data = {
             'Submission.lean': source,
-            'Submission/Helper.lean': b'import Lean\nnamespace Submission\ntheorem helper : True := by trivial\nend Submission\n',
-            'Challenge.lean': b'import Lean\ntheorem goal : True := by sorry\n',
-            'Solution.lean': b'import Lean\nimport Submission\ntheorem goal : True := Submission.goal\n',
+            'Submission/Helper.lean': b'import Lean\nimport Fixture\nnamespace Submission\ntheorem helper : Fixture.value = 7 := by rfl\nend Submission\n',
+            'Challenge.lean': b'import Lean\nimport Fixture\ntheorem goal : Fixture.value = 7 := by sorry\n',
+            'Solution.lean': b'import Lean\nimport Submission\ntheorem goal : Fixture.value = 7 := Submission.goal\n',
             'WorkspaceTest.lean': HARNESS,
             'lean-toolchain': b'leanprover/lean4:v4.35.0-rc3\n',
             'lakefile.toml': b'name="sample"\ntestDriver="workspace_test"\n[[lean_lib]]\nname="Challenge"\n[[lean_lib]]\nname="Solution"\n[[lean_lib]]\nname="Submission"\n[[lean_exe]]\nname="workspace_test"\nroot="WorkspaceTest"\n',
@@ -73,6 +93,7 @@ def main():
             'config.json': codec.canonical(dict(challenge_module='Challenge', solution_module='Solution',
                 theorem_names=['goal'], permitted_axioms=['propext', 'Quot.sound', 'Classical.choice'], enable_nanoda=True)),
         }
+        data['lakefile.toml'] += (f'[[require]]\nname="fixture"\ngit="{dependency_url}"\nrev="{dependency_revision}"\n').encode()
         for path, payload in data.items():
             target = starter/path
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -81,14 +102,15 @@ def main():
             (repo/name).write_bytes(data[name])
         (repo/'LICENSE').write_bytes(b'Test fixture\n')
         (repo/'SECURITY.md').write_bytes(b'Test fixture\n')
-        (repo/'lake-manifest.json').write_bytes(codec.canonical(dict(version='1.1.0', packagesDir='.lake/packages', packages=[])))
+        (repo/'lake-manifest.json').write_bytes(codec.canonical(dict(version='1.1.0', packagesDir='.lake/packages',
+            packages=[dict(type='git', name='fixture', url=dependency_url, rev=dependency_revision,
+                inputRev=dependency_revision, subDir=None, manifestFile='lake-manifest.json',
+                configFile='lakefile.toml', inherited=False)])))
         catalog = repo/'manifests/problems/sample.toml'
         catalog.parent.mkdir(parents=True)
         catalog.write_bytes(b'id="sample"\nstatus="active"\nmodule="Sample"\nholes=["goal"]\n')
         def git(*args):
-            return subprocess.run(['/usr/bin/git', '-C', str(repo), '-c', 'user.name=Fixture',
-                '-c', 'user.email=fixture@example.test', '-c', 'core.hooksPath=/dev/null', *args],
-                check=True, capture_output=True, timeout=30).stdout
+            return git_at(repo, *args)
         git('init')
         git('add', '.')
         git('commit', '-m', 'fixture')
@@ -96,7 +118,8 @@ def main():
         tools = {name: lean4export if name == 'lean4export' else tool_root/name for name in TOOLS}
         verification = dict(format=FORMAT, benchmark=str(repo), revision=revision, problem='sample',
             tools={name: dict(path=str(path), sha256=file_hash(path)) for name, path in tools.items()},
-            dependencies=[], allow_archived_fixture=False)
+            dependencies=[dict(name='fixture', path=str(dependency), module_paths=['.lake/build/lib/lean'],
+                               source_roots=['.'])], allow_archived_fixture=False)
         config_path = root/'verification.json'
         config_path.write_bytes(codec.canonical(verification))
         runtime = root/'runtime'
@@ -106,21 +129,33 @@ def main():
         shutil.copytree(starter, project)
         subprocess.run([str(toolchain/'bin/lean'), '--root='+str(project), '-o', str(project/'Submission/Helper.olean'),
             '-i', str(project/'Submission/Helper.ilean'),
-            str(project/'Submission/Helper.lean')], check=True, capture_output=True, timeout=60)
+            str(project/'Submission/Helper.lean')], check=True, capture_output=True, timeout=60,
+            env=dict(os.environ, LEAN_PATH=str(dependency/'.lake/build/lib/lean')))
         app = Application('/tmp/midas-new-checker-runtime')
-        app.package(root/'package', PackageConfig('4.35.0-rc3', toolchain, (('project', project),),
-            ('project/Submission.lean',), ('project', 'toolchain/lib/lean')))
+        app.package(root/'package', PackageConfig('4.35.0-rc3', toolchain,
+            (('project', project), ('fixture', dependency)),
+            ('project/Submission.lean',), ('project', 'fixture/.lake/build/lib/lean', 'toolchain/lib/lean')))
         def command(*args, code=0):
             out, err = io.StringIO(), io.StringIO()
             result = cli.main([str(a) for a in (*args, '--json')], stdout=out, stderr=err,
                               application_factory=lambda *a, **kw: Application('/tmp/midas-new-checker-runtime'))
             assert result == code, (args, result, err.getvalue(), out.getvalue())
             return [json.loads(line) for line in out.getvalue().splitlines()]
-        command('prepare', root/'workspace', '--package', root/'package', '--verification-config', config_path)
+        with patch('midas.environment.replay_dependencies', side_effect=AssertionError('Unexpected dependency replay')), \
+             patch('midas.environment.configure_modules', side_effect=AssertionError('Unexpected dependency option capture')):
+            command('prepare', root/'workspace', '--package', root/'package', '--verification-config', config_path)
         bound = workspace.load(app, root/'workspace')
         assert bound.library is not None
+        rows = {row['name']: row for row in bound.library.decode()}
+        assert rows['Fixture']['source'] is None
+        assert rows['Submission.Helper']['source'] is not None
         assert all(path.is_file() and len(path.stem) == 64 for path in (root/'workspace/library').iterdir())
-        print('archive, exact selection and local helper source replay passed', flush=True)
+        print('archive, exact selection and compiled dependency preparation without replay passed', flush=True)
+        command('prepare', root/'replayed-workspace', '--package', root/'package',
+                '--verification-config', config_path, '--replay-dependencies')
+        replayed = workspace.load(app, root/'replayed-workspace')
+        assert all(row['source'] is not None for row in replayed.library.decode())
+        print('explicit source replay mode passed', flush=True)
         candidate = encode_submission(dict(format='midas-scoped-candidates', submission_id=str(uuid4()),
             selection_id=bound.selection.id, definitions=[], entries=[dict(key='parent',
             subject=dict(kind='target', name='Submission.goal'), proof='by exact Submission.helper', dependencies=[],
@@ -130,6 +165,25 @@ def main():
                 '--output', root/'bundle', '--quiet')
         assert command('status', root/'run')[0]['turns'] == 0
         print('ordinary supplied CLI, library export and source audit passed', flush=True)
+        assert not (root/'bundle/src/Fixture.lean').exists()
+        assert (root/'bundle/src/Submission/Helper.lean').is_file()
+        # Wrong fresh proofs still fail despite trusting the imported objects.
+        bad_candidate = encode_submission(dict(format='midas-scoped-candidates', submission_id=str(uuid4()),
+            selection_id=bound.selection.id, definitions=[], entries=[dict(key='parent',
+            subject=dict(kind='target', name='Submission.goal'), proof='by exact False.elim (by trivial)', dependencies=[],
+            review=None, revision_of=None, definition_scope=dict(statement=0, proof=0))]))
+        (root/'bad-candidate.bin').write_bytes(bad_candidate)
+        command('start', root/'bad-run', '--workspace', root/'workspace', '--candidates', root/'bad-candidate.bin',
+                '--quiet', code=1)
+        print('invalid generated proof rejected', flush=True)
+        compiled = dependency/'.lake/build/lib/lean/Fixture.olean'
+        original_compiled = compiled.read_bytes()
+        compiled.write_bytes(original_compiled + b'tamper')
+        try:
+            command('verify', root/'bundle', '--package', root/'package', code=2)
+        finally:
+            compiled.write_bytes(original_compiled)
+        print('tampered compiled dependency rejected', flush=True)
         options = ('--workspace', root/'workspace', '--verification-config', config_path, '--runtime', runtime)
         result = command('finalize', root/'bundle', root/'submission', *options)[0]
         assert result['submission_ready']

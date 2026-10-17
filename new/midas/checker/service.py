@@ -162,8 +162,9 @@ class Checker:
             fresh = replace(fresh, mounts=(*fresh.mounts, Mount(str(channel), '/channel')),
                             variables=(*fresh.variables, ('MIDAS_EVIDENCE_PATH', '/channel/evidence')))
             if clean_workspace is not None:
-                from .rebuild import clean_launch
-                fresh = clean_launch(fresh, clean_workspace)
+                from .rebuild import clean_launch, trusted_roots
+                fresh = clean_launch(fresh, clean_workspace,
+                    trusted=trusted_roots(self.environment, packet['modules']))
             if self.retained and runtime.retained and clean_workspace is None:
                 attempts = context.run_import(runtime.recipe(self.environment, limits.memory_mib, files),
                     fresh=fresh, evidence_path=channel / 'evidence').attempts
@@ -251,6 +252,8 @@ class Checker:
                         diagnostics = ArtifactRef.from_dict(phases[-1]['stderr']['artifact'])
                         raise _Rejected('invalid_candidate' if built.outcome == Outcome.COMPILER_ERROR else built.outcome.value)
                 result, _ = run('audit', dict(packet, mode='audit'))
+                if clean_workspace is not None and any(row['source'] is None for row in packet['modules']):
+                    self.environment.validate(hash_toolchain=True, fresh=True, check=context.check)
                 self._audit_result(result, packet, digest)
                 accepted = save(codec.encode(result), limits.evidence_bytes)
             elif operation == 'probe':

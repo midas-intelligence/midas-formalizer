@@ -124,12 +124,37 @@ Duplicate keys remain invalid, and archived files retain their exact original
 bytes. Lake's quoted package names map to the corresponding plain root labels.
 
 Each dependency entry supplies `name`, `path`, `module_paths`, and `source_roots`.
-Its name must identify the matching frozen package root. Preparation reuses
-environment Git/closure admission and source replay, and export library capture.
+Its name must identify the matching frozen package root. By default, LeanEval
+trusts those dependencies' frozen `.olean` files and required sidecars, including
+Mathlib and lean-pool. Preparation checks pinned Git revisions, committed sources,
+module mappings and compiled-file hashes, without rebuilding dependencies or
+evaluating their compiler options. Compiled files remain referenced in place.
+Local starter helpers retain their source and are rebuilt during export checking;
+generated proofs still receive a fresh kernel audit.
+
+Use `prepare --replay-dependencies` to request full dependency source replay and
+subsequent export rebuilds. The chosen behavior is saved in the workspace library
+and carried through starts, resumes, export, finalization and independent verification.
+Trusted compiled bundles require their original frozen environment, including
+the dependencies; relocation to identical files is supported. Changed dependency
+objects are rejected. The ordinary comparator still checks both kernels.
+
+Compiled-dependency validation (2026-10-16): **71 focused Python tests passed**.
+Real Lean checks passed source-library export and standalone verification, plus
+a pinned Git dependency through default preparation, replay opt-in, supplied
+proof execution, export, both comparator kernels and fresh verification. Invalid
+proofs, modified compiled dependencies and modified submissions were rejected.
+The Morley retry completed default preparation in **120.82 seconds**, recording
+**8,965 trusted compiled modules** and two source helpers (`ChallengeDeps` and
+`Submission.Helpers`). Its library metadata occupied 4,326,109 bytes. This timing
+includes dependency admission and source inspection; it is not a completed proof run.
+
+Preparation uses the existing environment admission and export library capture.
 It binds the starter bytes, complete target selection, dependency objects and
 toolchain to the existing package hash. The workspace stores `archive.bin`,
 `selection.bin`, `library.bin`, a small `workspace.bin`, and flat
-`library/<source-hash>.lean` files. It does not copy the environment manifest.
+`library/<source-hash>.bin` source/asset files. It does not copy the environment manifest
+or the trusted dependencies' source trees.
 
 Finalization first independently audits the ordinary bundle, then runs the
 archived `lake test` harness with the existing executor. The explicit runtime is
@@ -464,11 +489,12 @@ unselected unfinished work. Its compiler stage audits the integrated source but 
 export. `prepare_verification` binds the exact admitted integration and file set.
 `Request.inputs`, `expected_versions`, `kind` and `payload` supply the frozen job.
 
-Independent verification uses a fresh compiler workspace. It rebuilds library
-sources in dependency order, checks their compiled hashes against the admitted
+Independent verification uses a fresh compiler workspace. It rebuilds source-bearing
+library modules in dependency order, checks their compiled hashes against the admitted
 interfaces, and rechecks every source/output after the final writable compiler
-process. Only the trusted toolchain/runtime, verifier and newly built library are
-visible to the final audit. The audit elaborates the complete entry and independently
+process. Explicitly trusted compiled dependencies are mounted read-only from the
+frozen environment and checked again after the final audit. The original project's
+compiled files are excluded. The audit elaborates the complete entry and independently
 kernel-replays its declarations, including non-target declarations. Selected target
 signatures must match exactly. Native proof caches and retained import workers are
 not used for this stage.
@@ -476,8 +502,14 @@ not used for this stage.
 `prepare_library(environment, modules, replay, dependencies, staging)` captures an
 environment-admitted source closure. That earlier replay supplies provenance and
 build order; export still performs its own rebuild. The source profile uses the
-toolchain alone. The library profile adds dependency sources and compiled hashes.
+toolchain alone. The library profile adds dependency sources, admitted compiler
+options, and compiled hashes.
 Plugins and compiler/environment overrides are outside these source profiles.
+
+`prepare_compiled_library(environment, modules, source_order, dependencies, staging)`
+captures compiled dependency identities plus ordered local helper sources. A flat
+library row with `source=None` records compiled trust; its complete sidecar hashes
+must match the frozen dependency. No environment inventory is copied into these rows.
 
 `export_operation(export, reduce, inputs)` connects all three stages to the existing
 controller. `inputs(reader, invocation)` supplies current `selection` and `graph`,
@@ -1633,7 +1665,7 @@ end-to-end formalization or compiler import-cache speed.
 
 ## Environment
 
-Six implementation modules plus `__init__.py` consolidate the environment-owned
+Eight implementation modules plus `__init__.py` consolidate the environment-owned
 parts of the twelve modules assigned by the cleanup blueprint:
 
 | Module | Responsibility |
@@ -1642,6 +1674,8 @@ parts of the twelve modules assigned by the cleanup blueprint:
 | `manifest.py` | Pinned Lean versions, immutable profile settings, canonical manifests, module conflicts, hash-only source bindings, bounded manifest cache |
 | `package.py` | Trusted installation probes, frozen runtime closure, preparation/preflight, atomic publication, shared toolchain admission/relocation, generated inputs and launch recipes |
 | `dependencies.py` | Pinned Git/Lake closure, complete source provenance, compiled modules/sidecars, metadata revalidation and isolated source replay |
+| `options.py` | Fresh isolated Lake configuration evaluation, typed bounded compiler options and small module setup documents |
+| `assets.py` | Committed literal `include_str` inputs and their source-relative paths |
 | `archive.py` | Bounded verification configuration, tool pins, committed benchmark archives, target metadata, relocation checks |
 | `attachment.py` | Namespace-scoped library attachment, retained original pins, import preflight and new environment identity |
 
@@ -1735,6 +1769,40 @@ Replay resolves the required import closure with empty placeholders, removes all
 placeholders, compiles in dependency order without prepared objects mounted, and
 compares exact generated sidecars. Results bind the environment hash, module
 inventory hash, import graph, build order and explicit options.
+`configure_modules(environment, closure, modules, context)` follows module inventory
+admission. The environment's `lean/Options.lean` helper evaluates each package's
+pinned Lake configuration once using the installed toolchain's Lake runtime,
+without fetching or building dependencies. Configuration caches stay in the private
+workspace; module source mappings must match the admitted sources. Library options
+include Lake's package/library precedence and build type. Extra compiler arguments
+and native plugins remain unsupported by this capture path.
+Typed options cross the helper boundary in a flat binary stream. Each module's
+canonical option pairs contribute to its inventory identity; equivalent option
+sets share one immutable tuple. There are at most 64 options per module, and a
+conservative escaped-size bound is checked before producing small setup JSON.
+Lake dependency replay supplies that setup with admitted package/module names and
+compiler options. Source library rows retain the package name and options for
+independent export rebuilds; package directories, inventories and toolchains remain
+in environment. Neither path reads cached Lake setup JSON or imports its artifact
+paths or plugins. Successfully prepared
+LeanEval workspaces retain the replayed source library for later starts/resumes;
+fresh workspace preparation repeats replay.
+Literal `include_str` paths (including `/` chains) are admitted against committed
+Git objects, checked for changes and staged with the required source modules.
+Only these referenced assets enter the source library and standalone export;
+dependency directories and compiled caches are not copied. Independent rebuilding
+checks asset hashes again and rejects conflicting paths.
+
+Validation on 2026-10-16 for package identity, assets and compiler options:
+**77 focused Python tests**, the real environment checks, and the complete export
+and standalone recheck suite passed. On Mathlib commit
+`5e0c4e5239cb0a2d86d68a884bf52cfd963fce22` with Lean 4.35.0-rc3,
+the `Mathlib.Order.Hom.Bounded` regression matched the admitted artifacts for all
+**381 required modules**, first in source replay and then in independent export
+rebuilding. Capturing options for 399 cached modules took **9.90 seconds**;
+package preparation, admission, replay and independent rebuilding together took
+**505.53 seconds**. This is a targeted dependency regression, not a complete Morley
+run or a comparison against v2.
 
 Benchmark archives use another flat binary stream (`MIDASARC`, byte `2`), retaining
 raw source bytes rather than JSON/hex. They verify the pinned working tree twice,
@@ -1765,6 +1833,8 @@ python3 -B -m unittest tests.test_environment -v
 python3 -B -m tests.benchmark_environment
 # Requires permission for Lean/bubblewrap:
 python3 -B -m tests.check_environment_lean /absolute/path/to/toolchain/bin/lean
+# Regression against a checkout with the Mathlib.Order.Hom.Bounded cache closure:
+python3 -B -m tests.check_mathlib_options_lean /absolute/path/to/toolchain/bin/lean /absolute/path/to/benchmark
 ```
 
 ## Checker

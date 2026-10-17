@@ -170,14 +170,22 @@ class Contracts(unittest.TestCase):
             workspace.check_selection(NS(source=b'changed', selected=selected.selected), self.archive)
 
     def test_bundle_rejects_partial_exports_or_a_different_benchmark(self):
-        bound = NS(environment_id='e', selection=NS(id='s'))
+        bound = NS(environment_id='e', selection=NS(id='s'), library=None)
         values = dict(environment_id='e', selection_id='s', allow_sorry=False,
-                      decode=lambda: {'packet': {'logical': 'Submission.lean'}})
+                      decode=lambda: {'packet': {'logical': 'Submission.lean', 'modules': []}})
         service.check_bundle(NS(**values), bound)
         for diff in (dict(environment_id='other'), dict(selection_id='other'), dict(allow_sorry=True),
                      dict(decode=lambda: {'packet': {'logical': 'Main.lean'}})):
             with self.assertRaises(ValueError):
                 service.check_bundle(NS(**dict(values, **diff)), bound)
+        bound.library = NS(decode=lambda: [{'name': 'Trusted'}])
+        with self.assertRaisesRegex(ValueError, 'dependency trust'):
+            service.check_bundle(NS(**values), bound)
+
+    def test_dependency_replay_is_explicit_and_optional(self):
+        args = ['prepare', '/workspace', '--package', '/package', '--verification-config', '/verification.json']
+        self.assertFalse(cli.parser().parse_args(args).replay_dependencies)
+        self.assertTrue(cli.parser().parse_args([*args, '--replay-dependencies']).replay_dependencies)
 
     def test_ordinary_commands_delegate_without_constructing_an_application(self):
         out, err = io.StringIO(), io.StringIO()
@@ -236,7 +244,7 @@ class PublicationTests(unittest.TestCase):
         self.verification = benchmark_config(self.root)
         archive = changed(benchmark_archive(self.verification), 'generated/sample/Submission.lean', source)
         self.bound = NS(directory=self.root/'workspace', package=self.root/'package', environment_id=f.environment.id,
-                        selection=f.selected, archive=archive)
+                        selection=f.selected, archive=archive, library=None)
         self.options = dict(workspace=self.bound.directory, verification=self.verification,
                             runtime=self.root/'runtime', config=Config())
         self.comparison = self.enterContext(patch.object(service.comparator, 'run', return_value=b'fresh comparator'))

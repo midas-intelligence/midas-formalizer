@@ -20,6 +20,8 @@ from ..source.context import module_name
 from .inventory import (BLOCK, EnvironmentError, File, Inventory, MAX_BYTES, _open_file,
                         chunks, copy_file, file_hash, relative, safe_read, scan, stamp)
 from .manifest import label
+from .assets import source_assets
+from .options import module_setup, option_rows
 from .package import Bootstrap, output
 
 SUFFIXES = ('.olean', '.olean.private', '.olean.server', '.ir', '.ir.sig', '.ilean')
@@ -229,6 +231,9 @@ class ModulePin:
     source: File
     compiled: tuple[File, ...]
     module_path: str
+    lake_package: str | None = None
+    assets: tuple[tuple[str, File], ...] = ()
+    lean_options: tuple[tuple[str, bool | int | str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -254,7 +259,12 @@ class Modules:
                 yield (b'I', name.encode(), path.encode())
                 yield from inventory.rows()
             for item in self.modules:
-                yield (b'M', item.name.encode(), item.package.encode(), item.source.path.encode(), item.module_path.encode())
+                yield (b'M', item.name.encode(), item.package.encode(), item.source.path.encode(), item.module_path.encode(),
+                       (item.lake_package or '').encode())
+                yield from option_rows(item.lean_options)
+                for path, asset in item.assets:
+                    yield (b'A', path.encode(), asset.path.encode(), str(asset.size).encode(),
+                           str(asset.executable).encode(), bytes.fromhex(asset.sha256))
         for block in chunks(rows(), b'MIDASMOD\x01'):
             digest.update(block)
         return digest.hexdigest()
@@ -290,6 +300,7 @@ def inventory_modules(closure, dependencies, context, *, required=(), standard=f
         if reader.head() != pins[dep.name].revision:
             raise EnvironmentError('Dependency HEAD differs from admitted closure')
         listing = reader.listing(pins[dep.name].revision, suffixes=('.lean',))
+        assets = {}
         expected = {p: value for p, value in listing.items() if p.endswith('.lean')}
         source, before = scan(dep.path, hash_content=False, exclude=('.git', '.lake'),
                               suffixes=('.lean',), maximum=remaining, check=context.check)
@@ -326,7 +337,15 @@ def inventory_modules(closure, dependencies, context, *, required=(), standard=f
                     raise EnvironmentError('Missing or ambiguous source for module: ' + name)
                 sidecars = tuple(compiled.by_path[item.path[:-6] + suffix] for suffix in SUFFIXES
                                  if item.path[:-6] + suffix in compiled.by_path)
-                modules[name] = ModulePin(name, dep.name, candidates[0], sidecars, path)
+                included = source_assets(dep.path, candidates[0], name,
+                    lambda p: reader.listing(pins[dep.name].revision, p), assets)
+                modules[name] = ModulePin(name, dep.name, candidates[0], sidecars, path, dep.name, included)
+        remaining -= sum(f.size for f in assets.values())
+        if remaining < 0:
+            raise EnvironmentError('Source assets exceed inventory byte limit')
+        for asset in assets.values():
+            if file_hash(dep.path / asset.path, maximum=asset.size, check=context.check) != asset.sha256:
+                raise EnvironmentError('Source asset changed during admission')
     if set(required) - modules.keys():
         raise EnvironmentError('Missing required compiled modules')
     for path, before, exclude, suffixes in observations:
@@ -387,7 +406,7 @@ def replay_dependencies(environment, modules, dependencies, context, *, options=
             from dataclasses import replace
             return output(context.run_process(replace(recipe, mounts=mounts, variables=variables)))
 
-        graph, pending = {}, deque(modules.required)
+        graph, pending, assets = {}, deque(modules.required), {}
         while pending:
             context.check()
             name = pending.popleft()
@@ -396,6 +415,14 @@ def replay_dependencies(environment, modules, dependencies, context, *, options=
             item = by_name[name]
             destination = source_root / (name.replace('.', '/') + '.lean')
             copy_file(roots[item.package] / item.source.path, destination, item.source, check=context.check)
+            for path, asset in item.assets:
+                if path in assets and assets[path] != (asset.sha256, asset.size):
+                    raise EnvironmentError('Conflicting source assets: ' + path)
+                if path.endswith('.lean') and path[:-5].replace('/', '.') in by_name:
+                    raise EnvironmentError('Source asset shadows a module')
+                if path not in assets:
+                    copy_file(roots[item.package] / asset.path, source_root / path, asset, check=context.check)
+                    assets[path] = (asset.sha256, asset.size)
             imports = set()
             for path in run(('--deps', '/build/src/' + name.replace('.', '/') + '.lean')).decode().splitlines():
                 if path.startswith('/build/lib/') and path.endswith('.olean'):
@@ -418,7 +445,15 @@ def replay_dependencies(environment, modules, dependencies, context, *, options=
             raise EnvironmentError('Cyclic dependency imports') from error
         for name in order:
             stem = name.replace('.', '/')
-            run((*options, '--root=/build/src', '-o', '/build/lib/' + stem + '.olean',
+            setup = ()
+            if by_name[name].lake_package is not None or by_name[name].lean_options:
+                # Lake's package identity affects modern Lean artifacts. Derive only
+                # this small setup from admitted names/options: cached setup files can contain
+                # large import maps, native plugins and paths outside the replay.
+                (workspace / 'module.setup.json').write_bytes(module_setup(
+                    name, by_name[name].lake_package, by_name[name].lean_options))
+                setup = ('--setup', '/build/module.setup.json')
+            run((*options, *setup, '--root=/build/src', '-o', '/build/lib/' + stem + '.olean',
                  '-i', '/build/lib/' + stem + '.ilean', '/build/src/' + stem + '.lean'))
             present = {suffix for suffix in SUFFIXES if (library / (stem + suffix)).exists()}
             expected = {f.path[len(stem):]: f for f in by_name[name].compiled}
@@ -427,6 +462,10 @@ def replay_dependencies(environment, modules, dependencies, context, *, options=
                 raise EnvironmentError('Replayed dependency differs from prepared compiled artifacts: ' + name)
         for name in order:
             item = by_name[name]
+            for path, asset in item.assets:
+                for candidate in (roots[item.package] / asset.path, source_root / path):
+                    if file_hash(candidate, maximum=asset.size, check=context.check) != asset.sha256:
+                        raise EnvironmentError('Source asset changed during replay')
             for path in (roots[item.package] / item.source.path, source_root / (name.replace('.', '/') + '.lean')):
                 if file_hash(path, maximum=item.source.size, check=context.check) != item.source.sha256:
                     raise EnvironmentError('Dependency source changed during replay')

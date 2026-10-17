@@ -40,6 +40,9 @@ def check_bundle(request, workspace):
     if (request.environment_id != workspace.environment_id or request.selection_id != workspace.selection.id
             or request.allow_sorry or request.decode()['packet']['logical'] != 'Submission.lean'):
         raise ValueError('Bundle must be a complete export of the prepared benchmark selection')
+    rows = workspace.library.decode() if workspace.library else []
+    if request.decode()['packet']['modules'] != rows:
+        raise ValueError('Bundle dependency trust differs from the prepared workspace')
 
 
 def verify(application, bundle, workspace, *, verification, runtime, config, cancellation=None):

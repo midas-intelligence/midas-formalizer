@@ -172,7 +172,8 @@ class Export:
         value['packet']['modules'] = rows
         files = [('src/' + selection.selected.request.source, source_ref),
                  ('lean-toolchain', save(('leanprover/lean4:v' + settings.version + '\n').encode()))]
-        files.extend(('src/' + row['name'].replace('.', '/') + '.lean', ArtifactRef.from_dict(row['source'])) for row in rows)
+        from ..checker.rebuild import module_files
+        files.extend(('src/' + path, ref) for path, ref in module_files(rows).items())
         refs = [r.evidence for r in roots] + [n.interface for n in nodes] + [r for _, r in files]
         request = _request(value, _metadata(profile, roots, maximum, environment.toolchain_id, files=sorted(files),
             allow_sorry=allow_sorry, nodes=nodes), refs)
@@ -195,16 +196,18 @@ class Export:
         if metadata['toolchain'] != environment.toolchain_id:
             raise ValueError('Export toolchain pin differs')
         files = file_rows(metadata['files'], metadata['maximum'])
-        from ..checker.rebuild import modules
+        from ..checker.rebuild import modules, module_files, trusted_roots
         rows = modules(packet['modules'])
+        trusted_roots(environment, rows)
         if metadata['profile'] == 'source' and rows:
             raise ValueError('Source-only profile cannot contain a library')
         expected = {'src/' + packet['logical'], 'lean-toolchain'}
-        for row in rows:
-            path = 'src/' + row['name'].replace('.', '/') + '.lean'
-            if path in expected or files.get(path) != ArtifactRef.from_dict(row['source']):
-                raise ValueError('Exported dependency source differs from audit input')
+        for path, ref in module_files(rows).items():
+            path = 'src/' + path
+            if path in expected or files.get(path) != ref:
+                raise ValueError('Exported dependency source/asset differs from audit input')
             expected.add(path)
+        for row in rows:
             object_path = environment.manifest.modules.get(row['name'])
             if object_path is None or object_path.startswith('toolchain/'):
                 raise ValueError('Unadmitted exported dependency')
@@ -226,7 +229,7 @@ class Export:
         return self.checker.execute(frozen, context)
 
     def prepare_recheck(self, request, reader):
-        """Recheck a standalone bundle using only its files and the pinned toolchain.
+        """Recheck bundle sources, using frozen dependencies when explicitly trusted.
 
         The returned checker audit grants no run-state authority. An application
         issues it through the same reserved compiler loop as any other audit.
@@ -236,12 +239,18 @@ class Export:
             raise ValueError('Standalone audit requires the exported toolchain pin')
         files = file_rows(value['export']['files'], value['export']['maximum'])
         packet = value['packet']
+        from ..checker.rebuild import modules, trusted_roots
+        rows = modules(packet['modules'])
+        if any(row['source'] is None for row in rows):
+            if request.environment_id != self.checker.environment.id:
+                raise ValueError('Trusted compiled bundle requires its original frozen environment')
+            trusted_roots(self.checker.environment, rows)
         data = read(reader, files['src/' + packet['logical']])
         if data.decode() != packet['source']:
             raise ValueError('Standalone source differs from saved verification')
-        for row in packet['modules']:
-            ref = ArtifactRef.from_dict(row['source'])
-            if files.get('src/' + row['name'].replace('.', '/') + '.lean') != ref:
+        from ..checker.rebuild import module_files
+        for path, ref in module_files(packet['modules']).items():
+            if files.get('src/' + path) != ref:
                 raise ValueError('Standalone module differs from exported files')
         value.pop('export')
         value.update(environment=self.checker.environment.id, inputs=[r.to_dict() for r in dict.fromkeys(files.values())])

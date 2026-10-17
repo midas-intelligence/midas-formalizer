@@ -196,8 +196,9 @@ class Application:
             if library:
                 item = artifact(library.payload)
                 from ..domain import ArtifactRef
-                for row in library.decode():
-                    writer.copy_artifact(library_reader, ArtifactRef.from_dict(row['source']))
+                from ..checker.rebuild import module_files
+                for ref in module_files(library.decode()).values():
+                    writer.copy_artifact(library_reader, ref)
                 effects.append(r.save(writer, r.SCOPE, 'library', item.source))
             counters = {}
             for role, data in script:

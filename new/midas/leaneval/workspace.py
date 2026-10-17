@@ -2,18 +2,20 @@
 from dataclasses import dataclass, replace
 from contextlib import closing
 from hashlib import sha256
+from graphlib import TopologicalSorter
 from pathlib import Path
 
 from ..application.preparation import operate
 from ..domain import ArtifactRef, FrozenSelection, SelectionRequest, encode_selection, load_selection
 from ..domain import encoding as codec
 from ..environment import (Archive, Dependency, File, ModulePin, archive_benchmark, describe,
-    inventory_modules, load_archive, replay_dependencies, resolve_closure, safe_read, scan)
+    inventory_modules, load_archive, resolve_closure, safe_read, scan)
 from ..environment.dependencies import SUFFIXES
 from ..environment.inventory import chunks
 from ..environment.package import output
-from ..export import BundleReader, Library, prepare_library
+from ..export import BundleReader, Library, prepare_compiled_library, prepare_library
 from ..export.layout import _Reader, publish_files, reference
+from ..checker.rebuild import module_files
 
 MAX_BYTES = 64*1024**2
 
@@ -70,17 +72,20 @@ def load(application, directory, *, package=None):
     selection = load_selection(selected, environment.selection_inputs())
     check_selection(selection, archive)
     library = Library(environment.id, library)
-    files = {row['source']['sha256']+'.lean': ArtifactRef.from_dict(row['source']) for row in library.decode()}
+    rows = library.decode()
+    files = {ref.sha256+'.bin': ref for ref in module_files(rows).values()}
     reader = BundleReader(directory/'library', files)
     # Read each source through its existing bounded artifact verifier.
     for ref in files.values():
         for _ in reader.stream_artifact(ref, max_bytes=MAX_BYTES):
             pass
     return Workspace(directory, package, environment.id, archive, selection,
-                     library if files else None, reader)
+                     library if rows else None, reader)
 
 
-def prepare(application, destination, *, package, verification, config, cancellation=None):
+def prepare(application, destination, *, package, verification, config, cancellation=None, replay_dependencies=False):
+    if type(replay_dependencies) is not bool:
+        raise ValueError('Expected a boolean dependency replay option')
     environment = application.environment(package)
 
     def build(context):
@@ -98,13 +103,16 @@ def prepare(application, destination, *, package, verification, config, cancella
                                   verification.dependencies, context)
         standard = frozenset(n for n, p in environment.manifest.modules.items() if p.startswith('toolchain/'))
         modules = inventory_modules(closure, verification.dependencies, context, standard=standard,
-                                    max_bytes=config.export.max_bytes, source_only=True)
+                                    max_bytes=config.export.max_bytes, source_only=replay_dependencies)
         for dependency in verification.dependencies:
             if (dependency.name not in environment.roots or
                     scan(dependency.path, links=True, maximum=config.export.max_bytes, check=context.check)[0] !=
                     scan(environment.roots[dependency.name], links=True,
                          maximum=config.export.max_bytes, check=context.check)[0]):
                 raise ValueError('Frozen dependency differs from admitted benchmark dependency')
+        if replay_dependencies:
+            from ..environment import configure_modules
+            modules = configure_modules(environment, closure, modules, context)
         # Local starter helpers use their archived sources and the package's object inventory.
         local = []
         dependency_names = {d.name for d in verification.dependencies}
@@ -129,22 +137,35 @@ def prepare(application, destination, *, package, verification, config, cancella
         if len({m.name for m in combined}) != len(combined):
             raise ValueError('Starter shadows a dependency module')
         by_path = {'/'+p: n for n, p in environment.manifest.modules.items()}
-        required = []
-        recipe = environment.launch(('--deps', '/project/Submission.lean'))
-        for path in output(context.run_process(recipe)).decode().splitlines():
-            name = by_path.get(path)
-            if name is None:
-                raise ValueError('Submission imports an unrecorded module: '+path)
-            if name not in standard and name not in required:
-                required.append(name)
+        def imports(source):
+            recipe = environment.launch(('--deps', '/project/'+source))
+            names = []
+            for path in output(context.run_process(recipe)).decode().splitlines():
+                name = by_path.get(path)
+                if name is None:
+                    raise ValueError('Starter imports an unrecorded module: '+path)
+                if name not in standard and name not in names:
+                    names.append(name)
+            return tuple(names)
+        required = imports('Submission.lean')
         modules = replace(modules, required=tuple(required), modules=tuple(sorted(combined, key=lambda m: m.name)))
         dependencies = (*verification.dependencies, Dependency(local_name, environment.roots['project'], ('.',)))
-        replay = replay_dependencies(environment, modules, dependencies, context)
+        if replay_dependencies:
+            from ..environment import replay_dependencies as replay_sources
+            replay = replay_sources(environment, modules, dependencies, context)
+        else:
+            local_names = {m.name for m in local}
+            graph = {m.name: sorted(set(imports(m.source.path)) & local_names) for m in local}
+            source_order = tuple(TopologicalSorter(graph).static_order())
         # Stream library sources once, without the preparation worker's small artifact quota.
         from ..storage import Staging
         with closing(Staging(context.workspace/'library', max_bytes=config.export.max_bytes, max_artifacts=10000)) as staging:
-            library = prepare_library(environment, modules, replay, dependencies, staging,
-                                      maximum=config.export.max_bytes)
+            if replay_dependencies:
+                library = prepare_library(environment, modules, replay, dependencies, staging,
+                                          maximum=config.export.max_bytes)
+            else:
+                library = prepare_compiled_library(environment, modules, source_order, dependencies, staging,
+                                                   maximum=config.export.max_bytes)
             selection = application.checker_factory(environment, application.cache).inspect(
                 SelectionRequest('Submission.lean', tuple(n for n, _ in benchmark.targets)), context)
             check_selection(selection, archive)
@@ -155,8 +176,7 @@ def prepare(application, destination, *, package, verification, config, cancella
                 selection=sha256(selected).hexdigest(), library=sha256(library.payload).hexdigest()))
             environment.validate(check=context.check)
             refs = {p: reference(data) for p, data in files.items()}
-            refs.update({'library/'+row['source']['sha256']+'.lean': ArtifactRef.from_dict(row['source'])
-                         for row in library.decode()})
+            refs.update({'library/'+ref.sha256+'.bin': ref for ref in module_files(library.decode()).values()})
             return publish_files(refs, _Reader(staging, {reference(data): data for data in files.values()}),
                 destination, protected=(environment.directory, verification.benchmark,
                     environment.toolchain, *(d.path for d in verification.dependencies)),

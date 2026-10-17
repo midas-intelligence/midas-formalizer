@@ -29,6 +29,9 @@ def parser():
         option(cmd, '--verification-config', type=Path, required=True)
         option(cmd, '--config', type=Path)
         cmd.add_argument('--json', action='store_true')
+        if name == 'prepare':
+            cmd.add_argument('--replay-dependencies', action='store_true',
+                help='rebuild dependency sources; by default trust frozen compiled dependency files')
         if name != 'prepare':
             option(cmd, '--workspace', type=Path, required=True)
             option(cmd, '--runtime', type=Path, required=True, help='explicit regular-file /usr runtime tree')
@@ -87,7 +90,7 @@ def main(argv=None, *, stdout=None, stderr=None, application_factory=Application
             verification = load_config(files.read(args.verification_config, 16384), base=args.verification_config.absolute().parent)
             if args.command == 'prepare':
                 bound = workspace.prepare(app, args.directory, package=args.package, verification=verification,
-                    config=config, cancellation=signals.cancelled)
+                    config=config, cancellation=signals.cancelled, replay_dependencies=args.replay_dependencies)
                 result = dict(type='leaneval-workspace', environment_id=bound.environment_id,
                               archive_id=bound.archive.id, selection_id=bound.selection.id)
             else:

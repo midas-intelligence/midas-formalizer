@@ -8,6 +8,9 @@ from ..domain import ArtifactRef
 from ..domain import encoding as codec
 from ..domain.records import identifier
 from ..environment import file_hash, scan
+from ..environment.inventory import relative
+from ..environment.options import module_setup, saved_options
+from ..environment.manifest import label
 from ..executor import Diagnostic, Outcome, ProcessResult
 from ..source.context import module_name
 from .requests import read
@@ -20,39 +23,91 @@ def modules(value):
         raise ValueError('Invalid audit module inventory')
     seen = set()
     for row in value:
-        codec.fields(row, ('name', 'source', 'compiled'))
+        codec.fields(row, ('name', 'package', 'source', 'assets', 'options', 'compiled'))
         module_name(row['name'])
+        if row['package'] is not None:
+            label(row['package'])
+        saved_options(row['options'])
         if row['name'].casefold() in seen or row['name'] == 'MidasCheck':
             raise ValueError('Duplicate or private audit module')
         seen.add(row['name'].casefold())
-        ArtifactRef.from_dict(row['source'])
+        if row['source'] is not None:
+            ArtifactRef.from_dict(row['source'])
+        elif row['assets'] or row['options']:
+            raise ValueError('Trusted compiled modules cannot carry source assets/options')
+        if type(row['assets']) is not list or len(row['assets']) > 256:
+            raise ValueError('Invalid source assets')
+        paths = set()
+        for asset in row['assets']:
+            if type(asset) is not list or len(asset) != 2 or relative(asset[0]) in paths:
+                raise ValueError('Invalid source asset path')
+            paths.add(asset[0])
+            ArtifactRef.from_dict(asset[1])
         compiled = row['compiled']
         if type(compiled) is not dict or '.olean' not in compiled or set(compiled) - set(SUFFIXES):
             raise ValueError('Invalid audit compiled hashes')
         for digest in compiled.values():
             identifier(digest, '')
+    module_files(value)
     return value
 
 
-def clean_launch(recipe, workspace):
-    """Only trusted runtime, toolchain, verifier, and newly built files are visible."""
+def module_files(rows):
+    """Flat source/asset map shared by workspace capture and independent exports."""
+    result = {row['name'].replace('.', '/') + '.lean': ArtifactRef.from_dict(row['source'])
+              for row in rows if row['source'] is not None}
+    sources = {row['name'].replace('.', '/') + '.lean' for row in rows}
+    for row in rows:
+        for path, value in row['assets']:
+            ref = ArtifactRef.from_dict(value)
+            if path in sources or path in result and result[path] != ref:
+                raise ValueError('Conflicting source asset: ' + path)
+            result[path] = ref
+    return result
+
+
+def trusted_roots(environment, rows):
+    """Resolve explicitly trusted objects against the one frozen environment."""
+    roots = set()
+    for row in rows:
+        if row['source'] is not None:
+            continue
+        path = environment.manifest.modules.get(row['name'], '')
+        root = path.split('/')[0]
+        if root not in environment.roots or root in ('project', 'toolchain', 'runtime', 'checker', 'inputs', 'channel', 'build'):
+            raise ValueError('Trusted compiled module must belong to a dependency root')
+        expected = {suffix: item.sha256 for suffix in SUFFIXES
+                    if (item := environment.manifest.inventory.by_path.get(path[:-6] + suffix)) is not None}
+        if row['compiled'] != expected:
+            raise ValueError('Trusted compiled dependency differs from frozen artifacts: ' + row['name'])
+        roots.add(root)
+    return tuple(sorted(roots))
+
+
+def clean_launch(recipe, workspace, *, trusted=()):
+    """Use fresh local objects and only the explicitly trusted dependency roots."""
     from ..executor import Mount
     mounts = tuple(m for m in recipe.mounts if m.target in
-                   ('/toolchain', '/runtime', '/checker', '/inputs', '/channel', '/build'))
+                   ('/toolchain', '/runtime', '/checker', '/inputs', '/channel', '/build',
+                    *('/' + root for root in trusted)))
     if not any(m.target == '/build' for m in mounts):
         mounts += (Mount(str(workspace), '/build'),)
-    variables = tuple((k, '/checker:/build/lib:/toolchain/lib/lean' if k == 'LEAN_PATH' else v)
+    paths = [p for p in dict(recipe.variables).get('LEAN_PATH', '').split(':')
+             if p.startswith('/') and p.split('/')[1] in trusted]
+    variables = tuple((k, ':'.join(('/checker', '/build/lib', *paths, '/toolchain/lib/lean')) if k == 'LEAN_PATH' else v)
                       for k, v in recipe.variables)
     return replace(recipe, mounts=mounts, variables=variables)
 
 
 def rebuild(environment, packet, context, *, maximum=16*1024**3):
-    """Rebuild exact dependency sources and the entry, never load cached proof objects.
+    """Rebuild local/source modules, optionally trusting pinned external objects.
 
     The aggregate keeps one bounded phase in the receipt even for 10,000 modules.
     Every subprocess consumes the executor context's cumulative resource budget.
     """
     rows = modules(packet['modules'])
+    trusted = trusted_roots(environment, rows)
+    source_rows = [row for row in rows if row['source'] is not None]
     settings = environment.manifest.settings
     if settings.plugins or settings.options or settings.variables:
         raise ValueError('Independent source audit does not admit compiler overrides/plugins')
@@ -77,16 +132,35 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
     empty = Diagnostic(b'', 0, False)
     last = ProcessResult(Outcome.COMPLETED, 0, 0, 0, 0, None, empty, empty)
     total = 0
+    files = module_files(rows)
+    if entry in files:
+        raise ValueError('Source asset shadows audit entry')
+    module_paths = {row['name'].replace('.', '/') + '.lean' for row in rows}
+    for path, ref in files.items():
+        if path not in module_paths:
+            total += ref.byte_count
+            if total > maximum:
+                raise ValueError('Rebuilt sources exceed export byte limit')
+            target = source / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(read(context.reader, ref))
 
-    def run(path, name):
+    def run(path, name, package, options=()):
         nonlocal last, elapsed, rss, anonymous
         context.check()
         stem = name.replace('.', '/')
         (library / stem).parent.mkdir(parents=True, exist_ok=True)
-        recipe = environment.launch(('--root=/build/src', '-o', '/build/lib/' + stem + '.olean',
+        setup = module_setup(name, package, options) if package is not None or options else None
+        arguments = ()
+        if setup is not None:
+            (workspace / 'module.setup.json').write_bytes(setup)
+            arguments = ('--setup', '/build/module.setup.json')
+        recipe = environment.launch((*arguments, '--root=/build/src', '-o', '/build/lib/' + stem + '.olean',
             '-i', '/build/lib/' + stem + '.ilean', '/build/src/' + path), build=workspace,
             max_heartbeat=context.limits.max_heartbeat, max_rec_depth=context.limits.max_rec_depth)
-        last = context.run_process(clean_launch(recipe, workspace))
+        last = context.run_process(clean_launch(recipe, workspace, trusted=trusted))
+        if setup is not None:
+            (workspace / 'module.setup.json').unlink()
         stdout.append(last.stdout.data)
         stderr.append(last.stderr.data)
         for index, stream in enumerate((last.stdout, last.stderr)):
@@ -99,7 +173,7 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
             return False
         return True
 
-    for row in rows:
+    for row in source_rows:
         path = row['name'].replace('.', '/') + '.lean'
         target = source / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -108,7 +182,7 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
         if total > maximum:
             raise ValueError('Rebuilt sources exceed export byte limit')
         target.write_bytes(read(context.reader, ref))
-        if not run(path, row['name']):
+        if not run(path, row['name'], row['package'], saved_options(row['options'])):
             break
         stem = library / row['name'].replace('.', '/')
         present = {suffix for suffix in SUFFIXES if Path(str(stem) + suffix).exists()}
@@ -119,7 +193,7 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
         # The audit elaborates and kernel-replays the complete entry itself.
         # Recheck all dependency bytes after the last writable compiler process;
         # a later module must not change an earlier, already checked output.
-        for row in rows:
+        for row in source_rows:
             stem = row['name'].replace('.', '/')
             ref = ArtifactRef.from_dict(row['source'])
             if file_hash(source / (stem + '.lean'), maximum=ref.byte_count, check=context.check) != ref.sha256:
@@ -127,9 +201,12 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
             for suffix, digest in row['compiled'].items():
                 if file_hash(library / (stem + suffix), check=context.check) != digest:
                     raise ValueError('Rebuilt dependency changed during compilation')
+        for path, ref in files.items():
+            if file_hash(source / path, maximum=ref.byte_count, check=context.check) != ref.sha256:
+                raise ValueError('Rebuilt source asset changed during compilation')
         inventory, _ = scan(workspace, maximum=maximum, check=context.check)
-        expected = {'src/' + row['name'].replace('.', '/') + '.lean' for row in rows}
-        expected.update('lib/' + row['name'].replace('.', '/') + suffix for row in rows for suffix in row['compiled'])
+        expected = {'src/' + path for path in files}
+        expected.update('lib/' + row['name'].replace('.', '/') + suffix for row in source_rows for suffix in row['compiled'])
         if set(inventory.by_path) != expected:
             raise ValueError('Rebuild produced unrecorded files')
     evidence = codec.encode({'format': 'midas-source-build-v1', 'modules': rows,

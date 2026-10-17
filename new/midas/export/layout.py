@@ -44,11 +44,28 @@ def prepare_library(environment, modules, replay, dependencies, staging, *, maxi
     """
     if replay.environment_id != environment.id or replay.modules_id != modules.id or replay.options:
         raise ValueError('Library replay differs from environment/modules')
+    return _capture_library(environment, modules, replay.build_order, dependencies, staging, maximum=maximum)
+
+
+def prepare_compiled_library(environment, modules, source_order, dependencies, staging, *, maximum=16*1024**3):
+    """Trust frozen external objects; retain local helpers as ordered sources."""
+    local = {m.name for m in modules.modules if environment.manifest.modules.get(m.name, '').startswith('project/')}
+    if type(source_order) is not tuple or len(set(source_order)) != len(source_order) or set(source_order) != local:
+        raise ValueError('Compiled library requires every local helper in source order')
+    trusted = frozenset(m.name for m in modules.modules if m.name not in local)
+    library = _capture_library(environment, modules, (*sorted(trusted), *source_order), dependencies, staging,
+                               maximum=maximum, trusted=trusted)
+    from ..checker.rebuild import trusted_roots
+    trusted_roots(environment, library.decode())
+    return library
+
+
+def _capture_library(environment, modules, order, dependencies, staging, *, maximum, trusted=frozenset()):
     environment.validate()
     by_name = {m.name: m for m in modules.modules}
     roots = {d.name: d.path for d in dependencies}
     rows, total = [], 0
-    for name in replay.build_order:
+    for name in order:
         item = by_name[name]
         object_path = environment.manifest.modules.get(name)
         if object_path is None or object_path.startswith('toolchain/'):
@@ -58,13 +75,27 @@ def prepare_library(environment, modules, replay, dependencies, staging, *, maxi
             pinned = environment.manifest.inventory.by_path.get(object_path[:-6] + suffix)
             if pinned is None or pinned.sha256 != digest:
                 raise ValueError('Library compiled interface differs from environment')
+        if name in trusted:
+            rows.append({'name': name, 'package': item.lake_package, 'source': None,
+                         'assets': [], 'options': [], 'compiled': compiled})
+            continue
         source = safe_read(roots[item.package] / item.source.path, MAX_BYTES)
         total += len(source)
         if total > maximum or len(source) != item.source.size or sha256(source).hexdigest() != item.source.sha256:
             raise ValueError('Library source changed or exceeds export limit')
         ref = staging.write_bounded(source, max_bytes=MAX_BYTES)
         ref.verify(source, max_bytes=MAX_BYTES)
-        rows.append({'name': name, 'source': ref.to_dict(), 'compiled': compiled})
+        assets = []
+        for path, asset in item.assets:
+            data = safe_read(roots[item.package] / asset.path, MAX_BYTES)
+            total += len(data)
+            if total > maximum or len(data) != asset.size or sha256(data).hexdigest() != asset.sha256:
+                raise ValueError('Library source asset changed or exceeds export limit')
+            asset_ref = staging.write_bounded(data, max_bytes=MAX_BYTES)
+            assets.append([path, asset_ref.to_dict()])
+        rows.append({'name': name, 'package': item.lake_package, 'source': ref.to_dict(),
+                     'assets': assets, 'options': [list(pair) for pair in item.lean_options],
+                     'compiled': compiled})
     return Library(environment.id, codec.encode(rows))
 
 

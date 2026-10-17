@@ -10,8 +10,9 @@ from tempfile import TemporaryDirectory
 import time
 
 from midas.domain import CapacityGrant, ResourceLimits, ResultStatus
+from midas.domain.encoding import canonical
 from midas.environment import (AuthorizedInput, Bootstrap, Dependency, Environment, EnvironmentError,
-    PackageConfig, Pin, file_hash, inventory_modules, replay_dependencies, resolve_closure)
+    PackageConfig, Pin, configure_modules, file_hash, inventory_modules, replay_dependencies, resolve_closure)
 from midas.environment.package import output
 from midas.executor import Executor, Mount, Outcome
 from tests.test_executor import invocation, success
@@ -92,26 +93,38 @@ def dependency_checks(env, context, root):
     """Small real Git/source/compiled closure, including a transitive module import."""
     dep = root / 'dependency'
     dep.mkdir()
-    (dep / 'Base.lean').write_text('def baseValue : Nat := 1\n')
-    (dep / 'Dep.lean').write_text('import Base\ndef value : Nat := baseValue\n')
+    (dep / 'Base.lean').write_text('module\npublic def baseValue : Nat := 1\n'
+                                  'public def baseText : String := include_str "resources" / "message.txt"\n')
+    (dep / 'resources').mkdir()
+    (dep / 'resources/message.txt').write_text('source asset\n')
+    (dep / 'Dep.lean').write_text('module\npublic import Base\npublic def value : Nat := baseValue\n')
     (dep / 'lake-manifest.json').write_bytes(lock())
-    (dep / 'lakefile.toml').write_text('name = "dep"\n')
+    (dep / 'lakefile.lean').write_text('import Lake\nopen Lake DSL\n'
+        'package dep where leanOptions := #[⟨`autoImplicit, false⟩]\n'
+        'lean_lib Base where leanOptions := #[⟨`maxSynthPendingDepth, .ofNat (1 + 1)⟩]\n'
+        'lean_lib Dep where leanOptions := #[⟨`maxSynthPendingDepth, .ofNat (1 + 2)⟩]\n')
     (dep / 'lean-toolchain').write_text('leanprover/lean4:v4.35.0-rc3\n')
     bootstrap = Bootstrap.installed()
     def git(*args):
         return bootstrap.run(context, ('/usr/bin/git', '-C', '/repo', *args),
                              mounts=(Mount(str(dep), '/repo', True),))
     git('init', '-q')
-    git('add', 'Base.lean', 'Dep.lean', 'lake-manifest.json', 'lakefile.toml', 'lean-toolchain')
+    git('add', 'Base.lean', 'Dep.lean', 'resources/message.txt', 'lake-manifest.json', 'lakefile.lean', 'lean-toolchain')
     git('-c', 'user.name=Midas Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture')
     revision = git('rev-parse', 'HEAD').decode().strip()
     library = dep / '.lake/build/lib/lean'
     library.mkdir(parents=True)
     authorized = tuple(AuthorizedInput(name + '.lean', dep / (name + '.lean'), file_hash(dep / (name + '.lean')),
                                        (dep / (name + '.lean')).stat().st_size) for name in ('Base', 'Dep'))
+    asset = dep / 'resources/message.txt'
+    authorized += (AuthorizedInput('resources/message.txt', asset, file_hash(asset), asset.stat().st_size),)
     inputs = env.materialize(authorized, context.workspace / 'dependency-inputs', check=context.check)
     for name in ('Base', 'Dep'):
-        recipe = env.launch(('--root=/inputs', '-o', '/build/' + name + '.olean',
+        (library / 'module.setup.json').write_bytes(canonical(dict(
+            name=name, package='dep', isModule=True,
+            options=dict(autoImplicit=False, maxSynthPendingDepth=2 if name == 'Base' else 3),
+            importArts={}, dynlibs=[], plugins=[])))
+        recipe = env.launch(('--setup', '/build/module.setup.json', '--root=/inputs', '-o', '/build/' + name + '.olean',
                              '-i', '/build/' + name + '.ilean', '/inputs/' + name + '.lean'), inputs=inputs, build=library)
         variables = tuple((key, '/build:' + value if key == 'LEAN_PATH' else value) for key, value in recipe.variables)
         output(context.run_process(replace(recipe, variables=variables)))
@@ -135,13 +148,24 @@ def dependency_checks(env, context, root):
     finally:
         (dep / 'Base.lean').write_bytes(original)
     print('referenced dependency, isolated import and mutation rejection: passed', flush=True)
-    pin = Pin('dep', revision, 'https://example.invalid/dep', 'lakefile.toml')
+    pin = Pin('dep', revision, 'https://example.invalid/dep', 'lakefile.lean')
     closure = resolve_closure(lock((pin,)), ('dep',), (dependency,), context)
     modules = inventory_modules(closure, (dependency,), context, required=('Dep',),
                                 standard=frozenset(env.manifest.modules))
-    replay = replay_dependencies(env, modules, (dependency,), context)
+    modules = configure_modules(referenced, closure, modules, context)
+    assert dict(modules.modules[0].lean_options) == dict(autoImplicit=False, maxSynthPendingDepth=2)
+    assert dict(modules.modules[1].lean_options) == dict(autoImplicit=False, maxSynthPendingDepth=3)
+    replay = replay_dependencies(referenced, modules, (dependency,), context)
     assert replay.build_order == ('Base', 'Dep'), replay
     assert replay.imports == (('Base', ()), ('Dep', ('Base',))), replay
+    changed = replace(modules, modules=tuple(replace(item, lake_package='other') for item in modules.modules))
+    assert changed.id != modules.id
+    try:
+        replay_dependencies(referenced, changed, (dependency,), context)
+    except EnvironmentError as error:
+        assert 'differs from prepared compiled artifacts' in str(error), error
+    else:
+        raise AssertionError('Changed Lake package identity was accepted')
     print('pinned Git closure, module admission and source replay: passed', flush=True)
 
 

@@ -45,11 +45,14 @@ class Harness:
             materialize=lambda *a, **k: None, validate=lambda **k: None)
         def launch(arguments, *, build, **kwargs):
             return LaunchSpec(('/compiler', *arguments), (Mount(str(build), '/build', True), Mount('/tmp', '/project'),
-                Mount('/tmp', '/toolchain'), Mount('/tmp', '/runtime')), '/usr/bin/false', '0'*64,
-                (('LEAN_PATH', '/project:/toolchain/lib/lean'),))
+                Mount('/tmp', '/toolchain'), Mount('/tmp', '/runtime'),
+                *(Mount(str(p), '/'+n) for n, p in self.environment.roots.items())), '/usr/bin/false', '0'*64,
+                (('LEAN_PATH', ':'.join(('/project', *('/'+n for n in self.environment.roots), '/toolchain/lib/lean'))),))
         self.environment.launch = launch
         runtime = SimpleNamespace(id='4'*64, environment_id=self.environment.id, retained=False,
-            launch=lambda *a, **k: LaunchSpec(('/audit',), (Mount('/tmp', '/project'),), '/usr/bin/false', '0'*64))
+            launch=lambda *a, **k: LaunchSpec(('/audit',), (Mount('/tmp', '/project'),
+                *(Mount(str(p), '/'+n) for n, p in self.environment.roots.items())), '/usr/bin/false', '0'*64,
+                (('LEAN_PATH', ':'.join(('/project', *('/'+n for n in self.environment.roots), '/toolchain/lib/lean'))),)))
         self.checker = Checker(self.environment, root, runtime=runtime)
         self.export = Export(self.checker)
         self.authority = SimpleNamespace(verify_receipt=lambda *a: True)
@@ -326,7 +329,7 @@ class Contracts(unittest.TestCase):
         compiled = {'.olean': sha256(b'compiled:' + source).hexdigest(), '.ilean': sha256(b'info:' + source).hexdigest()}
         h.modules['Dep'] = 'library/Dep.olean'
         h.pins.update({'library/Dep' + suffix: SimpleNamespace(sha256=digest) for suffix, digest in compiled.items()})
-        library = Library(h.environment.id, codec.encode([{'name': 'Dep', 'source': ref.to_dict(), 'compiled': compiled}]))
+        library = Library(h.environment.id, codec.encode([{'name': 'Dep', 'package': None, 'assets': [], 'options': [], 'source': ref.to_dict(), 'compiled': compiled}]))
         integrated = h.integrate(profile='library', library=library)
         h.verify(integrated)
         request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
@@ -339,12 +342,53 @@ class Contracts(unittest.TestCase):
         h.modules['Second'] = 'library/Second.olean'
         h.pins.update({'library/Second' + suffix: SimpleNamespace(sha256=digest) for suffix, digest in other_compiled.items()})
         library = Library(h.environment.id, codec.encode([*library.decode(),
-            {'name': 'Second', 'source': other_ref.to_dict(), 'compiled': other_compiled}]))
+            {'name': 'Second', 'package': None, 'assets': [], 'options': [], 'source': other_ref.to_dict(), 'compiled': other_compiled}]))
         integrated = h.integrate(profile='library', library=library)
         request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
         _, result, _ = h.run(request, mutate_previous=True)
         self.assertEqual(result.status, ResultStatus.FAILED)
         self.assertIn(b'Rebuilt dependency changed', h.artifacts.data[result.diagnostics.id])
+
+    def test_trusted_compiled_dependencies_keep_local_rebuild_and_frozen_identity(self):
+        h = self.h
+        h.environment.roots.update(library=self.root/'library', unused=self.root/'unused')
+        h.modules.update(Dep='library/Dep.olean', Local='project/Local.olean')
+        compiled = {'.olean': sha256(b'trusted object').hexdigest(), '.ir': sha256(b'trusted IR').hexdigest()}
+        local = b'import Dep\ndef value : Nat := 1\n'
+        local_compiled = {'.olean': sha256(b'compiled:'+local).hexdigest(), '.ilean': sha256(b'info:'+local).hexdigest()}
+        h.pins.update({'library/Dep'+s: SimpleNamespace(sha256=d) for s, d in compiled.items()})
+        h.pins.update({'project/Local'+s: SimpleNamespace(sha256=d) for s, d in local_compiled.items()})
+        rows = [dict(name='Dep', package='library', source=None, assets=[], options=[], compiled=compiled),
+                dict(name='Local', package=None, source=h.artifacts.save(local).to_dict(),
+                     assets=[], options=[], compiled=local_compiled)]
+        library = Library(h.environment.id, codec.encode(rows))
+        integrated = h.integrate(profile='library', library=library)
+        h.launches.clear()
+        verified = h.verify(integrated)
+        self.assertEqual([p.argv[-1] for p in h.launches if '-o' in p.argv], ['/build/src/Local.lean'])
+        for launch in h.launches:
+            mounts = {m.target: m for m in launch.mounts}
+            self.assertIn('/library', mounts)
+            self.assertFalse(mounts['/library'].writable)
+            self.assertNotIn('/unused', mounts)
+            self.assertNotIn('/project', mounts)
+            self.assertEqual(dict(launch.variables)['LEAN_PATH'], '/checker:/build/lib:/library:/toolchain/lib/lean')
+        output = self.root/'compiled'
+        h.export.materialize(verified, h.selection, h.graph, h.artifacts, output)
+        self.assertFalse((output/'src/Dep.lean').exists())
+        request, reader = read_bundle(output)
+        h.export.prepare_recheck(request, reader)
+        original = h.environment.id
+        h.environment.id = 'env_'+'f'*64
+        with self.assertRaisesRegex(ValueError, 'original frozen environment'):
+            h.export.prepare_recheck(request, reader)
+        h.environment.id = original
+        h.pins['library/Dep.ir'] = SimpleNamespace(sha256='0'*64)
+        with self.assertRaisesRegex(ValueError, 'frozen artifacts'):
+            h.export.prepare_recheck(request, reader)
+        h.modules['Dep'] = 'project/Dep.olean'
+        with self.assertRaisesRegex(ValueError, 'dependency root'):
+            h.export.prepare_recheck(request, reader)
 
     def test_publication_is_idempotent_rejects_conflicts_links_and_tampering(self):
         h = self.h

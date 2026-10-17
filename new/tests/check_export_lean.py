@@ -63,8 +63,15 @@ def main():
                 dep = root/'dependency'
                 (dep/'src').mkdir(parents=True)
                 (dep/'lib').mkdir()
-                (dep/'src/Dep.lean').write_text('def Dep.value : Nat := 7\n')
-                output(context.run_process(base.launch(('--root=/build/src', '-o', '/build/lib/Dep.olean',
+                (dep/'src/Dep.lean').write_text('module\npublic def Dep.value : Nat := 7\n'
+                    'public def Dep.text : String := include_str "assets" / "text.txt"\n')
+                (dep/'src/assets').mkdir()
+                (dep/'src/assets/text.txt').write_text('export asset\n')
+                (dep/'lakefile.toml').write_text('name = "library"\n')
+                (dep/'module.setup.json').write_bytes(codec.canonical(dict(name='Dep', package='library',
+                    isModule=True, options=dict(maxSynthPendingDepth=3), importArts={}, dynlibs=[], plugins=[])))
+                output(context.run_process(base.launch(('--setup', '/build/module.setup.json',
+                    '--root=/build/src', '-o', '/build/lib/Dep.olean',
                     '-i', '/build/lib/Dep.ilean', '/build/src/Dep.lean'), build=dep,
                     max_heartbeat=context.limits.max_heartbeat, max_rec_depth=context.limits.max_rec_depth)))
                 env = Environment.prepare(root/'package', PackageConfig('4.35.0-rc3', toolchain,
@@ -77,7 +84,9 @@ def main():
                 compiled, _ = scan(env.roots['library']/'lib')
                 sources, _ = scan(env.roots['library']/'src')
                 source = replace(sources.files[0], path='src/Dep.lean')
-                module = ModulePin('Dep', 'library', source, compiled.files, 'lib')
+                asset = replace(sources.by_path['assets/text.txt'], path='src/assets/text.txt')
+                module = ModulePin('Dep', 'library', source, compiled.files, 'lib', 'library',
+                    (('assets/text.txt', asset),), (('maxSynthPendingDepth', 3),))
                 modules = Modules('0'*64, ('Dep',), (module,), (('library', 'lib', compiled),), (('library', sources),))
                 dependencies = (LibraryDependency('library', env.roots['library'], ('lib',), ('src',)),)
                 replay = replay_dependencies(env, modules, dependencies, context)
