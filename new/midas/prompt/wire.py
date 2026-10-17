@@ -112,6 +112,32 @@ def _section(section):
     return (section.kind.upper().encode(), b' ', section.name.encode(), b'\n', section.text)
 
 
+def _content(writer, parts, *, breakpoint=False):
+    if breakpoint:
+        writer.add(b'[{"type":"input_text","text":')
+        writer.string(parts)
+        writer.add(b',"prompt_cache_breakpoint":{"mode":"explicit"}}]')
+    else:
+        writer.string(parts)
+
+
+def _breakpoints(prompt):
+    """Preserve lookup endpoints as retained context grows, for both roles.
+
+    The provider limits cache *writes*, not the number of retained markers.
+    Explicit lookup checks the first two and latest fifty markers. Keep the
+    contract and formal context first, then each evidence/history/candidate
+    endpoint, so appending a section does not erase the previous cache boundary.
+    Memory, feedback and allowances are changing suffixes, not cache writes.
+    https://developers.openai.com/api/docs/guides/prompt-caching
+    """
+    formal = ('source', 'definitions', 'subject', 'interfaces')
+    points = {0, max((i for i, s in enumerate(prompt.sections, 1) if s.kind in formal), default=0)}
+    points.update(i for i, s in enumerate(prompt.sections, 1)
+                  if s.kind in ('evidence', 'history', 'candidate'))
+    return points
+
+
 def _cache_key(role, renderer, contract, instructions, schema, options):
     digest = sha256(canonical([options.cache_scope, options.model, options.reasoning,
                               options.max_output_tokens, role, renderer, contract]))
@@ -145,7 +171,7 @@ def _prefix(role, renderer, contract, instructions, schema, options):
         writer.add(b',"strict":true,"schema":')
         writer.add(schema)
         writer.add(b'}},"input":[{"role":"developer","content":')
-        writer.string((instructions,))
+        _content(writer, (instructions,), breakpoint=options.prompt_cache == 'explicit')
         writer.add(b'}')
     return writer.finish()
 
@@ -178,9 +204,10 @@ def build(snapshot: Snapshot, options: Options, *, renderer: Renderer) -> WireRe
         writer.add(b']}')
     else:
         writer.add(prefix)
-        for section in prompt.sections:
+        points = _breakpoints(prompt) if options.prompt_cache == 'explicit' else set()
+        for index, section in enumerate(prompt.sections, 1):
             writer.add(b',{"role":"user","content":')
-            writer.string(_section(section))
+            _content(writer, _section(section), breakpoint=index in points)
             writer.add(b'}')
         writer.add(b']}')
     return WireRequest(prompt.role, prompt.renderer, prompt.contract, writer.finish(), setup, snapshot)

@@ -1,7 +1,6 @@
 """Plan, interpret and reduce. No SQL, compiler, provider, worker or timer calls."""
 from dataclasses import replace
 from hashlib import sha256
-import re
 
 from ..domain import (AdmittedBinding, AdmittedCheck, AdmittedReview, CheckKind, ProofState,
                       ReceiptBinding, ResultStatus, accept_binding, accept_checked_proof, accept_joint)
@@ -9,11 +8,11 @@ from ..domain.records import instance
 from ..policy import Policy
 from ..prompt import Section, Snapshot as Display, build, prover, reviewer
 from ..tools import (Backend, HelperRequest, Lookup, Probe, Research, Retrieve, Scope, Search,
-                     finish_helper, plan_helper, recall)
+                     expand_probe_bodies, finish_helper, plan_helper, recall)
 from .candidates import expand, revise, supplied
 from .memory import Observation, pack, update_memory
-from .protocol import RESPONSE_BYTES, interpret
-from .state import (ArtifactData, Attempt, AttemptDecision, Changes, Dispatch, Objection,
+from .protocol import CONTRACTS, RESPONSE_BYTES, interpret
+from .state import (ArtifactData, Attempt, AttemptDecision, Changes, Dispatch,
                     PreparedModel, Snapshot, Turn, Work, candidate_hash)
 
 
@@ -91,11 +90,26 @@ class Strategy:
                 raise ValueError('Review presentation lacks exact candidate/dependency bindings')
         capabilities = policy.capabilities(snapshot.usage, snapshot.services)
         modes = [mode for mode in ('direct', 'decomposition') if policy.candidate(mode, snapshot.usage).allowed]
+        helpers = tuple(mode for mode in capabilities.available_modes
+            if (mode != 'recall' or snapshot.recallable) and (mode != 'page' or snapshot.cursors))
+        allowances = [f'{name}: {getattr(capabilities, name)}' for name in (
+            'direct_remaining', 'decomposition_remaining', 'repair_remaining',
+            'retrieval_remaining', 'probe_remaining')]
+        if capabilities.web_calls:
+            allowances.extend((f'research_remaining: {capabilities.research_remaining}',
+                               f'web_calls: {capabilities.web_calls}'))
+        else:
+            allowances.append('research: disabled')
+        if not snapshot.recallable:
+            allowances.append('recall: unavailable (no saved first pages outside this prompt)')
+        if not snapshot.cursors:
+            allowances.append('page: unavailable (no additional pages outside this prompt)')
         details = ('Candidate modes: ' + ', '.join(modes) + '\nHelper modes: ' +
-            ', '.join(capabilities.available_modes) + '\n' + '\n'.join(
-            f'{name}: {getattr(capabilities, name)}' for name in (
-                'direct_remaining', 'decomposition_remaining', 'repair_remaining', 'research_remaining',
-                'retrieval_remaining', 'probe_remaining', 'web_calls')))
+            ', '.join(helpers) + '\n' + '\n'.join(allowances))
+        if snapshot.recallable or snapshot.cursors:
+            details += '\nSaved evidence not included in this prompt:\n'+'\n'.join((
+                *(f'recall result_id={key} (first page)' for key in snapshot.recallable),
+                *(f'page cursor={cursor}' for cursor in snapshot.cursors)))
         sections = tuple(s for s in display.sections if s.kind != 'capabilities')
         name = 'strategy-capabilities'
         while name in {s.name for s in sections}:
@@ -106,9 +120,24 @@ class Strategy:
         prompt = (renderer or default.render)(display)
         if prompt.role != role:
             raise ValueError('Renderer role differs from planned work')
-        if self.interpreter is interpret and (prompt.contract != {'prover': 'prover-action-v1',
-                'reviewer': 'review-verdict-v1'}[role] or prompt.schema != default.SCHEMA):
-            raise ValueError('Replacement schema/contract requires its matching interpreter')
+        if self.interpreter is interpret:
+            if prompt.contract != CONTRACTS[role] or prompt.schema != default.SCHEMA:
+                raise ValueError('Replacement schema/contract requires its matching interpreter')
+            if role == 'reviewer':
+                schema = reviewer.verdict_schema('research' in helpers)
+            else:
+                actions = list(helpers)
+                if modes:
+                    actions.append('candidate')
+                if len(snapshot.context.subjects) == 1:
+                    actions.extend(action for mode, action in
+                        (('direct', 'proof'), ('decomposition', 'decomposition')) if mode in modes)
+                if snapshot.base is not None and snapshot.base.mode in modes:
+                    actions.append('revise')
+                schema = prover.action_schema(tuple(sorted(actions)))
+            # Only changes to action availability change this small cached schema;
+            # declining counters and changing evidence keep the same contract.
+            prompt = replace(prompt, schema=schema)
         wire = build(display, options, renderer=lambda _: prompt)
         turn = Turn(snapshot.version, work.operation, prompt.contract, sha256(prompt.schema).hexdigest(),
             sha256(wire.wire).hexdigest(), sha256(wire.setup).hexdigest() if wire.setup is not None else None,
@@ -165,13 +194,13 @@ class Strategy:
             if not decision.allowed:
                 raise ValueError(decision.reason)
             key = action['result_id'] if mode == 'recall' else action['cursor']
-            if key not in (snapshot.allowed_pins if mode == 'recall' else snapshot.cursors):
-                raise ValueError('Evidence result/cursor was not advertised in this snapshot')
+            if key not in (snapshot.recallable if mode == 'recall' else snapshot.cursors):
+                if mode == 'recall':
+                    raise ValueError('recall requires an advertised saved result_id. '
+                        'To inspect Lean declarations, use lookup with names and inspect=true.')
+                raise ValueError('page requires an advertised cursor for an undisplayed evidence page. '
+                    'Use the evidence already shown or choose an enabled helper from CAPABILITIES.')
             result = Changes(snapshot.version, (_work(snapshot, mode, detail=pack([key, dispatch.turn.id])),))
-        elif mode == 'stop':
-            objection = action['objection']
-            report = Objection(snapshot.version.owner, objection['category'], objection['evidence'], admitted.raw) if objection else None
-            result = Changes(snapshot.version, reason=action['rationale'], objection=report, stopped=True)
         else:
             raise ValueError('Unsupported prover action')
         memory = update_memory(snapshot.memory, response.memory, allowed_pins=snapshot.allowed_pins)
@@ -198,16 +227,7 @@ class Strategy:
         elif mode == 'research':
             helper = Research(action['question'], tuple(action['urls']))
         elif mode == 'probe':
-            cases = action['cases']
-            ids = set()
-            for case in cases:
-                if re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,47}', case['id']) is None or case['id'] in ids:
-                    raise ValueError('Invalid or duplicate probe case ID')
-                ids.add(case['id'])
-                if not case['code'].strip() or case['expected'] is not None and (
-                        case['operation'] != 'term' or not case['expected'].strip()):
-                    raise ValueError('Invalid probe code/expected type')
-            artifacts = tuple(ArtifactData(pack(case)) for case in cases)
+            artifacts = tuple(ArtifactData(pack(case)) for case in expand_probe_bodies(action['cases']))
             helper = Probe(tuple(a.reference for a in artifacts))
         else:
             raise ValueError('Unknown helper mode')

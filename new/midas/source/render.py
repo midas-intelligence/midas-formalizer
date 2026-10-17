@@ -236,6 +236,20 @@ def proof_application(name: bytes, signature: Signature, *, policy=RenderPolicy(
         invocation += '.{' + ', '.join(lean_name(u, readable=policy.readable) for u in value['universes']) + '}'
     writer.append(b'by\n  first\n')
     writer.append(('  | exact ' + invocation + '\n').encode())
+    # Resolve authored locals before unifying the result with the goal. Nested
+    # `by` arguments are postponed by Lean; unification of a dependent result
+    # can then unfold enormous expressions while its arguments are still holes.
+    # The telescope may also include binders still inside the goal, so try each
+    # prefix. Keep tactic lookup for unavailable/renamed/anonymous source locals.
+    direct = invocation
+    for binder in _binders(value):
+        if binder[0] != 'str':
+            break
+        local = lean_name(binder, readable=policy.readable)
+        if not local:
+            break
+        direct += ' ' + local
+        writer.append(('  | exact ' + direct + '\n').encode())
     for binder in _binders(value):
         local = lean_name(binder, readable=policy.readable) if binder[0] == 'str' else '_'
         invocation += ' (by first | exact ' + (local or '_') + ' | assumption)'

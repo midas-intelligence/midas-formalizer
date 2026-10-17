@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -281,6 +282,8 @@ class _ImportWorker:
         except BaseException:
             self.close()
             raise
+        if forced is None and code == 128 + signal.SIGXCPU:
+            forced, bound = Outcome.RESOURCE_LIMIT, 'cpu'
         outcome = forced or (Outcome.COMPLETED if code == 0 else Outcome.COMPILER_ERROR if code == 1
                              else Outcome.SETUP_FAILURE)
         if forced is not None or code not in (0, 1):

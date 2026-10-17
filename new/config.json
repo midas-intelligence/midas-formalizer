@@ -111,7 +111,7 @@
     "account": "midas-azure",
     "endpoint": "https://midas-openai.services.ai.azure.com/openai/v1/responses",
     "credential_env": "AZURE_OPENAI_API_KEY",
-    "prompt_cache": null,
+    "prompt_cache": "explicit",
     "prices": {
       "input": 2000000,
       "cached_input": 100000,

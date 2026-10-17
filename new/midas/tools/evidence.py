@@ -1,17 +1,20 @@
 """Advisory archive preparation, indexed paging, and frozen-source excerpts."""
 from dataclasses import dataclass, field
 from hashlib import sha256
+import re
 
 from ..domain import ArtifactRef
 from ..domain import encoding as codec
 from ..domain.records import identifier, instance, items
-from ..source import SourceFile
+from ..source import SourceFile, code_only
 from .protocol import RESULT_BYTES, Scope, pack, read, text
-from .search import FILE_BYTES
+from .search import FILE_BYTES, SearchResult
 
 PAGE_BYTES = 16000
 MAX_PAGES = 1024
 INDEX_BYTES = 256 * 1024
+_ALIAS = re.compile(r'\s*(?:@\[[^\]]*\]\s*)*'
+                    r'(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*alias\b')
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,23 +193,83 @@ def source_excerpt(data, location):
     return data[start:end].decode() if end-start <= 256*1024 else None
 
 
+def search_summary(result, search):
+    """Project admitted search hints in rank order, retaining authored excerpts."""
+    instance(result, SearchResult)
+    rows = [f'Search ({search.backend.name}): {search.query}']
+    if result.error:
+        rows.append('Search failed: '+result.error)
+    elif not result.records:
+        rows.append('No matches.')
+    for match in result.records:
+        name = '\n'.join(match.names) or 'Source match (no declaration name)'
+        if match.path is not None:
+            name += f'\nSource: {match.path}:{match.line}'
+            if match.source:
+                name += f'\nExcerpt starts at line {match.start_line}:\n'+match.source
+        rows.append(name)
+    return tuple(rows)
+
+
+def probe_summary(case, outcome):
+    """Render an admitted case with exact generated code and diagnostic locations."""
+    result = outcome['result']
+    rows = [f"Probe {case['id']} ({case['operation']}): {result['status']} (advisory)"]
+    for field in ('setup', 'code', 'expected'):
+        if case.get(field):
+            rows.append(f"{case['id']}.{field} (line 1 below):\n"+case[field])
+    if 'diagnostic' in result:
+        rows.append('Diagnostic:\n'+result['diagnostic'])
+    for message in outcome['messages']:
+        rows.append(f"{message['severity']} at {message['file']}:{message['line']}:{message['column']}:\n"
+                    +message['text'])
+    if 'goals' in result:
+        rows.extend(f'Goal {i}:\n'+goal for i, goal in enumerate(result['goals'], 1))
+        if not result['goals']:
+            rows.append('No remaining goals (exploratory only).')
+    for field, label in (('contains_sorry', 'Contains sorry'),
+                         ('unresolved_metavariables', 'Unresolved metavariables')):
+        if field in result:
+            rows.append(f'{label}: '+str(result[field]).lower())
+    inspection = result.get('inspection')
+    if inspection:
+        rows.extend(('Inspected expression:\n'+inspection['expression'],
+                     'Inferred type:\n'+inspection['inferred_type'],
+                     'Expression contains sorry: '+str(inspection['contains_sorry']).lower(),
+                     'Expression unresolved metavariables: '+str(inspection['unresolved_metavariables']).lower()))
+    return '\n\n'.join(rows)
+
+
+def lookup_summary(records):
+    """Render admitted declaration signatures and lookup failures as plain text."""
+    if type(records) is not tuple or len(records) > 16:
+        raise ValueError('Expected bounded admitted lookup records')
+    result = []
+    for row in records:
+        if row['status'] != 'available':
+            result.append(row['query']+': '+(row.get('error') or 'Declaration unavailable.'))
+            continue
+        kind = row.get('kind')
+        declaration = (kind+' ' if kind in ('def', 'theorem', 'inductive') else '')+row['query']
+        if row.get('type'):
+            declaration += ' : '+row['type']
+        result.append(declaration)
+    return tuple(result)
+
+
 def lookup_sources(records, *, environment_id, index, prefix, reader):
-    """Project checker-admitted source ranges; no signatures or proof authority.
+    """Return authored declarations, retaining checked types for alias commands.
 
     prefix is the exact checked SourceFile prefix. Installed modules are resolved
     only against the admitted index, and bytes are verified on every read.
     """
     if index.environment_id != environment_id or not isinstance(prefix, SourceFile):
         raise ValueError('Lookup source scope differs')
-    if type(records) is not tuple or len(records) > 16:
-        raise ValueError('Expected bounded admitted lookup records')
     result, loaded = [], {}
-    for row in records:
-        projected = {k: v for k, v in row.items() if k not in ('source_range', 'signature', 'body')}
-        projected['body'] = None
+    for row, summary in zip(records, lookup_summary(records)):
         location = row.get('source_range')
         if row['status'] != 'available':
-            result.append(projected)
+            result.append(summary)
             continue
         data, path, note = prefix.data, prefix.path, None
         if location is None:
@@ -215,8 +278,7 @@ def lookup_sources(records, *, environment_id, index, prefix, reader):
             module = location['module']
             if type(module) is not str or not module or any(c in module for c in ('/', '\\', '\x00')):
                 raise ValueError('Invalid lookup source module')
-            suffix = module.replace('.', '/')+'.lean'
-            candidates = [e for e in index.entries if e.path.endswith('/'+suffix)]
+            candidates = index.by_module.get(module, ())
             if len(candidates) != 1:
                 note = 'Original declaration source unavailable: missing or ambiguous frozen module.'
             elif candidates[0].artifact.byte_count > FILE_BYTES:
@@ -228,14 +290,17 @@ def lookup_sources(records, *, environment_id, index, prefix, reader):
                     loaded[path] = read(reader, entry.artifact, FILE_BYTES)
                 data = loaded[path]
         if note is None:
+            source = None
             try:
-                projected['body'] = source_excerpt(data, location)
+                source = source_excerpt(data, location)
             except (ValueError, UnicodeError):
                 note = 'Original declaration source unavailable: range differs from frozen source.'
-            if projected['body'] is None:
+            if source is None:
                 note = note or 'Original declaration source unavailable: declaration exceeds byte allowance.'
             else:
-                note = f'Original declaration source: {path}:{location["start"][0]} (advisory).'
-        projected['source_note'] = note
-        result.append(projected)
+                if 'alias' in source and _ALIAS.match(code_only(source)):
+                    source = summary + '\n\n' + source
+                result.append(source)
+                continue
+        result.append(summary+'\n-- '+note)
     return tuple(result)

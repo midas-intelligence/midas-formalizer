@@ -418,11 +418,17 @@ def _fragments(value, guidance, context, unproved):
     return paths
 
 
-def fragments(draft, context):
+def candidate_material(draft, context):
+    """Decode a display once: structure, guidance and exact editable strings."""
     value = load_submission(draft.submission)
     guidance = load_record(draft.guidance, limit=MAX_BYTES)
-    return tuple((path, owner[key]) for path, (owner, key) in _fragments(
+    editable = tuple((path, owner[key]) for path, (owner, key) in _fragments(
         value, guidance, context, draft.unproved).items())
+    return value, guidance, editable
+
+
+def fragments(draft, context):
+    return candidate_material(draft, context)[2]
 
 
 def revise(action, base, context, submission_id):

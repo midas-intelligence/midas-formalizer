@@ -100,7 +100,8 @@ def main():
         print('explicit partial export and standalone recheck passed', flush=True)
         lookup = dict(mode='lookup', rationale='Inspect a library declaration.', names=['Nat.add'], inspect=True)
         probe = dict(mode='probe', rationale='Try closing the current goal.', cases=[
-            dict(id='close', operation='tactic', code='trivial', setup='', expected=None)])
+            dict(id='inspect', code='let env ← Lean.getEnv\nLean.logInfo m!"Nat.add available: {(env.find? `Nat.add).isSome}"'),
+            dict(id='close', code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))')])
         with app.start(root/'helpers', package=package, selection=selected, config=config, workflow='scripted',
             script=(('prover', response(lookup)), ('prover', response(probe)), ('prover', response(action)))) as run:
             def strict(reducer):
@@ -117,26 +118,32 @@ def main():
             assert result.exit_code == 0, result
             owner = selected.identities[0].id
             assert run.writer.counter('owner:'+owner, 'retrieval') == 1
-            assert run.writer.counter('owner:'+owner, 'probe') == 1
+            assert run.writer.counter('owner:'+owner, 'probe') == 2
             assert run.writer.status_snapshot().accounting.turns == 3
+            from midas.application import helpers, records as r
+            archives = helpers.advertised(run.writer, run.workflow.graph(run.writer).nodes[0].owner)
+            text = helpers.page_text(r.read(run.writer, archives[-1].pages[0], 16000))
+            assert b'Probe inspect (tactic): open (advisory)' in text, text
+            assert b'Nat.add available: true' in text, text
+            assert b'Probe close (tactic): closed_exploratory (advisory)' in text, text
+            assert b'Goal 1:' in text, text
+            assert b'0/' not in text, text
         print('lookup, probe, advisory evidence and original continuations passed', flush=True)
         objection = dict(mode='stop', rationale='Exercise a saved statement objection.',
             objection=dict(category='context_mismatch', evidence='Reconsider the chosen decomposition.'))
-        revised = dict(mode='revise', rationale='Recheck the decomposition after the objection.', edits=[
-            dict(path='/entries/parent/proof', old='trivial', new='exact True.intro')])
-        with app.start(root/'repair', package=package, selection=selected, config=config, workflow='scripted',
+        with app.start(root/'unsupported-stop', package=package, selection=selected, config=config, workflow='scripted',
             script=(('prover', response(decompose)), ('prover', response(objection)),
-                    ('prover', response(revised)), ('prover', response(proof())),
-                    ('reviewer', review), ('reviewer', review))) as run:
+                    ('prover', response(proof())), ('reviewer', review))) as run:
             complete(run)
             graph = run.workflow.graph(run.writer)
             child = next(n for n in graph.nodes if n.owner.obligation_id not in graph.roots)
-            assert child.owner.generation == 1
-            assert run.writer.counter('owner:'+selected.identities[0].id, 'backtracks') == 1
+            assert child.owner.generation == 0
+            assert not run.writer.counter('owner:'+selected.identities[0].id, 'backtracks')
             assert not run.writer.counter('owner:'+selected.identities[0].id, 'repair_open')
-        with app.resume(root/'repair') as run:
+            assert run.writer.status_snapshot().accounting.turns == 4
+        with app.resume(root/'unsupported-stop') as run:
             assert run.run().exit_code == 0
-        print('objection, retirement, derived generation rebind, revision and resume passed', flush=True)
+        print('unsupported stop rejected without backtracking; proof continuation and resume passed', flush=True)
         joint_fixture = Path('/tmp/midas-application-joint-fixture')
         joint_fixture.mkdir(exist_ok=True)
         if not (joint_fixture/'package').exists():
@@ -174,12 +181,19 @@ def main():
             dict(name='first', statement='1 = 1', proof='Use reflexivity.', usefulness='Premise.', depends_on=[]),
             dict(name='second', statement='2 = 2', proof='Use reflexivity.', usefulness='Conclusion.', depends_on=['first'])])
         alias_probe = dict(mode='probe', rationale='Check the inherited alias.', cases=[dict(id='alias',
-            operation='tactic', code='have witness := first; rfl', setup='', expected=None)])
+            code='Lean.Elab.Tactic.evalTactic (← `(tactic| have witness := first; rfl))')])
         second_calls = []
         def transport(request, raw, *args):
             if request.role == 'reviewer':
+                assert b'Selected review entry: parent' in raw
+                if b'lemma: second' in raw:
+                    assert b'first <- base:first' in raw
+                else:
+                    assert b'first <- local entry first' in raw
+                    assert b'Proof: pending obligation' in raw
                 answer = review
             elif b'lemma: second' in raw:
+                assert b'INTERFACES inherited-0\\nfirst :\\n' in raw
                 second_calls.append(1)
                 answer = response(alias_probe if len(second_calls) == 1 else dict(proof(), proof_body='by have witness := first; rfl'))
             elif b'lemma: first' in raw:

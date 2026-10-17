@@ -20,7 +20,7 @@ from midas.source import SourceFile
 from midas.tools import (Archive, Backend, HelperRequest, Lookup, Match, Probe, Research, Retrieve,
     Scope, Search, SearchResult, SearchService, SourceEntry, SourceIndex, Stage, StageEvidence,
     admit_checked, continue_retrieval, execute_search, finish_helper, fuse, lookup_sources, plan_helper,
-    prepare_archive, recall, research_evidence, search_stages, source_excerpt, web_actions)
+    prepare_archive, probe_summary, recall, research_evidence, search_stages, search_summary, source_excerpt, web_actions)
 from midas.tools.protocol import pack
 from midas.tools.search import content_matches, hosted, worker_payload
 
@@ -73,7 +73,8 @@ class ToolsTests(unittest.TestCase):
 
     def index(self, entries):
         return SourceIndex(self.scope.environment_id,
-            tuple(SourceEntry(path, self.a.save(data)) for path, data in entries))
+            tuple(SourceEntry(path, self.a.save(data), path.split('/', 1)[1].removesuffix('.lean').replace('/', '.'))
+                  for path, data in entries))
 
     def receipt(self, raw=b'frozen request'):
         return ReceiptBinding(str(uuid4()), self.a.save(raw), self.a.save(b'result'), self.a.save(b'seal'))
@@ -97,11 +98,19 @@ class ToolsTests(unittest.TestCase):
         invalid = (lambda: Lookup(('by exact True.intro',)), lambda: Lookup(('Nat.add', 'Nat.add')),
             lambda: Retrieve(('query',)), lambda: Retrieve(backends=(Backend('leanexplore'),)),
             lambda: Search('x', Backend('leanexplore'), True), lambda: Backend('leanexplore', ('Mathlib',)),
-            lambda: Backend('frozen-source', ('../secret',)), lambda: Backend('frozen-source', ('project',)),
+            lambda: Backend('frozen-source', ('../secret',)), lambda: Backend('frozen-source', ('runtime',)),
             lambda: Probe(()), lambda: Research('q', ('https://user:password@host',)), lambda: Research('q', web_calls=13))
         for build in invalid:
             with self.subTest(build=build), self.assertRaises(ValueError):
                 build()
+
+    def test_subscript_lookup_names_keep_forbidden_name_checks(self):
+        name = 'EuclideanGeometry.ne₁₂_of_not_collinear'
+        quoted = 'EuclideanGeometry.«ne₁₂_of_not_collinear»'
+        self.assertEqual(self.plan(Lookup((name,))).stages[0].action.names, (name,))
+        with self.assertRaisesRegex(ValueError, 'forbidden names'):
+            self.plan(Lookup((name,)), forbidden=(quoted,))
+        self.assertFalse(self.plan(Retrieve(names=(quoted,)), forbidden=(name,)).stages)
 
     def test_policy_is_used_for_case_units_and_research_bounds(self):
         request = self.request(Probe(tuple(self.a.save(pack({'id': str(n)})) for n in range(3))))
@@ -121,9 +130,10 @@ class ToolsTests(unittest.TestCase):
         for selector in ('Mathlib.Topology.Basic', 'Mathlib/Topology/Basic', 'mathlib/Mathlib/Topology/Basic.lean'):
             self.assertEqual(index.resolve((selector,)), ('mathlib/Mathlib/Topology/Basic.lean',))
         self.assertEqual(index.resolve(('Mathlib',)), ('mathlib/Mathlib',))
-        other = SourceIndex(index.environment_id, index.entries+(SourceEntry('other/Mathlib/Topology/Basic.lean', self.a.save(b'')),))
+        other = SourceIndex(index.environment_id, index.entries+(SourceEntry('project/Mathlib/Topology/Basic.lean', self.a.save(b'')),))
         with self.assertRaisesRegex(ValueError, 'Ambiguous'):
             other.resolve(('Mathlib.Topology.Basic',))
+        self.assertEqual(other.resolve(('project/Mathlib/Topology/Basic',)), ('project/Mathlib/Topology/Basic.lean',))
         for value in ('/Mathlib', 'checker/Foo', 'Mathlib/../secret', 'missing'):
             with self.assertRaises(ValueError):
                 index.resolve((value,))
@@ -306,16 +316,135 @@ class ToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             admit_checked(stage, admitted, 'b'*64, self.a)
 
-    def test_project_modules_supply_lookup_source_but_cannot_be_searched(self):
-        index = self.index((('project/Support.lean', b'def helper := 0\n'),))
+    def test_search_display_keeps_ranked_names_sources_and_failures(self):
+        search = Search('Morley triangle', Backend('frozen-source', ('Mathlib',)))
+        result = SearchResult('a'*64, (
+            Match(('Geometry.morley', 'Geometry.triangle'), 'mathlib/Mathlib/Geometry.lean', 12, 10,
+                  '-- Morley\ntheorem triangle : True := by trivial', 4),
+            Match((), 'mathlib/Mathlib/Comment.lean', 2, 1, '-- Morley triangle', 1)))
+        rows = search_summary(result, search)
+        self.assertEqual(rows, ('Search (frozen-source): Morley triangle',
+            'Geometry.morley\nGeometry.triangle\nSource: mathlib/Mathlib/Geometry.lean:12\n'
+            'Excerpt starts at line 10:\n-- Morley\ntheorem triangle : True := by trivial',
+            'Source match (no declaration name)\nSource: mathlib/Mathlib/Comment.lean:2\n'
+            'Excerpt starts at line 1:\n-- Morley triangle'))
+        self.assertEqual(search_summary(SearchResult('a'*64), search)[-1], 'No matches.')
+        self.assertEqual(search_summary(SearchResult('a'*64, error='unavailable'), search)[-1],
+                         'Search failed: unavailable')
+        hosted = search_summary(SearchResult('a'*64, (Match(('Geometry.morley',)),)),
+                                Search('Morley', Backend('leanexplore')))
+        self.assertEqual(hosted, ('Search (leanexplore): Morley', 'Geometry.morley'))
+
+    def test_probe_display_preserves_diagnostics_goals_flags_and_inspection(self):
+        case = dict(id='inspect', operation='tactic', code='run_tac do\n  pure ()', setup='', expected=None)
+        message = dict(severity='information', file='inspect.code', line=2, column=2, text='Available: α')
+        result = dict(id='inspect', operation='tactic', status='open', goals=['n : Nat\n⊢ n = n'],
+                      contains_sorry=False, unresolved_metavariables=True, inspection={})
+        text = probe_summary(case, dict(result=result, messages=[message]))
+        for content in ('Probe inspect (tactic): open (advisory)',
+                        'inspect.code (line 1 below):\nrun_tac do\n  pure ()',
+                        'information at inspect.code:2:2:\nAvailable: α', 'Goal 1:\nn : Nat\n⊢ n = n',
+                        'Contains sorry: false', 'Unresolved metavariables: true'):
+            self.assertIn(content, text)
+        for status in ('error', 'interrupted'):
+            text = probe_summary(case, dict(result=dict(id='inspect', operation='tactic', status=status,
+                diagnostic='[inspect.code] inspect.code:2:2: unknown constant'), messages=[]))
+            self.assertIn(status+' (advisory)', text)
+            self.assertIn('Diagnostic:\n[inspect.code] inspect.code:2:2: unknown constant', text)
+        inspected = dict(result, status='inspected', inspection=dict(expression='Nat.zero', inferred_type='Nat',
+            contains_sorry=False, unresolved_metavariables=False))
+        text = probe_summary(dict(case, operation='term', code='Nat.zero', setup='intro n', expected='Nat'),
+                             dict(result=inspected, messages=[]))
+        for content in ('inspect.setup (line 1 below):\nintro n', 'inspect.expected (line 1 below):\nNat',
+                        'Inspected expression:\nNat.zero', 'Inferred type:\nNat',
+                        'Expression contains sorry: false', 'Expression unresolved metavariables: false'):
+            self.assertIn(content, text)
+
+    def test_readable_probe_pages_preserve_large_unicode_messages_without_json(self):
+        from midas.application.helpers import page_text
+        message = 'α😀\n'*20000
+        case = dict(id='large', operation='tactic', code='run_tac do\n  pure ()', setup='', expected=None)
+        with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
+            text = probe_summary(case, dict(result=dict(status='interrupted', diagnostic=message), messages=[]))
+            archive = prepare_archive(self.scope, 'a'*64, (text,), (self.a.save(b'receipt'),), self.a)
+            fragments, displays, cursor = [], [], None
+            while True:
+                page = recall(archive, self.scope, self.a, cursor=cursor)
+                fragments.extend(row[4] for row in codec.load_record(page.payload, limit=16000)[4])
+                displays.append(page_text(page.payload).decode())
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+            self.assertGreater(len(displays), 1)
+            self.assertEqual(''.join(fragments), text)
+            self.assertIn('-- Excerpt continues on the next page.', displays[0])
+            self.assertIn('-- Continued excerpt', displays[-1])
+            self.assertNotRegex('\n'.join(displays), r'(?m)^\d+(?:/[^:]+)?:')
+
+    def test_project_modules_supply_lookup_source_and_search_results(self):
+        index = self.index((('project/ChallengeDeps.lean', b'def helper := 0\n'),
+            ('project/Submission.lean', b'namespace Submission\ndef value := 1\nend Submission\n'),
+            ('project/Submission/Helpers.lean', b'namespace Submission.Helpers\ndef support := 2\nend Submission.Helpers\n')))
         records = ({'query':'helper', 'status':'available', 'source_range':{
-            'module':'Support', 'start':[1,0], 'end':[1,15]}},)
+            'module':'ChallengeDeps', 'start':[1,0], 'end':[1,15]}},)
         result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
                                 prefix=SourceFile('Main.lean', b''), reader=self.a)
-        self.assertEqual(result[0]['body'], 'def helper := 0')
-        for selector in ('project/Support', 'Support'):
-            with self.assertRaises(ValueError):
-                index.resolve((selector,))
+        self.assertEqual(result[0], 'def helper := 0')
+        self.assertEqual(index.roots, ('project',))
+        for selector, query, path, name in (
+                ('project', 'helper', 'project/ChallengeDeps.lean', 'helper'),
+                ('project/ChallengeDeps', 'helper', 'project/ChallengeDeps.lean', 'helper'),
+                ('ChallengeDeps', 'helper', 'project/ChallengeDeps.lean', 'helper'),
+                ('Submission', 'support', 'project/Submission/Helpers.lean', 'Submission.Helpers.support'),
+                ('Submission.Helpers', 'support', 'project/Submission/Helpers.lean', 'Submission.Helpers.support'),
+                ('Submission.lean', 'value', 'project/Submission.lean', 'Submission.value')):
+            with self.subTest(selector=selector):
+                stage = self.stage(Search(query, Backend('frozen-source', (selector,))))
+                result = execute_search(stage, self.a, self.cancel, self.deadline, index=index)
+                self.assertEqual(len(result.records), 1)
+                self.assertEqual((result.records[0].path, result.records[0].names), (path, (name,)))
+                self.assertEqual(SearchResult.load(result.payload), result)
+
+    def test_lookup_distinguishes_modules_with_the_same_basename(self):
+        index = self.index((('project/ChallengeDeps.lean', b'def helper := 0\n'),
+            ('lean-pool/LeanPool/ClassificationOfSurfaces/LeanEval/ChallengeDeps.lean', b'def unrelated := 1\n')))
+        # An uncompiled file is searchable but cannot supply an imported body.
+        index = replace(index, entries=(*index.entries,
+            SourceEntry('other/ChallengeDeps.lean', self.a.save(b'def unrelated := 2\n'))))
+        records = tuple({'query': query, 'status': 'available', 'source_range': {
+            'module': module, 'start': [1, 0], 'end': [1, end]}}
+            for query, module, end in (('helper', 'ChallengeDeps', 15),
+                ('unrelated', 'LeanPool.ClassificationOfSurfaces.LeanEval.ChallengeDeps', 18)))
+        result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
+                                prefix=SourceFile('Submission.lean', b''), reader=self.a)
+        self.assertEqual(result, ('def helper := 0', 'def unrelated := 1'))
+        self.assertEqual(self.a.reads, [e.artifact for e in index.entries[:2]])
+        missing = replace(index, entries=index.entries[1:])
+        result = lookup_sources(records[:1], environment_id=self.scope.environment_id, index=missing,
+                                prefix=SourceFile('Submission.lean', b''), reader=self.a)
+        self.assertIn('missing or ambiguous frozen module', result[0])
+
+    def test_inspected_aliases_retain_checked_signatures_and_authored_source(self):
+        sources = ('alias law_sin := original',
+                   '/-- A named consequence. -/\n@[simp] protected alias law_sin := original',
+                   'alias ⟨forward, backward⟩ := original_iff',
+                   '/-- An alias in prose is not an alias command. -/\n'
+                   'theorem ordinary : True := by trivial')
+        for source in sources:
+            with self.subTest(source=source):
+                data = (source + '\n').encode()
+                index = self.index((('mathlib/Mathlib/Triangle.lean', data),))
+                record = dict(query='Geometry.law_sin', status='available', kind='theorem',
+                              type='∀ (x : ℝ), f x = g x', source_range=dict(module='Mathlib.Triangle',
+                              start=[1, 0], end=[len(source.splitlines()), len(source.splitlines()[-1])]))
+                with patch('json.dumps', side_effect=AssertionError('JSON')), \
+                        patch('json.loads', side_effect=AssertionError('JSON')):
+                    result = lookup_sources((record,), environment_id=self.scope.environment_id,
+                                            index=index, prefix=SourceFile('Main.lean', b''), reader=self.a)
+                if 'theorem ordinary' in source:
+                    self.assertEqual(result, (source,))
+                else:
+                    self.assertEqual(result, ('theorem Geometry.law_sin : ∀ (x : ℝ), f x = g x\n\n' + source,))
 
     def test_archive_large_unicode_indexed_reads_and_duplicate_guard(self):
         value = 'α😀"\\\n'*180000
@@ -386,10 +515,11 @@ class ToolsTests(unittest.TestCase):
         index = self.index((('mathlib/Mathlib/X.lean', data),))
         result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
                                 prefix=SourceFile('Main.lean', b''), reader=self.a)
-        self.assertEqual(result[0]['body'], 'def α := "😀"')
-        other = replace(index, entries=index.entries+(SourceEntry('other/Mathlib/X.lean', self.a.save(data)),))
-        self.assertIsNone(lookup_sources(records, environment_id=self.scope.environment_id, index=other,
-                         prefix=SourceFile('Main.lean', b''), reader=self.a)[0]['body'])
+        self.assertEqual(result[0], 'def α := "😀"')
+        other = replace(index, entries=index.entries+(SourceEntry('other/Mathlib/X.lean', self.a.save(data), 'Mathlib.X'),))
+        self.assertIn('missing or ambiguous frozen module', lookup_sources(records,
+            environment_id=self.scope.environment_id, index=other,
+            prefix=SourceFile('Main.lean', b''), reader=self.a)[0])
         with self.assertRaises(ValueError):
             source_excerpt(data, dict(location, end=[5,0]))
 

@@ -26,6 +26,7 @@ open Lean
 @[extern "midas_child_exit"] opaque exitChild (code : UInt32) : IO Unit
 @[extern "midas_control_open"] opaque openControl : IO Unit
 @[extern "midas_control_write"] opaque writeControl (line : @& String) : IO Unit
+@[extern "test_cpu_work"] opaque cpuWork : IO Unit
 
 def main : IO UInt32 := do
   openControl
@@ -38,6 +39,7 @@ def main : IO UInt32 := do
     if result == 0 then
       let request ← IO.FS.readFile path
       if request == "sleep" then IO.sleep 10000
+      if request == "cpu" then cpuWork
       if request == "forge" then
         let denied ← try
           IO.FS.writeFile "/midas-inputs/.midas-control" "forged\n"
@@ -67,7 +69,20 @@ def main():
         build = root / 'build'
         build.mkdir()
         (build / 'Worker.lean').write_text(HARNESS)
-        (build / 'import_runtime.c').write_bytes(import_runtime_source())
+        (build / 'import_runtime.c').write_bytes(import_runtime_source() + br'''
+#include <time.h>
+LEAN_EXPORT lean_obj_res test_cpu_work(lean_obj_arg world) {
+    (void)world;
+    struct timespec start, now;
+    volatile unsigned long work = 1;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start)) die("CPU clock");
+    do {
+        for (unsigned i = 0; i < 1000000; i++) work = work * 1664525 + 1013904223;
+        if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &now)) die("CPU clock");
+    } while (now.tv_sec - start.tv_sec < 17);
+    return lean_io_result_mk_ok(lean_box(0));
+}
+''')
         (build / 'Good.lean').write_text('example : True := by trivial\n')
         (build / 'Bad.lean').write_text('example : False := by trivial\n')
         # Explicit host runtime roots for this test only. Production recipes
@@ -82,7 +97,7 @@ def main():
                 actual = tuple(replace(m, writable=False) if readonly else m for m in mounts)
                 return LaunchSpec(tuple(argv), actual, launcher, launcher_hash, variables)
 
-            def execute(work, *, grant_id=None, job_limits=limits):
+            def execute(work, *, grant_id=None, job_limits=limits, expected=ResultStatus.SUCCEEDED):
                 inv = invocation(limits=job_limits)
                 workspace = root / inv.original_execution_id
                 workspace.mkdir()
@@ -91,7 +106,7 @@ def main():
                     done = executor.poll()
                     if done:
                         completion, = done
-                        if completion.result.status != ResultStatus.SUCCEEDED:
+                        if completion.result.status != expected:
                             raise AssertionError(completion.detail)
                         if completion.result.termination != Termination.TERMINATED:
                             raise AssertionError('Unconfirmed termination')
@@ -121,7 +136,7 @@ def main():
             native_hash = sha256((build / 'worker').read_bytes()).hexdigest()
             native_launch = launch(('/project/worker',), readonly=True)
             retained_id = None
-            for label in ('normal', 'reject', 'normal-again'):
+            for label in ('normal', 'reject', 'cpu', 'normal-again'):
                 data = label.encode()
                 def work(request, context, data=data):
                     (context.workspace / 'Request.bin').write_bytes(data)
@@ -152,6 +167,20 @@ def main():
                 return success(request, context)
             execute(forge, grant_id=retained_id)
             print('control FIFO protected; authorized isolated fallback: passed', flush=True)
+
+            def timeout(request, context):
+                data = b'sleep'
+                (context.workspace / 'Request.bin').write_bytes(data)
+                recipe = ImportRecipe(native_launch, request.environment_id, native_hash, 'Request.bin',
+                                      (ImportInput('Request.bin', sha256(data).hexdigest(), len(data)),))
+                run = context.run_import(recipe, fresh=launch(('/toolchain/bin/lean', '/project/Good.lean')))
+                assert len(run.attempts) == 1, run
+                assert (run.result.outcome, run.result.limit, run.result.termination) == (
+                    Outcome.RESOURCE_LIMIT, 'wall', Termination.TERMINATED), run
+                return success(request, context)
+            timed = execute(timeout, job_limits=replace(limits, wall_ms=1000), expected=ResultStatus.FAILED)
+            assert timed.detail.startswith('WorkerStopped:'), timed
+            print('native wall limit without fallback: passed', flush=True)
 
             def cancel(request, context):
                 data = b'sleep'

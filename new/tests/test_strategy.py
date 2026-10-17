@@ -11,6 +11,7 @@ from unittest.mock import patch
 from midas.domain import (AdmittedBinding, AdmittedReview, ArtifactRef, FrozenRequest, Job, JobKind,
     ProofGraph, ProofState, ResourceLimits, ResultStatus, accept_checked_proof, load_submission)
 from midas.domain.encoding import load_record
+from midas.domain.wire import decode
 from midas.policy import Config, OwnerUsage, Policy, Services
 from midas.prompt import Options, Section, Snapshot as Display, prover
 from midas.prompt.wire import _Writer
@@ -128,26 +129,26 @@ def admitted(artifacts, dispatched, raw, **kwargs):
 class ProtocolTests(unittest.TestCase):
     def test_default_contracts_are_strict_and_role_bound(self):
         value = response(proof())
-        parsed = interpret(value, role='prover', contract='prover-action-v1')
+        parsed = interpret(value, role='prover', contract='prover-action-v2')
         self.assertEqual(parsed.mode, 'proof')
         for raw in (b'```json\n' + value + b'\n```', b'prefix ' + value, value + b'{}',
                     b'{"action":{},"action":{}}', b'{"x":NaN}', b'{"x":"\\ud800"}'):
             with self.subTest(raw=raw[:60]), self.assertRaises(ValueError):
-                interpret(raw, role='prover', contract='prover-action-v1')
-        for role, contract in (('reviewer', 'prover-action-v1'), ('prover', 'unknown')):
+                interpret(raw, role='prover', contract='prover-action-v2')
+        for role, contract in (('reviewer', 'prover-action-v2'), ('prover', 'unknown')):
             with self.assertRaises(ValueError):
                 interpret(value, role=role, contract=contract)
         malformed = proof()
         malformed['environment'] = {}
         with self.assertRaises(ValueError):
-            interpret(response(malformed), role='prover', contract='prover-action-v1')
+            interpret(response(malformed), role='prover', contract='prover-action-v2')
 
     def test_large_response_never_calls_json_library(self):
         action = proof()
         action['proof_body'] = 'by\n  -- ' + 'x'*900000 + '\n  rfl'
         raw = response(action)
         with patch('json.loads', side_effect=AssertionError('JSON loads')), patch('json.dumps', side_effect=AssertionError('JSON dumps')):
-            result = interpret(raw, role='prover', contract='prover-action-v1')
+            result = interpret(raw, role='prover', contract='prover-action-v2')
             draft = expand(result.value, context(), uid('large'))
             self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], action['proof_body'])
             self.assertEqual(Draft.load(draft.payload), draft)
@@ -338,6 +339,138 @@ class StateTests(unittest.TestCase):
     def setUp(self):
         self.strategy, self.policy = Strategy(), Policy(Config())
 
+    def test_prompt_schema_includes_only_available_actions(self):
+        cases = (
+            (Services(), OwnerUsage(), (), (), {'search', 'lookup', 'retrieve', 'probe'}),
+            (Services(), OwnerUsage(), ('result-1',), (), {'search', 'lookup', 'retrieve', 'probe', 'recall'}),
+            (Services(research=True, research_web_calls=3), OwnerUsage(), ('result-1',), ('result-1:1',),
+             set(prover.HELPER_MODES)),
+            (Services(research=True, research_web_calls=3), OwnerUsage(research=7, retrieval=10, probe=6),
+             (), (), set()),
+            (Services(compiler=False), OwnerUsage(), (), (), {'search'}),
+        )
+        for services, usage, pins, cursors, expected in cases:
+            with self.subTest(services=services, usage=usage, pins=pins):
+                artifacts, snapshot = fixture()
+                snapshot = replace(snapshot, services=services, usage=usage, allowed_pins=pins,
+                                   recallable=pins, cursors=cursors)
+                _, prepared, _ = dispatch(snapshot, artifacts)
+                wire = decode(prepared.wire.wire, limit=8*1024**2)
+                schema = wire['outputSchema']
+                actions = {a['properties']['mode']['enum'][0] for a in schema['properties']['action']['anyOf']}
+                self.assertEqual(actions & set(prover.HELPER_MODES), expected)
+                self.assertEqual(actions - set(prover.HELPER_MODES),
+                                 {'proof', 'decomposition', 'candidate'})
+                capabilities = wire['input'][-1]['text']
+                self.assertTrue(capabilities.startswith('QUESTION next-action\nCAPABILITIES strategy-capabilities\n'))
+                self.assertTrue(capabilities.endswith('Return the action JSON now.'))
+                advertised = next(line.removeprefix('Helper modes: ') for line in capabilities.splitlines()
+                                  if line.startswith('Helper modes: '))
+                self.assertEqual(set(advertised.split(', ')) if advertised else set(), expected)
+                if not pins:
+                    self.assertIn('recall: unavailable (no saved first pages outside this prompt)', capabilities)
+                if not cursors:
+                    self.assertIn('page: unavailable (no additional pages outside this prompt)', capabilities)
+                if not services.research:
+                    self.assertIn('research: disabled', capabilities)
+                    self.assertNotIn('research_remaining:', capabilities)
+                expected_schema = prover.action_schema(tuple(sorted(actions)))
+                self.assertEqual(schema, decode(expected_schema, limit=16384))
+                self.assertEqual(prepared.turn.schema_hash, sha256(expected_schema).hexdigest())
+
+    def test_counters_preserve_cache_key_but_action_availability_changes_schema(self):
+        artifacts, snapshot = fixture()
+        snapshot = replace(snapshot, services=Services())
+        display = Display((Section('subject', 'goal', b'Goal: True'),
+                           Section('evidence', 'saved-result', b'Immutable source')),
+                          (snapshot.version.context,), (snapshot.version.owner,))
+        options = Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)
+        wires = []
+        for changed in (snapshot, replace(snapshot, usage=OwnerUsage(retrieval=1, probe=1)),
+                        replace(snapshot, cursors=('result:1',)),
+                        replace(snapshot, usage=OwnerUsage(research=7, retrieval=10, probe=6))):
+            work = self.strategy.plan(changed, self.policy).work[0]
+            prepared = self.strategy.prepare_model(changed, self.policy, work, display, options)
+            wires.append(prepared.wire.wire)
+        first = decode(wires[0], limit=8*1024**2)
+        current = decode(wires[1], limit=8*1024**2)
+        self.assertEqual(first['prompt_cache_key'], current['prompt_cache_key'])
+        self.assertEqual(first['text'], current['text'])
+        self.assertEqual(wires[0].partition(b'QUESTION next-action\\n')[0],
+                         wires[1].partition(b'QUESTION next-action\\n')[0])
+        for wire in wires[2:]:
+            current = decode(wire, limit=8*1024**2)
+            self.assertNotEqual(first['prompt_cache_key'], current['prompt_cache_key'])
+            self.assertNotEqual(first['text'], current['text'])
+            self.assertEqual(first['input'][:-1], current['input'][:-1])
+            self.assertNotEqual(first['input'][-1], current['input'][-1])
+
+    def test_reviewer_schema_removes_unavailable_research(self):
+        for services, expected in ((Services(), {'accept', 'reject'}),
+                (Services(research=True, research_web_calls=3), {'accept', 'reject', 'research'})):
+            with self.subTest(services=services):
+                artifacts, snapshot = fixture(conditional=True)
+                snapshot = replace(snapshot, services=services)
+                _, prepared, _ = dispatch(snapshot, artifacts)
+                wire = decode(prepared.wire.wire, limit=8*1024**2)
+                self.assertEqual(set(wire['outputSchema']['properties']['verdict']['enum']), expected)
+
+    def test_lookup_can_progress_and_unavailable_actions_still_fail_admission(self):
+        artifacts, snapshot = fixture()
+        snapshot = replace(snapshot, services=Services())
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        invalid = (
+            dict(mode='stop', objection=None, rationale='Unable to progress further.'),
+            dict(mode='recall', rationale='Read the source.', result_id='source-prefix'),
+            dict(mode='recall', rationale='Read a result.', result_id=''),
+            dict(mode='research', rationale='Find a reference.', question='Which theorem applies?', urls=[]),
+            dict(mode='page', rationale='Read more.', cursor='unavailable:1'),
+        )
+        for action in invalid:
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                self.strategy.on_model(snapshot, self.policy, dispatched,
+                    admitted(artifacts, dispatched, response(action)), artifacts)
+        action = dict(mode='lookup', rationale='Inspect the definition used in the goal.',
+                      names=['Nat.Prime'], inspect=True)
+        changes = self.strategy.on_model(snapshot, self.policy, dispatched,
+            admitted(artifacts, dispatched, response(action)), artifacts)
+        self.assertEqual(changes.helper.request.action.names, ('Nat.Prime',))
+        self.assertTrue(changes.helper.request.action.inspect)
+
+    def test_retrieve_accepts_morley_subscript_names(self):
+        artifacts, snapshot = fixture()
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        names = ['EuclideanGeometry.' + name for name in (
+            'law_cos', 'law_sin', 'angle_add_angle_add_angle_eq_pi',
+            'ne₁₂_of_not_collinear', 'sin_pos_of_not_collinear')]
+        action = dict(mode='retrieve', rationale='Check the geometric interfaces.', names=names,
+                      queries=['angle_add_angle_add_angle_eq_pi'], offset=0, inspect=True,
+                      backends=[dict(name='frozen-source', prefixes=['mathlib/Mathlib/Geometry/Euclidean'])])
+        changes = self.strategy.on_model(snapshot, self.policy, dispatched,
+            admitted(artifacts, dispatched, response(action)), artifacts)
+        self.assertEqual(changes.helper.request.action.names, tuple(names))
+        self.assertEqual(len(changes.helper.stages), 1)
+
+    def test_displayed_result_can_be_pinned_but_not_recalled(self):
+        artifacts, snapshot = fixture()
+        snapshot = replace(snapshot, allowed_pins=('displayed-result',))
+        dispatched, prepared, _ = dispatch(snapshot, artifacts)
+        wire = decode(prepared.wire.wire, limit=8*1024**2)
+        helpers = next(line.removeprefix('Helper modes: ').split(', ') for line in wire['input'][-1]['text'].splitlines()
+                       if line.startswith('Helper modes: '))
+        self.assertNotIn('recall', helpers)
+        self.assertNotIn('Saved evidence not included', wire['input'][-1]['text'])
+        action = dict(mode='recall', rationale='Read the displayed result again.', result_id='displayed-result')
+        with self.assertRaisesRegex(ValueError, 'advertised saved result_id'):
+            self.strategy.on_model(snapshot, self.policy, dispatched,
+                admitted(artifacts, dispatched, response(action)), artifacts)
+        memory = dict(strategy='Use the displayed definition.', upsert=[], forget=[],
+                      pin_evidence=['displayed-result'], unpin_evidence=[])
+        action = dict(mode='lookup', rationale='Inspect a related definition.', names=['Nat.add'], inspect=True)
+        changes = self.strategy.on_model(snapshot, self.policy, dispatched,
+            admitted(artifacts, dispatched, response(action, memory)), artifacts)
+        self.assertEqual(changes.memory.pins, ('displayed-result',))
+
     def test_live_scripted_and_supplied_candidate_paths(self):
         drafts = []
         for workflow in ('live', 'scripted'):
@@ -422,7 +555,7 @@ class StateTests(unittest.TestCase):
         artifacts, snapshot = fixture()
         scope = Scope(snapshot.version.owner, snapshot.environment_id, snapshot.version.context)
         archive = prepare_archive(scope, 'a'*64, [{'answer': 'x'*20000}], (artifact('provenance'),), artifacts)
-        snapshot = replace(snapshot, allowed_pins=(archive.id,))
+        snapshot = replace(snapshot, allowed_pins=(archive.id,), recallable=(archive.id,))
         dispatched, _, _ = dispatch(snapshot, artifacts)
         action = dict(mode='recall', rationale='Read the saved result.', result_id=archive.id)
         changes = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, response(action)), artifacts)
@@ -533,16 +666,41 @@ class StateTests(unittest.TestCase):
         artifacts, snapshot = fixture()
         dispatched, _, _ = dispatch(snapshot, artifacts)
         action = dict(mode='probe', rationale='Inspect the goal.', cases=[
-            dict(id='one', code='rfl', operation='tactic', setup='', expected=None),
-            dict(id='two', code='True', operation='term', setup='', expected='Prop')])
+            dict(id='one', code='Lean.Elab.Tactic.evalTactic (← `(tactic| rfl))'),
+            dict(id='two', code='let env ← Lean.getEnv\nLean.logInfo m!"{(env.find? `Nat.add).isSome}"')])
         output = admitted(artifacts, dispatched, response(action))
         result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
         self.assertEqual(result.helper.units, 2)
-        self.assertEqual(load_record(result.artifacts[0].data, limit=65536), action['cases'][0])
+        self.assertEqual(load_record(result.artifacts[0].data, limit=65536), dict(id='one',
+            code='run_tac do\n  '+action['cases'][0]['code'], operation='tactic', setup='', expected=None))
+        self.assertEqual(load_record(result.artifacts[1].data, limit=65536)['code'],
+            'run_tac do\n  let env ← Lean.getEnv\n  Lean.logInfo m!"{(env.find? `Nat.add).isSome}"')
         self.assertIsNone(result.graph)
         depleted = replace(snapshot, usage=OwnerUsage(probe=self.policy.config.helpers.probe - 1))
         with self.assertRaises(ValueError):
             self.strategy.on_model(depleted, self.policy, dispatched, output, artifacts)
+
+    def test_probe_rejects_wrappers_legacy_fields_and_generated_byte_overflow(self):
+        artifacts, snapshot = fixture()
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        def apply(cases):
+            output = admitted(artifacts, dispatched, response(dict(mode='probe', rationale='Inspect.', cases=cases)))
+            return self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
+        for wrapper in ('by', 'run_tac', 'run_elab', 'do'):
+            for prefix in ('', '-- comment\n/- outer /- nested -/ -/\n'):
+                with self.subTest(wrapper=wrapper, prefix=prefix), self.assertRaisesRegex(ValueError, 'omit the wrapper'):
+                    apply([dict(id='one', code=prefix+wrapper+'\n  pure ()')])
+        for cases in ([], [dict(id='one', code='pure ()', operation='tactic', setup='', expected=None)],
+                      [dict(id='one', code='pure ()')]*2, [dict(id='0bad', code='pure ()')],
+                      [dict(id='one', code='-- just a comment')]):
+            with self.subTest(cases=cases), self.assertRaises(ValueError):
+                apply(cases)
+        body = 'Lean.logInfo "'+'α'*7986+'"'
+        self.assertEqual(len(body.encode()), 15987)
+        accepted = apply([dict(id='fits', code=body)])
+        self.assertEqual(len(load_record(accepted.artifacts[0].data, limit=65536)['code'].encode()), 16000)
+        with self.assertRaisesRegex(ValueError, 'Generated probe code exceeds'):
+            apply([dict(id='overflow', code=body+' ')])
 
     def test_resource_and_protocol_failures_do_not_charge_math(self):
         _, snapshot = fixture(conditional=True)

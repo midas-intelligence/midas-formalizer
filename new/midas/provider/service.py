@@ -99,7 +99,7 @@ class Provider:
             'request': frozen.operation_payload.to_dict(), 'raw': raw.to_dict(), 'events': events.to_dict(),
             'outcome': metadata(output)}), max_bytes=META_BYTES)
         return WorkerResult(invocation.original_execution_id, frozen.request_hash, status(output),
-            (raw, events, report), report, None, output.usage, output.delivery, output.termination)
+            tuple(dict.fromkeys((raw, events, report))), report, None, output.usage, output.delivery, output.termination)
 
     def admit_receipt(self, request, invocation, result, receipt, reader, authority):
         result.validate_for(invocation)
@@ -117,7 +117,7 @@ class Provider:
                 or report['request'] != invocation.request.operation_payload.to_dict()):
             raise ValueError('Provider report differs from saved request')
         raw, events = ArtifactRef.from_dict(report['raw']), ArtifactRef.from_dict(report['events'])
-        if result.staged_artifacts != (raw, events, result.output):
+        if result.staged_artifacts != tuple(dict.fromkeys((raw, events, result.output))):
             raise ValueError('Provider report has missing or unexpected artifacts')
         m = report['outcome']
         codec.fields(m, metadata(ModelOutput()))

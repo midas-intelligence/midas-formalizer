@@ -1,6 +1,9 @@
 """Concrete route construction and saved scripted responses, without credentials in records."""
+from dataclasses import replace
+
 from ..controller import Effect
 from ..domain import Usage
+from ..policy import cost_microusd
 from ..provider import (BearerCredentials, ModelOutput, Provider, ResponsesTransport, Route, ScriptedTransport)
 from ..storage import Changes, CounterChange
 from . import records as r
@@ -35,7 +38,23 @@ class Script:
         return ScriptedTransport({request.wire.sha256: output})(request, raw, setup, cancel, deadline)
 
 
+def _priced(transport, prices):
+    """Apply frozen role prices before the provider seals the result and usage."""
+    if not callable(transport):
+        raise ValueError('Invalid transport')
+    def invoke(request, raw, setup, cancel, deadline):
+        output = transport(request, raw, setup, cancel, deadline)
+        if isinstance(output, ModelOutput) and output.usage.cost_microusd is None:
+            cost = cost_microusd(prices.get(request.role), output.usage,
+                                cache_write_tokens=output.cache_write_tokens)
+            if cost is not None:
+                output = replace(output, usage=replace(output.usage, cost_microusd=cost))
+        return output
+    return invoke
+
+
 def construct(config, *, transports=None, script=None, codex=None, roles=('prover', 'reviewer', 'research')):
+    prices = {role: getattr(config, role).prices for role in roles}
     bindings = {}
     for role in roles:
         setting = getattr(config, role)
@@ -54,7 +73,8 @@ def construct(config, *, transports=None, script=None, codex=None, roles=('prove
                 transport = codex_transport(*codex)
             else:
                 transport = ResponsesTransport(BearerCredentials.from_environment(route))
-        bindings[route.scope] = route, transport
+        # Several roles can share a transport while retaining different prices.
+        bindings[route.scope] = route, _priced(transport, prices)
     return Provider(tuple(bindings.values()))
 
 

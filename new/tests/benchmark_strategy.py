@@ -35,7 +35,7 @@ def main():
         payload = response(action)
         assert len(payload) < 16384
         compare(f'interpret_{size}', lambda: old_decode(payload),
-                lambda: interpret(payload, role='prover', contract='prover-action-v1'))
+                lambda: interpret(payload, role='prover', contract='prover-action-v2'))
     ctx = context()
     binding = dict(obligation='obl_'+'a'*64, generation=0, context_sha256='b'*64)
     for size in (16, 1024, 8192):
@@ -55,7 +55,7 @@ def main():
                                     submission_id=uid('candidate'), required_targets=('goal',))
             return canonical(parsed['submission']), canonical(response_guidance(parsed))
         def current():
-            return expand(interpret(payload, role='prover', contract='prover-action-v1').value, ctx, uid('candidate'))
+            return expand(interpret(payload, role='prover', contract='prover-action-v2').value, ctx, uid('candidate'))
         compare(f'candidate_admission_{size}', old, current)
     # Same semantic memory update and complete lessons. New also increments an
     # explicit version and returns immutable, binary-persistable records.
@@ -74,7 +74,7 @@ def main():
     revision = dict(mode='revise', rationale='Use a different tactic.',
                     edits=[dict(path='/entries/parent/proof', old='  rfl', new='  simp')])
     for label, run in (
-        ('large_interpret_expand', lambda: expand(interpret(payload, role='prover', contract='prover-action-v1').value, ctx, uid('large'))),
+        ('large_interpret_expand', lambda: expand(interpret(payload, role='prover', contract='prover-action-v2').value, ctx, uid('large'))),
         ('large_exact_revision', lambda: revise(revision, draft, ctx, uid('revision')))):
         with patch('json.loads', side_effect=AssertionError), patch('json.dumps', side_effect=AssertionError):
             elapsed = median(timeit(run, number=10) / 10 for _ in range(5))

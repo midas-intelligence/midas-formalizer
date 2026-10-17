@@ -13,7 +13,8 @@ from midas.domain import encoding as graph
 from midas.domain.identity import make_context
 from midas.source import (
     CheckedAlias, CheckedDeclaration, Context, GeneratedSource, Module, RenderPolicy,
-    RootReplacement, SourceFile, candidate, declarations, integrate, module_tree, term,
+    RootReplacement, SourceFile, candidate, declarations, integrate, lean_name, module_tree,
+    parse_identifier, proof_application, term,
 )
 from tests.test_source import context, name, signature
 from tests.test_domain_contracts import selected_problem
@@ -47,6 +48,19 @@ def main():
     child = CheckedDeclaration(child_name, signature(), SourceFile('child', b'by trivial'))
     parent = CheckedDeclaration(parent_name, signature(), SourceFile('parent', b'by exact child'), (child_name,))
     snippets.append(declarations((parent, child)).data)
+    # Closed signatures include both authored header locals and any binders
+    # still inside the target. Exercise each boundary and renamed-local lookup.
+    wrapper_sig = signature(['forall', name('n'), 'explicit', nat,
+        ['forall', name('h'), 'explicit', ['const', name('True'), []], ['const', name('True'), []]]])
+    wrapper_name = graph.encode(name('wrapperResult'))
+    snippets.append(declarations((CheckedDeclaration(wrapper_name, wrapper_sig,
+        SourceFile('wrapper', b'by intro n h; exact h')),)).data)
+    wrapper = proof_application(wrapper_name, wrapper_sig).data
+    for header in (b'example (n : Nat) (h : True) : True := ',
+                   b'example (n : Nat) : True -> True := ',
+                   b'example : Nat -> True -> True := ',
+                   b'example (renamed : Nat) (witness : True) : True := '):
+        snippets.append(header + wrapper)
     _, _, _, selection = selected_problem()
     integrated = integrate(selection, (RootReplacement('witness', GeneratedSource(b'0')),
                                        RootReplacement('property', GeneratedSource(b'by rfl'))))
@@ -57,6 +71,16 @@ def main():
     tree = module_tree(modules, 'Main')
     with TemporaryDirectory(prefix='midas-source-lean-') as directory:
         root = Path(directory)
+        identifiers = ['namespace IdentifierRegression']
+        for component in ('ne₁₂_of_not_collinear', "x₀₉ₐₜᵢⱼ'", 'getElem!', 'find?',
+                          'αβ', 'Ω', 'ℝ', '𝒜', 'é', 'Ā'):
+            parsed = parse_identifier(component)
+            assert parsed is not None, component
+            spelling = lean_name(parsed, readable=True)
+            assert spelling == component, spelling
+            identifiers.extend((f'def {spelling} : Nat := 0', f'example : {spelling} = 0 := rfl'))
+        identifiers.append('end IdentifierRegression')
+        (root / 'Identifiers.lean').write_text('\n'.join(identifiers) + '\n')
         (root / 'Examples.lean').write_bytes(b'\n'.join(snippets))
         scoped = Context(SourceFile('Scoped.lean', b'namespace Scoped\nsection\n'), 25, signature())
         (root / 'Scoped.lean').write_bytes(candidate(scoped, SourceFile('proof', b'by trivial')).data)
@@ -68,7 +92,7 @@ def main():
         command = ['bwrap', '--die-with-parent', '--unshare-all', '--ro-bind', '/', '/',
                    '--dev', '/dev', '--proc', '/proc', '--bind', directory, directory,
                    '--chdir', directory, '--setenv', 'LEAN_PATH', directory, compiler]
-        for module in ('Examples', 'Scoped', 'Header', *tree.build_order):
+        for module in ('Identifiers', 'Examples', 'Scoped', 'Header', *tree.build_order):
             result = subprocess.run([*command, '-o', module + '.olean', module + '.lean'],
                                     capture_output=True, text=True, timeout=60)
             if result.returncode:

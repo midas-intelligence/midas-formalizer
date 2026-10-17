@@ -3,6 +3,7 @@ import ast
 from dataclasses import FrozenInstanceError, replace
 import json
 from pathlib import Path
+import re
 import unittest
 from unittest.mock import patch
 
@@ -27,7 +28,120 @@ def snapshot():
                      Section('question', 'research-question', b'Find a precise reference.')))
 
 
+def cache_prefixes(request):
+    """Exact wire prefixes at provider lookup boundaries; no large JSON operations."""
+    wire = decode(request.wire, limit=MAX_BYTES)
+    names = [m['content'][0]['text'].splitlines()[0] for m in wire['input']
+             if isinstance(m['content'], list) and 'prompt_cache_breakpoint' in m['content'][0]]
+    prefixes = [request.wire[:m.start()] for m in re.finditer(b',"prompt_cache_breakpoint":', request.wire)]
+    return dict(zip(names, prefixes, strict=True))
+
+
 class PromptTests(unittest.TestCase):
+    def test_stable_blocks_precede_changing_turn_material_for_each_role(self):
+        turn = replace(snapshot(), sections=(*snapshot().sections,
+            Section('history', 'older-check', b'old diagnostic'),
+            Section('memory', 'strategy', b'next approach'),
+            Section('evidence', 'lookup', b'exact checked type'),
+            Section('feedback', 'latest-check', b'current diagnostic')))
+        for role in (prover, reviewer, researcher):
+            for transport in ('codex', 'azure_responses', 'bedrock_responses'):
+                if role is researcher and transport != 'codex':
+                    continue
+                with self.subTest(role=role.__name__, transport=transport):
+                    def messages(value):
+                        wire = decode(build(value, Options(transport, 'model'), renderer=role.render).wire, limit=MAX_BYTES)
+                        return ([m['text'] for m in wire['input']] if transport == 'codex' else
+                                [m['content'] for m in wire['input'][1:]])
+                    before = messages(turn)
+                    index = next(i for i, text in enumerate(before) if text.startswith('CANDIDATE '))
+                    self.assertTrue(any(text.startswith('HISTORY ') for text in before[:index]))
+                    evidence = next(i for i, text in enumerate(before) if text.startswith('EVIDENCE '))
+                    history = next(i for i, text in enumerate(before) if text.startswith('HISTORY '))
+                    self.assertLess(evidence, history)
+                    for kind in ('memory', 'feedback', 'capabilities', 'question'):
+                        changed = replace(turn, sections=tuple(replace(s, text=b'changed') if s.kind == kind else s
+                                                              for s in turn.sections))
+                        self.assertEqual(before[:index+1], messages(changed)[:index+1])
+
+    def test_explicit_cache_boundaries_match_roles_and_are_provider_accepted(self):
+        turn = replace(snapshot(), sections=(*snapshot().sections,
+            Section('history', 'older-check', b'old diagnostic'),
+            Section('history', 'another-check', b'another diagnostic'),
+            Section('evidence', 'first-result', b'first result'),
+            Section('evidence', 'second-result', b'second result'),
+            Section('memory', 'strategy', b'changing strategy'),
+            Section('feedback', 'latest-check', b'current diagnostic')))
+        artifacts = Artifacts()
+        for transport, provider in (('azure_responses', 'azure'), ('bedrock_responses', 'amazon-bedrock-runtime')):
+            endpoint = ('https://example.test/responses' if transport == 'azure_responses' else
+                        'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses')
+            route = Route(provider, 'model', transport, endpoint=endpoint, prompt_cache='explicit')
+            for role in (prover, reviewer):
+                options = Options(transport, 'model', prompt_cache='explicit', cache_scope=route.scope)
+                result = build(turn, options, renderer=role.render)
+                request = ModelRequest(route, role.render(turn).role, LIMITS, artifacts.save(result.wire))
+                validate_wire(request, result.wire)
+                wire = decode(result.wire, limit=MAX_BYTES)
+                cached = [m for m in wire['input'] if isinstance(m['content'], list)]
+                # More than four markers are valid: old endpoints remain lookup
+                # candidates even though the provider limits writes per request.
+                self.assertEqual(len(cached), 7)
+                self.assertEqual(cached[0]['role'], 'developer')
+                self.assertEqual([m['content'][0]['text'].split()[0] for m in cached[1:]],
+                                 ['SUBJECT', 'EVIDENCE', 'EVIDENCE', 'HISTORY', 'HISTORY', 'CANDIDATE'])
+                malformed = result.wire.replace(b'"prompt_cache_breakpoint":{"mode":"explicit"}',
+                                                b'"prompt_cache_breakpoint":{"mode":"unknown"}', 1)
+                with self.assertRaisesRegex(ValueError, 'breakpoint'):
+                    validate_wire(request, malformed)
+                disabled = build(turn, replace(options, prompt_cache='disabled'), renderer=role.render)
+                self.assertNotIn(b'prompt_cache_breakpoint', disabled.wire)
+
+    def test_growing_evidence_and_history_reuse_previous_written_endpoints(self):
+        options = Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)
+        for role in (prover, reviewer):
+            for kind, count in (('evidence', 8), ('history', 60)):
+                with self.subTest(role=role.__name__, kind=kind):
+                    retained = tuple(Section(kind, f'record-{i}', f'Immutable result {i}.'.encode())
+                                     for i in range(count))
+                    turn = replace(snapshot(), sections=(*snapshot().sections, *retained))
+                    for step in range(3):
+                        before = cache_prefixes(build(turn, options, renderer=role.render))
+                        next_record = Section(kind, f'record-{count+step}', b'New result.')
+                        changed = tuple(replace(s, text=b'Updated turn material')
+                                        if s.kind in ('candidate', 'capabilities') else s for s in turn.sections)
+                        after_turn = replace(turn, sections=(*changed, next_record))
+                        after = cache_prefixes(build(after_turn, options, renderer=role.render))
+                        # Exercise the documented write cap and lookup window,
+                        # not merely the presence of annotations on the new tail.
+                        written = set(list(before.values())[-4:])
+                        incoming = list(after.values())
+                        matches = written.intersection(incoming[:2] + incoming[-50:])
+                        self.assertTrue(matches)
+                        self.assertEqual(max(matches, key=len),
+                                         before[f'{kind.upper()} record-{count+step-1}'])
+                        turn = after_turn
+
+    def test_draft_memory_and_allowances_do_not_invalidate_retained_evidence(self):
+        options = Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)
+        turn = replace(snapshot(), sections=(*snapshot().sections,
+            Section('evidence', 'saved-page', b'Retained exact source'),
+            Section('history', 'old-check', b'Old diagnostic'),
+            Section('memory', 'strategy', b'Current strategy'),
+            Section('feedback', 'new-check', b'Current diagnostic')))
+        for role in (prover, reviewer):
+            before = cache_prefixes(build(turn, options, renderer=role.render))
+            for kind in ('candidate', 'memory', 'feedback', 'capabilities', 'question'):
+                changed = replace(turn, sections=tuple(replace(s, text=b'Changed') if s.kind == kind else s
+                                                       for s in turn.sections))
+                after = cache_prefixes(build(changed, options, renderer=role.render))
+                self.assertEqual(before['EVIDENCE saved-page'], after['EVIDENCE saved-page'])
+                self.assertEqual(before['HISTORY old-check'], after['HISTORY old-check'])
+            wire = build(turn, options, renderer=role.render).wire
+            last = wire.rfind(b'"prompt_cache_breakpoint"')
+            self.assertGreater(wire.index(b'MEMORY strategy'), last)
+            self.assertGreater(wire.index(b'FEEDBACK new-check'), last)
+
     def test_all_roles_produce_provider_accepted_wire(self):
         routes = (Route('openai', 'model', 'codex'),
                   Route('azure', 'model', 'azure_responses', endpoint='https://example.test/responses'),
@@ -138,10 +252,13 @@ class PromptTests(unittest.TestCase):
             self.assertLessEqual(sizes[-1], 16384)
             return result
         with patch('json.dumps', side_effect=bounded), patch('json.loads', side_effect=AssertionError('JSON decode')):
-            for transport in ('codex', 'azure_responses'):
-                output = build(turn, Options(transport, 'model'), renderer=prover.render)
+            for options in (Options('codex', 'model'), Options('azure_responses', 'model'),
+                            Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)):
+                output = build(turn, options, renderer=prover.render)
                 wire = decode(output.wire, limit=MAX_BYTES)
-                text = wire['input'][0]['text'] if transport == 'codex' else wire['input'][1]['content']
+                text = wire['input'][0]['text'] if options.transport == 'codex' else wire['input'][1]['content']
+                if isinstance(text, list):
+                    text = text[0]['text']
                 self.assertEqual(text.partition('\n')[2].encode(), raw)
         self.assertTrue(sizes)
 
@@ -155,7 +272,7 @@ class PromptTests(unittest.TestCase):
         pages = [s for s in rendered.sections if s.kind == 'evidence']
         self.assertEqual([s.name for s in pages[:2]], ['pinned-first', 'recent'])
         self.assertIn(b'1 evidence section(s) omitted', pages[2].text)
-        self.assertEqual(rendered.sections[-1].text, b'exact diagnostic')
+        self.assertEqual(next(s.text for s in rendered.sections if s.kind == 'feedback'), b'exact diagnostic')
         self.assertEqual(turn.sections[2].text, b'123456')
 
     def test_wire_identity_binds_exact_artifacts_and_owner_generations(self):
@@ -180,6 +297,20 @@ class PromptTests(unittest.TestCase):
         original = key()
         changed = replace(turn, sections=(*turn.sections, Section('feedback', 'new', b'new feedback')))
         self.assertEqual(original, key(changed))
+        changed = replace(turn, sections=tuple(replace(s, text=b'web_calls=1; research available')
+            if s.kind == 'capabilities' else s for s in turn.sections))
+        for transport in ('codex', 'azure_responses', 'bedrock_responses'):
+            controls = Options(transport, 'model')
+            before = build(turn, controls, renderer=prover.render)
+            after = build(changed, controls, renderer=prover.render)
+            prefix, marker, ending = before.wire.partition(b'QUESTION next-action\\n')
+            next_prefix, next_marker, next_ending = after.wire.partition(marker)
+            self.assertTrue(marker)
+            self.assertEqual((prefix, marker), (next_prefix, next_marker))
+            self.assertNotIn(b'CAPABILITIES remaining', prefix)
+            self.assertIn(b'CAPABILITIES remaining', ending)
+            self.assertIn(b'Return the action JSON now.', ending)
+            self.assertNotEqual(ending, next_ending)
         self.assertNotEqual(original, key(options=replace(options, cache_scope='b'*64)))
         self.assertNotEqual(original, key(options=replace(options, model='different')))
         self.assertNotEqual(original, key(renderer=reviewer.render))
@@ -206,6 +337,18 @@ class PromptTests(unittest.TestCase):
                     pending.extend(value.values())
                 elif isinstance(value, list):
                     pending.extend(value)
+
+    def test_probe_contract_accepts_only_bodies_and_offers_executable_examples(self):
+        schema = decode(prover.SCHEMA, limit=16384)
+        action = next(a for a in schema['properties']['action']['anyOf']
+                      if a['properties']['mode']['enum'] == ['probe'])
+        cases = action['properties']['cases']
+        self.assertEqual((cases['minItems'], cases['maxItems']), (1, 3))
+        self.assertEqual(set(cases['items']['properties']), {'id', 'code'})
+        self.assertFalse(cases['items']['additionalProperties'])
+        self.assertIn(b'only id and code', prover.INSTRUCTIONS)
+        self.assertIn('Lean.Elab.Tactic.evalTactic (← `(tactic| intro C))'.encode(), prover.INSTRUCTIONS)
+        self.assertIn(b'body starts at line 2', prover.INSTRUCTIONS)
 
     def test_research_schema_matches_existing_advisory_evidence_contract(self):
         schema = decode(researcher.SCHEMA, limit=16384)

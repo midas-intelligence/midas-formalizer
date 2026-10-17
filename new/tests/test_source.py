@@ -49,6 +49,25 @@ class NameTests(unittest.TestCase):
         for invalid in ('A.', 'A..B', '«a»b', '«', 'x + y', 'a\nb', '«»', 'by'):
             self.assertIsNone(parse_identifier(invalid), invalid)
 
+    def test_lean_identifier_characters_roundtrip_and_discovery(self):
+        components = ('ne₁₂_of_not_collinear', "x₀₉ₐₜᵢⱼ'", 'getElem!', 'find?',
+                      'αβ', 'Ω', 'ℝ', '𝒜', 'é', 'Ā')
+        for component in components:
+            with self.subTest(component=component):
+                expected = ['str', name('Geometry'), component]
+                spelling = 'Geometry.' + component
+                self.assertEqual(parse_identifier(spelling), expected)
+                self.assertEqual(parse_identifier('Geometry.«' + component + '»'), expected)
+                self.assertEqual(lean_name(expected, readable=True), spelling)
+                source = 'namespace Geometry\ndef ' + component + ' : Nat := 0\nend Geometry\n'
+                self.assertEqual(declaration_names(source), {1: spelling})
+        for invalid in ('₁x', 'ₐx', '?x', '!x', "'x", '1x', 'x+y', 'x-y',
+                        'λ', 'Π', 'Σ', 'x²', 'x😀', 'e\u0301', '变量'):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(parse_identifier('Geometry.' + invalid))
+                self.assertEqual(parse_identifier('Geometry.«' + invalid + '»'),
+                                 ['str', name('Geometry'), invalid])
+
     def test_lexical_hints_ignore_comments_strings_and_private(self):
         text = ('namespace A\n/- namespace Fake /- nested -/ -/\n'
                 'def text := "namespace Wrong"\nsection\n@[simp]\n'
@@ -317,7 +336,9 @@ class RenderTests(unittest.TestCase):
     def test_proof_application_uses_telescope(self):
         sig = signature(['forall', name('x'), 'explicit', ['const', name('Nat'), []], ['const', name('True'), []]])
         result = proof_application(graph.encode(name('result')), sig)
-        self.assertEqual(result.data.count(b'| exact @'), 2)
+        direct = 'exact @_root_.«result» «x»'.encode()
+        self.assertIn(direct, result.data)
+        self.assertLess(result.data.index(direct), result.data.index(b'(by first'))
         self.assertIn('exact «x»'.encode(), result.data)
 
 

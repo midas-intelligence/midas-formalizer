@@ -354,6 +354,31 @@ class ProviderTests(unittest.TestCase):
         admitted = p.admit_receipt(self.request,inv,result,receipt,self.a,auth)
         self.assertEqual((admitted.outcome.cache_write_tokens,admitted.outcome.delivery),(3,Delivery.UNKNOWN))
 
+    def test_empty_failure_survives_content_addressed_staging(self):
+        from midas.storage import Staging
+        inv = issue(self.a, self.request)
+        output = ModelOutput(error='authentication')
+        provider = Provider([(ROUTE, ScriptedTransport({self.request.wire.sha256: output}))])
+        with TemporaryDirectory() as temporary:
+            staging = Staging(Path(temporary)/'staging', max_bytes=LIMITS.event_bytes)
+            try:
+                ctx = context(self.a, inv)
+                ctx.staging = staging
+                result = provider.execute(inv.request, ctx)
+                for ref in result.staged_artifacts:
+                    self.a.data[ref.id] = staging.read_artifact(ref, max_bytes=LIMITS.event_bytes)
+            finally:
+                staging.close()
+        self.assertEqual(result.status, ResultStatus.FAILED)
+        self.assertEqual(len(result.staged_artifacts), 2)
+        receipt = ReceiptBinding(inv.original_execution_id, inv.request.request_ref,
+            self.a.save(worker_payload(result)), self.a.save(b'seal'))
+        admitted = provider.admit_receipt(self.request, inv, result, receipt, self.a,
+            SimpleNamespace(verify_receipt=lambda *_: True))
+        self.assertEqual(admitted.outcome.error, 'authentication')
+        self.assertEqual(admitted.raw, admitted.events)
+        self.assertEqual(self.a.data[admitted.raw.id], b'')
+
     def test_missing_route_invalid_wire_and_adapter_crash(self):
         inv = issue(self.a,self.request)
         out = Provider([]).invoke(self.request,context(self.a,inv))

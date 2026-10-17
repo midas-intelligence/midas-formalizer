@@ -6,6 +6,8 @@ Respect the supplied web-call allowance. Prefer original papers, textbooks, and
 author or university notes. Open actual sources; snippets alone do not establish
 access. Prefer readable mathematical HTML or LaTeX, consulting PDFs for ambiguity.
 Record precise theorem/section/page locations, hypotheses, and unresolved questions.
+Use the supplied source, exact task and proof guidance to assess relevance to the
+question. Explain which hypotheses match and what would be needed for adaptation.
 Separate exact excerpts from paraphrases and proposed adaptations. Quote at most
 25 words per source URL across all entries. Never invent access, quotes or locations.
 For unread sources use accessed=false and excerpt="" and describe the gap.
@@ -31,6 +33,6 @@ def render(snapshot):
         raise DomainError('Researcher requires a question')
     if not any(s.kind == 'capabilities' and s.text.strip() for s in snapshot.sections):
         raise DomainError('Researcher requires its frozen web-call allowance')
-    sections = display(snapshot, ('source', 'definitions', 'subject', 'interfaces', 'candidate',
-                       'history', 'memory', 'evidence', 'feedback', 'capabilities', 'question'))
-    return Prompt('researcher', 'researcher-v1', 'research-evidence-v1', INSTRUCTIONS, SCHEMA, sections)
+    sections = display(snapshot, ('source', 'definitions', 'subject', 'interfaces', 'evidence',
+                       'history', 'candidate', 'memory', 'feedback', 'capabilities', 'question'))
+    return Prompt('researcher', 'researcher-v2', 'research-evidence-v1', INSTRUCTIONS, SCHEMA, sections)

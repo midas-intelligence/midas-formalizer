@@ -12,7 +12,15 @@ where have show from return yield for while repeat try catch finally theorem def
 abbrev example axiom opaque inductive structure class instance namespace section
 end open import export variable universe set_option attribute syntax macro elab
 deriving mutual private protected public noncomputable unsafe partial nonrec module'''.split())
-_PLAIN = re.compile(r"[A-Za-z_\u03b1-\u03c9][A-Za-z_0-9\u03b1-\u03c9']*")
+# Lean's isIdFirst/isIdRest (Init/Meta/Defs.lean), not Python's Unicode
+# identifier rules. In particular, subscripts and !/? may continue a name.
+_LETTER_LIKE = (r"\u03b1-\u03ba\u03bc-\u03c9\u0391-\u039f\u03a1-\u03a2\u03a4-\u03a9"
+                r"\u03ca-\u03fb\u1f00-\u1ffe\u2100-\u214f\U0001d49c-\U0001d59f"
+                r"\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u00ff\u0100-\u017f")
+_FIRST = 'A-Za-z_' + _LETTER_LIKE
+_REST = _FIRST + r"0-9'!?\u2080-\u2089\u2090-\u209c\u1d62-\u1d6a\u2c7c"
+_IDENTIFIER = f'[{_FIRST}][{_REST}]*'
+_PLAIN = re.compile(_IDENTIFIER)
 
 
 def plain_identifier(text):
@@ -57,7 +65,7 @@ def parse_identifier(text):
             end = text.find('.', cursor)
             end = len(text) if end < 0 else end
             part = text[cursor:end]
-            if not part.replace("'", '_').isidentifier() or part in _RESERVED:
+            if not plain_identifier(part):
                 return None
             cursor = end
         parts.append(part)
@@ -74,7 +82,8 @@ def parse_identifier(text):
         value = ['str', value, part]
     return value
 
-NAME = r"(?:«[^»\n]+»|[\w']+)(?:\.(?:«[^»\n]+»|[\w']+))*"
+_COMPONENT = rf'(?:«[^»\n]+»|{_IDENTIFIER})'
+NAME = rf'{_COMPONENT}(?:\.{_COMPONENT})*'
 LEXEME = re.compile(r'/-|--[^\n]*|"(?:\\.|[^"\\])*"|«[^»]*»')
 COMMENT = re.compile(r'/-|-/')
 SCOPE = re.compile(r'^(?:(?:noncomputable|public)\s+)?(namespace|section|end)(?:\s+(' + NAME + r'))?\s*$')

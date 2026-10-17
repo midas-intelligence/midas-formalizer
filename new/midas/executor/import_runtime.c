@@ -374,8 +374,11 @@ LEAN_EXPORT lean_obj_res midas_isolate(lean_obj_arg world) {
         if (!freopen("/dev/null", "r", stdin)) die("stdin");
         if (syscall(SYS_close_range, 3, ~0U, 0) < 0) die("descriptors");
         restrict_request();
-        struct rlimit cpu = {15, 16}, core = {0, 0};
-        if (setrlimit(RLIMIT_CPU, &cpu) < 0 || setrlimit(RLIMIT_CORE, &core) < 0) die("limits");
+        /* WorkerContext supervises the complete request tree against the job's
+         * wall budget, just as for fresh launches. A private CPU cap would kill
+         * valid longer requests and waste their work on a fresh fallback. */
+        struct rlimit core = {0, 0};
+        if (setrlimit(RLIMIT_CORE, &core) < 0) die("limits");
         if (ptrace(PTRACE_TRACEME, 0, 0, 0) < 0) die("trace me");
         raise(SIGSTOP);
         request_child = 1;

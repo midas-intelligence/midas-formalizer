@@ -913,6 +913,36 @@ layout in one file: `prompt/prover.py`, `prompt/reviewer.py`, and
 `wire.py` builds provider wire bytes. There is no import of the old implementation,
 database lookup, provider call, or environment inventory in this layer.
 
+The v2 structure was traced through `midas_formalizer/strategy_context.py`
+(role contracts), `strategy_contract.py` (effective instructions),
+`strategy_prompts.py` (block order and caching), `strategy_presentation.py`
+(readable candidate/evidence projection), and `research_protocol.py` (research
+context). Those files remain in the repository root for reference. The v2.1
+adaptation keeps these responsibilities without importing the old implementation:
+
+| v2 prompt block | v2.1 presentation |
+| --- | --- |
+| Fixed role instructions and response schema | Role wording plus one native provider output schema; renderer versions are `prover-v3`, `reviewer-v2`, and `researcher-v2`. |
+| Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
+| Retained history dictionary | Flat, complete retained observation sections in saved order. No nested reference dictionary or prior-session access. |
+| Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
+| Current turn: memory, feedback and evidence | Strategy, named lessons, pins, evidence pages and latest feedback, followed by changing capabilities and the action request. Omitted diagnostics and evicted memory are counted. |
+| Research context and question | Readable source, exact local task, proof guidance and checked interfaces, followed by the web allowance, question and URLs. Candidate/history/evidence archives are excluded. |
+
+The mathematical guidance retains v2's requirements for useful decomposition,
+explicit child hypotheses, concrete next steps, consistent witnesses and joint
+outputs, and independent review. Response fields and helper behavior follow v2.1:
+there are no copied v2 identity fields, import actions, or stop actions.
+Probes follow v2's body-only approach: each case has only `id` and `code`, where
+`code` is the TacticM body following `run_tac do`. The application rejects outer
+`by`, `run_tac`, `run_elab` and `do` wrappers, then adds `run_tac do` and indentation.
+The generated code must fit 16,000 UTF-8 bytes; diagnostics refer to that generated
+code, with the body starting on line 2. Use
+``Lean.Elab.Tactic.evalTactic (← `(tactic| intro C))`` to run a proof tactic in the body.
+This schema is versioned as `prover-action-v2`. A new direct proof replaces the
+previous decomposition; keeping proposed
+children requires a complete decomposition or an exact revision of its fragments.
+
 Replacement means supplying a different `renderer(snapshot) -> Prompt` callable.
 It may change instructions, the schema, and the ordering/presentation of context.
 The application selects that callable for each configured model; there are no
@@ -946,13 +976,13 @@ omissions. Required mathematical context and candidate fragments are never clipp
 Input and wire limits are 8 MiB; excessive escaped output fails before dispatch.
 
 The default prover contract returns `{action, memory_update}`; the action covers
-proofs, decomposition, joint candidates, revisions, helpers and stopping. The
+proofs, decomposition, joint candidates, revisions and helpers. The
 reviewer returns `{verdict, rationale, findings, question, urls}`. Research returns
 `{answer, sources, unresolved}`, matching tools' existing research evidence
 admission. Response interpretation, semantic validation, helper lowering and
 budget enforcement belong to the strategy/application layer. Replacing a
 schema requires a matching interpreter there; transport never interprets actions.
-Research snapshots supply a question and their frozen web-call allowance.
+Research snapshots supply the formal context, question and frozen web-call allowance.
 
 Store `request.wire` and, for Codex, `request.setup` as immutable artifacts and
 pass those references to `provider.ModelRequest` with `request.provider_role`.
@@ -969,17 +999,44 @@ transport controls use JSON serialization. Bounded caches reuse exact schemas
 and fixed wire prefixes. Explicit Responses caching requires
 `Options(..., prompt_cache='explicit', cache_scope=route.scope)`; its key includes
 route/model/contract/controls and remains stable across changing turn material.
+The checked-in prover and reviewer routes enable this mode. Null leaves caching
+to the provider default and emits no explicit boundaries.
+
+Following the [OpenAI prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
+both roles mark the shared contract, the end of formal context, and each retained
+evidence, history and candidate section. Earlier markers remain when more sections
+are appended: moving a single marker to the new tail would lose the old lookup
+endpoint. The provider can write at most four prefixes per request, while explicit
+lookup considers the first two and latest fifty markers. The first two delimit the
+contract and formal context in the default renderers.
+
+Retained evidence precedes history and the current candidate, so changing a draft
+or memory does not invalidate those evidence prefixes. Memory, feedback, remaining
+allowances and the final action request follow the cache boundaries. Evicting or
+reordering retained content still invalidates prefixes from the first change.
+The action schema excludes unavailable helpers and candidate actions, including
+recall/page without offered results and research without a configured service.
+Reviewer schemas likewise omit unavailable research. Small schema variants are
+cached by available actions: changing remaining counters alone preserves the
+schema, while enabling or exhausting an action changes its hash and cache identity.
+Strategy admission still checks every response and returns bounded rejection
+details in the next prompt so invalid replies can be corrected.
+Disabled caching emits no breakpoint annotations.
 Codex controls remain in its pinned provider configuration.
 
 Run offline checks and the local performance comparison with:
 
 ```sh
-PYTHONPATH=new .venv/bin/python -m unittest tests.test_prompt
+PYTHONPATH=new .venv/bin/python -m unittest tests.test_prompt tests.test_presentation
 PYTHONPATH=new .venv/bin/python -m tests.benchmark_prompt
 ```
 
 The benchmark compares small frozen blocks with v2 and separately measures large
 raw source input in the new writer. It invokes no Lean, model or network service.
+On 2026-10-17, after the probe contract update, the small Codex and Responses
+new/v2 ratios were **0.248** and **0.713**; approximately 1.25 MiB of raw source
+rendered in **3.9–4.5 ms**. These
+measure prompt construction, not model proof success or provider cache hit rates.
 
 ## Tools
 
@@ -988,11 +1045,11 @@ modules plus `__init__.py`:
 
 | New module | Responsibility |
 | --- | --- |
-| `tools/protocol.py` | Immutable scoped actions, binary requests, stable identities and bounded stage descriptions |
+| `tools/protocol.py` | Immutable scoped actions, binary requests, stable identities, bounded stage descriptions and probe-body expansion |
 | `tools/search.py` | Frozen source selectors/content ranking, hosted LeanExplore transport, worker execution and search receipt admission |
 | `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
 | `tools/research.py` | Structured response validation, recorded web actions, access claims, quote bounds and advisory provenance |
-| `tools/evidence.py` | Frozen declaration excerpts, staged binary archives, indexed pages and duplicate-delivery keys |
+| `tools/evidence.py` | Readable search/probe results, frozen declaration excerpts, staged binary archives, indexed pages and duplicate-delivery keys |
 
 These replace the tools responsibilities of `combined_retrieval`, `discovery`,
 `discovery_helpers`, `lookup_helpers`, `lookup_source`, `probe_helpers`,
@@ -1004,9 +1061,11 @@ The original `midas_formalizer` files remain unchanged and are not imported.
 `HelperRequest` freezes the action, continuation, forbidden names and `Scope`.
 The scope contains an owner/generation, an environment **hash**, and one artifact
 reference for the admitted selection/goal/alias context. No environment object,
-toolchain or package inventory is embedded in requests. Probe cases likewise use
-artifact references to binary case records (`id`, `code`, and optional `operation`,
-`setup`, `expected`); the checker owns their Lean-facing validation.
+toolchain or package inventory is embedded in requests. Model probe bodies are
+expanded once by `expand_probe_bodies` into internal binary case records containing
+`id`, generated `code`, `operation='tactic'`, empty `setup` and null `expected`.
+Probe actions hold artifact references to these records; the checker owns their
+Lean validation. Continuations retain the batch's case count without another charge.
 
 `plan_helper` uses `Policy.helper` for allowance and service checks, charges probe
 cases individually, and freezes the research web-call bound. Plans describe work;
@@ -1032,9 +1091,13 @@ Application prepares a `SourceIndex` from admitted frozen file references once p
 environment. Search reads through a verified `ArtifactReader`, with 2 MiB per-file
 and 128 MiB total scan bounds. Dotted modules, paths and stems resolve against this
 index; ambiguous selectors require a qualified root. Query terms must occur in the
-displayed excerpt, including after truncation. Project modules can supply lookup
-excerpts but are excluded from discovery. Hosted search uses the fixed LeanExplore
-endpoint, rejects redirects and bounds input at 5 MB, with cancellation/deadline
+displayed excerpt, including after truncation. Frozen project sources support both
+lookup excerpts and discovery. `project` is advertised alongside dependency roots;
+selectors can use `project`, explicit project paths, or unambiguous file/module
+names such as `ChallengeDeps` and `Submission.Helpers`. Exact directories take
+priority over file stems, so `Submission` selects `project/Submission/` when that
+directory exists; use `Submission.lean` for the source file itself. Hosted search
+uses the fixed LeanExplore endpoint, rejects redirects and bounds input at 5 MB, with cancellation/deadline
 checks between reads. `SearchService` implements the existing reserved-worker
 callback and authenticates saved request/result bytes and receipt seals.
 
@@ -1052,13 +1115,28 @@ Requests, results and archives use shallow binary records. The bounded external
 wire decoder is shared in `domain/wire.py`; provider imports that same decoder.
 Search/research wire parsing and large source/evidence handling make no JSON-library
 calls. `prepare_archive` stages fixed pages of at most 16,000 bytes and a bounded
-index. Container descriptors preserve object/array shape. Text fragments carry
+index. Search and probe records are projected to plain text before paging, so the
+model sees declaration names, authored excerpts and source locations, or case IDs,
+generated code, diagnostics, goals and exploratory status. Combined retrieval keeps
+the search excerpts and failures alongside checked lookup results. Original
+artifacts remain archive provenance. Container descriptors preserve object/array
+shape for other structured evidence. Text fragments carry
 field paths, UTF-8 byte offsets and total byte lengths;
 they require reassembly before use as complete source. Each `recall` reads and
 verifies one indexed page, with no archive-wide decoding or earlier-page scan.
 The controller supplies an indexed duplicate-delivery check and rechecks the returned
 delivery key and scope when committing. Scope changes invalidate recall/cursors.
 Artifact publication and orphaned staging recovery remain storage responsibilities.
+
+Validation of body-only probes and readable evidence on 2026-10-17: **144 offline
+tests passed**, plus the real Lean application integration check. Coverage includes
+wrapper rejection through comments, generated UTF-8 byte limits, source excerpts,
+diagnostic locations, large Unicode pages, two-case continuation and inherited
+checked aliases. Re-rendering the saved Morley search/probe evidence reduced its
+displayed size from **8,489 to 3,519 bytes (58.5%)** while retaining names, source
+content, diagnostics and goals. Its successful probe reconstructs exactly from the
+body; its original `run_elab` wrapper is rejected before compiler dispatch.
+Three-case body expansion measured **0.877×** v2's time in alternating local samples.
 
 Validation on 2026-10-15: **24 distinct offline tools tests and 4 affected provider
 wire tests passed**, with focused reruns after changes. They cover request/receipt
@@ -1158,6 +1236,16 @@ million tokens**: the example's $2/$0.10/$10/$2.50 rates become
 `2000000`/`100000`/`10000000`/`2500000`. A null or omitted `prices` means price
 is unknown, while an explicit zero rate means free. Cache-write pricing is
 optional; explicit write pricing requires write telemetry when it affects cost.
+
+Application provider construction applies each request role's frozen prices
+before its worker result and provider receipt are saved. Roles sharing a route
+still use their own rates. An already reported cost, including zero, takes
+precedence; scripted responses remain free. Failed or cancelled calls with known
+token usage are priced too, and each retry retains its own charge. Resume reads
+the saved costs without recalculating them. The cache diagnostic uses the same
+provider construction. Status shows the known USD subtotal and flags unknown
+costs; JSON exposes the existing usage, known-usage and unknown-report fields.
+Pricing touches only the small usage metadata, without serializing model output.
 
 `checker.max_heartbeat` and `export.max_heartbeat` set Lean's `maxHeartbeats`
 option in user-facing heartbeat units. Both default to `2000000`; `0` disables

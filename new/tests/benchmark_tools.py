@@ -10,8 +10,9 @@ from midas_formalizer.combined_retrieval import fuse as old_fuse
 from midas_formalizer.discovery import content_matches as old_matches
 from midas_formalizer.source_names import declaration_names as old_names
 from midas_formalizer.evidence_archive import EvidenceArchive as OldArchive
+from midas_formalizer.probe_runtime import expand_bodies as old_probe_bodies
 from midas.tools import (Backend, HelperRequest, Match, Retrieve, Scope, SearchResult,
-                        fuse, prepare_archive, recall, search_stages)
+                        expand_probe_bodies, fuse, prepare_archive, recall, search_stages)
 from midas.tools.search import content_matches
 from midas.tools.plans import _canonical
 from midas.domain import OwnerVersion
@@ -28,6 +29,10 @@ def compare(label, old, new, count):
 
 
 def main():
+    cases = [dict(id=f'case{n}', code='let env ← Lean.getEnv\nLean.logInfo m!"{(env.find? `Nat.add).isSome}"')
+             for n in range(3)]
+    assert list(expand_probe_bodies(cases)) == old_probe_bodies(cases)
+    compare('probe_bodies_3_cases', lambda: old_probe_bodies(cases), lambda: expand_probe_bodies(cases), 100)
     artifacts = Artifacts()
     scope = Scope(OwnerVersion('obl_'+'1'*64, 0), 'env_'+'2'*64, artifacts.save(b'context'))
     request = HelperRequest(scope, Retrieve(('one', 'two', 'three'),

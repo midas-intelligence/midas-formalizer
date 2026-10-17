@@ -8,7 +8,7 @@ from ..prompt import prover, reviewer
 from .memory import Update, text
 
 RESPONSE_BYTES = 8 * 1024**2
-CONTRACTS = {'prover': 'prover-action-v1', 'reviewer': 'review-verdict-v1'}
+CONTRACTS = {'prover': 'prover-action-v2', 'reviewer': 'review-verdict-v1'}
 
 
 def _validator(schema, root):
@@ -49,7 +49,7 @@ def _validator(schema, root):
     if kind == 'array':
         item = _validator(schema['items'], root)
         def array(value):
-            if type(value) is not list or len(value) > schema['maxItems']:
+            if type(value) is not list or not schema.get('minItems', 0) <= len(value) <= schema['maxItems']:
                 raise DomainError('Response array exceeds contract')
             for v in value:
                 item(v)

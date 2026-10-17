@@ -71,9 +71,15 @@ def validate_wire(request, raw, setup=None):
                 if type(content) is not list or not content:
                     raise DomainError('Invalid message content')
                 for part in content:
-                    if (type(part) is not dict or set(part) != {'type', 'text'}
+                    if (type(part) is not dict or set(part) - {'type', 'text', 'prompt_cache_breakpoint'}
+                            or not {'type', 'text'} <= set(part)
                             or part['type'] not in ('input_text', 'output_text') or type(part['text']) is not str):
                         raise DomainError('Only text content is supported')
+                    if 'prompt_cache_breakpoint' in part and (part['type'] != 'input_text'
+                            or route.prompt_cache == 'disabled'
+                            or w.get('prompt_cache_options') != {'mode': 'explicit', 'ttl': '30m'}
+                            or part['prompt_cache_breakpoint'] != {'mode': 'explicit'}):
+                        raise DomainError('Invalid explicit prompt cache breakpoint')
         if 'max_output_tokens' in w and (type(w['max_output_tokens']) is not int or w['max_output_tokens'] <= 0):
             raise DomainError('Invalid output token bound')
         if route.prompt_cache == 'disabled' and any(k in w for k in ('prompt_cache_key', 'prompt_cache_options')):

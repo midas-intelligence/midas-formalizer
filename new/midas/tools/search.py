@@ -31,14 +31,19 @@ def stopped(cancel, deadline):
 class SourceEntry:
     path: str
     artifact: ArtifactRef
+    module: str | None = None
 
     def __post_init__(self):
-        # Project modules can supply original lookup text, but are never search
-        # candidates. Private checker/runtime sources are not admitted here.
-        path = self.path.removeprefix('project/') if type(self.path) is str else self.path
-        if (source_selector(path) != path or '/' not in self.path
+        # Project and installed sources support both lookup and search.
+        # Private checker/runtime sources are not admitted here.
+        if (source_selector(self.path) != self.path or '/' not in self.path
                 or not self.path.endswith('.lean') or not isinstance(self.artifact, ArtifactRef)):
-            raise ValueError('Invalid installed-source entry')
+            raise ValueError('Invalid frozen-source entry')
+        if self.module is not None:
+            text(self.module, 'source module', 1024)
+            if (any(c in self.module for c in ('/', '\\', '\x00'))
+                    or not self.path.endswith('/'+self.module.replace('.', '/')+'.lean')):
+                raise ValueError('Source module differs from its path')
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,20 +54,24 @@ class SourceIndex:
     paths: frozenset[str] = field(init=False, repr=False)
     roots: tuple[str, ...] = field(init=False, repr=False)
     by_path: object = field(init=False, repr=False, compare=False)
+    by_module: object = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         identifier(self.environment_id, 'env_')
         items(self.entries, SourceEntry)
         if len(self.entries) > 200_000 or len({e.path for e in self.entries}) != len(self.entries):
             raise ValueError('Duplicate or excessive source entries')
-        paths, roots = set(), set()
+        paths, roots, modules = set(), set(), {}
         for entry in self.entries:
             parts = entry.path.split('/')
             roots.add(parts[0])
             paths.update('/'.join(parts[:i]) for i in range(1, len(parts)+1))
+            if entry.module is not None:
+                modules.setdefault(entry.module, []).append(entry)
         object.__setattr__(self, 'paths', frozenset(paths))
-        object.__setattr__(self, 'roots', tuple(sorted(roots - {'project'})))
+        object.__setattr__(self, 'roots', tuple(sorted(roots)))
         object.__setattr__(self, 'by_path', MappingProxyType({e.path: e for e in self.entries}))
+        object.__setattr__(self, 'by_module', MappingProxyType({name: tuple(rows) for name, rows in modules.items()}))
 
     def resolve(self, prefixes):
         resolved = []
@@ -80,7 +89,7 @@ class SourceIndex:
                 candidates = [form] if form.split('/')[0] in self.roots else [r+'/'+form for r in self.roots]
                 matches = [p for p in candidates if p in self.paths]
                 if len(matches) > 1:
-                    raise ValueError('Ambiguous source selector: ' + raw + '; qualify its installed root')
+                    raise ValueError('Ambiguous source selector: ' + raw + '; qualify its source root')
                 if matches:
                     break
             if not matches:

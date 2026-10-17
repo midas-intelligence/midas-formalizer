@@ -32,12 +32,12 @@ def main():
     turn = Snapshot((Section('source', 'source', b'x'*2048), subject('goal', signature()),
                      Section('candidate', 'candidate', b'y'*2048),
                      Section('feedback', 'turn', b'feedback')))
-    for transport in ('codex', 'azure_responses'):
+    for transport, cache in (('codex', None), ('azure_responses', None), ('azure_responses', 'explicit')):
         request = dict(transport=transport, provider='azure', account='test', model='model',
                        endpoint='https://example.test/responses', role='prover',
-                       prompt_cache='disabled', wire={})
-        options = Options(transport, 'model')
-        compare(transport + '_small',
+                       prompt_cache=cache or 'disabled', wire={})
+        options = Options(transport, 'model', prompt_cache=cache, cache_scope='a'*64 if cache else None)
+        compare(transport + ('_explicit' if cache else '') + '_small',
                 lambda: build_blocks_wire(request, blocks, instruction, _legacy_display=True),
                 lambda: build(turn, options, renderer=prover.render))
     # V2 above returns an intermediate dictionary; new also produces final wire

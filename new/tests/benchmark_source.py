@@ -20,7 +20,7 @@ from midas.domain import ByteSpan
 from midas.domain import encoding as graph
 from midas.domain.identity import make_context
 from midas.source import Edit, GeneratedSource, SourceFile, add_imports, apply_edits, lean_name, render_context, term
-from midas.source import declaration_names, lookup_context
+from midas.source import declaration_names, lookup_context, parse_identifier
 from midas.source.context import _CONTEXT_SOURCES
 from tests.test_source import name
 from tests.test_domain_contracts import selected_problem
@@ -44,6 +44,8 @@ def main():
     structural = ['anonymous']
     for index in range(32):
         structural = ['str', structural, 'n' + str(index)]
+    identifiers = ('Nat.add', 'EuclideanGeometry.angle_add_angle_add_angle_eq_pi', "A.α'", 'A.«x.y»')
+    assert [old_lookup._identifier(n) for n in identifiers] == [parse_identifier(n) for n in identifiers]
     source = ('namespace A\n' + 'theorem x : True := by trivial\n' * 1000 + 'end\n')
     header = '/- ' + 'long comment ' * 20000 + '-/\nmodule\n' + source
     header_source = GeneratedSource(header.encode())
@@ -69,6 +71,8 @@ def main():
     old_selection = SimpleNamespace(payload=old_json({'source': selection.source.hex()}), selected=selection.selected)
     cases = {
         'name': (lambda: old_terms.lean_name(structural), lambda: lean_name(structural), 1000),
+        'parse_identifier': (lambda: [old_lookup._identifier(n) for n in identifiers],
+                             lambda: [parse_identifier(n) for n in identifiers], 1000),
         'source_hints': (lambda: old_names.declaration_names(source), lambda: declaration_names(source), 30),
         'imports': (lambda: old_imports.augment(header, ['Std']),
                     lambda: add_imports(header_source, ('Std',), available=frozenset({'Std'})), 30),

@@ -587,6 +587,32 @@ class ImportTests(unittest.TestCase):
                 finally:
                     worker.close()
 
+    def test_retained_cpu_exhaustion_is_a_resource_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'job'
+            source.mkdir()
+            (source / 'Request.bin').write_bytes(b'first')
+            def command(spec, *, status_fd, scratch_bytes):
+                workspace = next(m.source for m in spec.mounts if m.target == '/midas-inputs')
+                program = ('import os,sys,json\n'
+                    f'os.write({status_fd},b\'{"{\"child-pid\":1}\\n"}\')\n'
+                    f'control=os.open({workspace!r}+"/.midas-control",os.O_WRONLY)\n'
+                    'line=sys.stdin.readline()\n'
+                    f'os.write(control,b"MIDAS_WORKER_END "+json.dumps({{"path":line.strip(),"exit":{128 + signal.SIGXCPU}}}).encode()+b"\\n")\n'
+                    'sys.stdin.read()\n')
+                return (sys.executable, '-u', '-c', program)
+            limits = ResourceLimits(2000, 128, 4096, 4096)
+            with patch.object(LaunchSpec, 'command', command):
+                worker = _ImportWorker(recipe(), root, limits)
+                try:
+                    result = worker.run(recipe(), source, limits, threading.Event())
+                    self.assertEqual((result.outcome, result.limit), (Outcome.RESOURCE_LIMIT, 'cpu'))
+                    self.assertTrue(worker.closed)
+                    self.assertEqual(result.termination, Termination.TERMINATED)
+                finally:
+                    worker.close()
+
 
 if __name__ == '__main__':
     unittest.main()

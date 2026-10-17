@@ -80,6 +80,7 @@ class FrozenSources:
         from ..tools import SourceEntry, SourceIndex
         from uuid import UUID, uuid5
         entries, paths = [], {}
+        modules = environment.manifest.modules
         for item in environment.manifest.inventory.files:
             if not item.path.endswith('.lean'):
                 continue
@@ -94,7 +95,18 @@ class FrozenSources:
                 logical = item.path
             reference = ArtifactRef(str(uuid5(UUID('d4227202-fc63-46af-a08e-470c92bd1d71'), item.sha256)),
                                     item.sha256, item.size)
-            entries.append(SourceEntry(logical, reference))
+            # Match the longest admitted module in this root. Dropping leading
+            # source directories supports srcDir layouts without confusing a
+            # namespaced dependency with a project module of the same basename.
+            parts = logical.removesuffix('.lean').split('/')[1:]
+            module = None
+            for start in range(len(parts)):
+                name = '.'.join(parts[start:])
+                compiled = modules.get(name)
+                if compiled is not None and compiled.split('/', 1)[0] == root:
+                    module = name
+                    break
+            entries.append(SourceEntry(logical, reference, module))
             paths[reference] = environment.roots[root]/relative
         self.index = SourceIndex(environment.id, tuple(entries))
         self.paths = paths

@@ -87,6 +87,7 @@ class Workflow:
         pending = r.value(reader, 'application.pending', owner.obligation_id)
         from .helpers import advertised
         archives = advertised(reader, owner)
+        displayed = set(state.evidence[-8:])
         return Snapshot(Version(owner, saved.revision, state.context, memory.version, len(state.evidence)),
             context, self.selection.environment_id, self.graph(reader), memory,
             owner_usage(reader, owner), RunUsage(turns=a.turns, backtracks=reader.counter(r.SCOPE, 'backtracks'),
@@ -95,9 +96,12 @@ class Workflow:
             attempt, busy=pending is not None, stopped=state.stopped,
             forbidden_names=tuple(t.selector for t in self.selection.selected.targets),
             allowed_pins=tuple(a.id for a in archives),
-            cursors=tuple(f'{a.id}:{i}' for a in archives for i in range(1, min(len(a.pages), 128))))
+            cursors=tuple(f'{a.id}:{i}' for a in archives for i in range(1, min(len(a.pages), 128))
+                          if a.pages[i] not in displayed),
+            recallable=tuple(a.id for a in archives if a.pages[0] not in displayed))
 
-    def display(self, reader, snapshot):
+    def display(self, reader, snapshot, *, formal_only=False, review=None):
+        from . import presentation
         _, state = r.owner_state(reader, snapshot.version.owner.obligation_id)
         ident = candidates.identity(reader, state, self.selection.environment_id)
         target = self.selection.selected.targets[state.index]
@@ -111,8 +115,9 @@ class Workflow:
             refs.append(guidance.artifact)
         for ordinal, (alias, child, child_identity) in enumerate(candidates.prerequisites(
                 reader, snapshot.context, self.selection.environment_id)):
-            sections.extend((Section('interfaces', f'inherited-alias-{ordinal}', alias.encode()),
-                subject(f'inherited-type-{ordinal}', Signature(child_identity.target, child_identity.universes, child_identity.context))))
+            signature = Signature(child_identity.target, child_identity.universes, child_identity.context)
+            sections.append(Section('interfaces', f'inherited-{ordinal}',
+                alias.encode() + b' :\n' + subject('type', signature).text))
             refs.append(child.interface)
             owners.append(child.owner)
         if snapshot.context.references:
@@ -131,37 +136,63 @@ class Workflow:
             owners.append(reader.node(peer.id).node.owner)
         sections.append(Section('subject', 'required-subjects', '\n'.join(
             f'{s.kind}: {s.name}' for s in snapshot.context.subjects).encode()))
-        if snapshot.memory.strategy or snapshot.memory.lessons or snapshot.memory.observations:
-            text = snapshot.memory.strategy + '\n' + '\n'.join(l.text for l in snapshot.memory.lessons)
-            text += '\n' + '\n'.join(o.status + ': ' + ' '.join(o.messages) for o in snapshot.memory.observations)
-            sections.append(Section('memory', 'memory', text.encode()))
-        if snapshot.base:
-            from ..strategy import fragments
-            sections.append(Section('candidate', 'current-draft', '\n'.join(
-                path+': '+text for path, text in fragments(snapshot.base, snapshot.context)).encode()))
+        sections.append(Section('interfaces', 'imports', (
+            'Prepared import modules: ' + (', '.join(snapshot.context.imports) or 'none') +
+            '\nInherited imports: ' + (', '.join(snapshot.context.inherited_imports) or 'none')).encode()))
+        if formal_only:
+            return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)))
+        sections.extend(presentation.memory(snapshot.memory))
+        if review is not None:
+            key, entry_key = review
+            saved = candidates.submission(reader, key)
+            draft_ref = r.unref(saved['draft'])
+            draft = snapshot.base if draft_ref == state.base else Draft.load(r.read(reader, draft_ref, 17*1024**2))
+            _, coordinator = r.owner_state(reader, saved['owner'][0])
+            context = (snapshot.context if coordinator.context == state.context else
+                       Context.load(r.read(reader, coordinator.context, 8*1024**2)))
+            checked = r.read(reader, snapshot.attempt.candidate.source, 1024**2)
+            sections.append(presentation.candidate(draft, context, selected=entry_key, checked=checked))
+            refs.extend((draft_ref, coordinator.context))
+            owners.append(OwnerVersion(*saved['owner']))
+        elif snapshot.base:
+            sections.append(presentation.candidate(snapshot.base, snapshot.context))
             refs.append(state.base)
         if snapshot.attempt:
             candidate = snapshot.attempt.candidate
-            sections.append(Section('candidate', 'checked-candidate', r.read(reader, candidate.source, 1024**2)))
+            if review is None:
+                sections.append(Section('candidate', 'checked-candidate', r.read(reader, candidate.source, 1024**2)))
             refs.append(candidate.source)
             for ordinal, dep in enumerate(candidate.dependencies):
                 _, child_state = r.owner_state(reader, dep.owner.obligation_id)
                 child = candidates.identity(reader, child_state, self.selection.environment_id)
-                sections.append(subject(f'dependency-{ordinal}', Signature(child.target, child.universes, child.context)))
-                sections.append(Section('interfaces', f'alias-{ordinal}', dep.alias.encode()))
+                signature = Signature(child.target, child.universes, child.context)
+                sections.append(Section('interfaces', f'dependency-{ordinal}',
+                    dep.alias.encode() + b' :\n' + subject('type', signature).text))
                 refs.append(dep.interface)
                 owners.append(dep.owner)
-        for ordinal, reference in enumerate(state.evidence[-8:]):
-            from .helpers import page_text
-            sections.append(Section('evidence', f'evidence-{ordinal}', page_text(r.read(reader, reference, 16000))))
+        from .helpers import advertised, page_text
+        displayed = tuple(dict.fromkeys(state.evidence[-8:]))
+        pages = {reference: (archive.id, ordinal+1, len(archive.pages))
+                 for archive in advertised(reader, snapshot.version.owner)
+                 for ordinal, reference in enumerate(archive.pages) if reference in displayed}
+        for ordinal, reference in enumerate(displayed):
+            details = pages.get(reference)
+            if details is None:
+                header = 'Tool output included below.\n\n'
+            else:
+                result_id, page, count = details
+                header = f'Result ID: {result_id}\nPage {page} of {count}. '
+                header += 'Complete result included below.\n\n' if count == 1 else 'This page is included below.\n\n'
+            sections.append(Section('evidence', f'tool-result-{ordinal+1}',
+                header.encode()+page_text(r.read(reader, reference, 16000))))
             refs.append(reference)
-        if snapshot.allowed_pins or snapshot.cursors:
-            sections.append(Section('evidence', 'available-evidence',
-                ('Results: '+', '.join(snapshot.allowed_pins)+'\nCursors: '+', '.join(snapshot.cursors)).encode()))
         if self.search and self.search.index:
             sections.append(Section('source', 'search-roots',
                 ('Frozen-source roots: '+', '.join(self.search.index.roots)).encode()))
-        return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)))
+        # All retained pages must reach the prompt: recall availability is based
+        # on this exact bounded set, not on pages a renderer might later omit.
+        return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)),
+                       evidence_bytes=sum(len(s.text) for s in sections if s.kind == 'evidence'))
 
     def compiler_job(self, reader, key, request, expected, binding, *, limits=None, helper=None):
         value = request.decode()
@@ -182,7 +213,8 @@ class Workflow:
             from ..prompt import prover, reviewer
             base = reviewer.render if role == 'reviewer' else prover.render
             renderer = lambda display: replace(base(display), instructions=self.instructions[role])
-        prepared = self.strategy.prepare_model(snapshot, self.policy, work, self.display(reader, snapshot),
+        prepared = self.strategy.prepare_model(snapshot, self.policy, work,
+                                                self.display(reader, snapshot, review=binding if role == 'reviewer' else None),
                                                 options, renderer=renderer)
         wire = r.wire_artifact(prepared.wire.wire, prepared.turn.id)
         setup = artifact(prepared.wire.setup) if prepared.wire.setup is not None else None
@@ -415,10 +447,18 @@ class Workflow:
         try:
             proposal = self.strategy.on_model(snapshot, self.policy, Dispatch(turn, invocation.request.request_ref),
                 accepted.value, reader, submission_id=str(uuid5(UUID(invocation.original_execution_id), 'submission')))
-        except ValueError:
+        except ValueError as error:
+            # Keep semantic rejection details in the next prompt, including when
+            # an unavailable helper was syntactically valid. Bound before encoding
+            # so even a long Unicode exception fits one memory observation.
+            message = str(error)[:1800] or type(error).__name__
+            diagnostics = ('Action rejected: '+message+'\n'
+                'Correct the action using the current CAPABILITIES and output schema.',)
             if binding[2]:
-                return r.merge(clear, self.fail_candidate(reader, key, saved, Failure.PROTOCOL, evidence))
-            proposal = self.strategy.on_failure(snapshot, self.policy, 'protocol', evidence=evidence)
+                return r.merge(clear, self.fail_candidate(reader, key, saved, Failure.PROTOCOL,
+                    evidence, diagnostics=diagnostics))
+            proposal = self.strategy.on_failure(snapshot, self.policy, 'protocol', evidence=evidence,
+                                               diagnostics=diagnostics)
         effects = [clear]
         if proposal.objection:
             from .repairs import report
