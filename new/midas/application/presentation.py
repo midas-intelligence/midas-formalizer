@@ -19,7 +19,9 @@ def candidate(draft, context, *, selected=None, checked=None):
                       for p in context.prerequisites)
     definitions = value.get('definitions', [])
     paths = dict(editable)
-    rows = [b'Current candidate. Local entry labels describe this candidate; only references\n'
+    reviewing = selected is not None
+    rows = [b'Candidate for independent review.' if reviewing else
+            b'Current candidate. Local entry labels describe this candidate; only references\n'
             b'offered in INTERFACES are available to a new candidate action.',
             b'Rationale:\n' + exact(guidance['rationale'])]
     if selected is not None:
@@ -35,6 +37,8 @@ def candidate(draft, context, *, selected=None, checked=None):
         rows.append(('Candidate imports: ' + ', '.join(value['imports'])).encode())
     for definition in definitions:
         rows.append(f"Definition: {definition['kind']} {definition['name']}".encode())
+        if reviewing:
+            rows.extend((b'Type:\n' + exact(definition['type']), b'Value:\n' + exact(definition['value'])))
     for entry in value['entries']:
         goal = entry['subject']
         prefix = '/entries/' + entry['key'].replace('~', '~0').replace('/', '~1')
@@ -43,7 +47,7 @@ def candidate(draft, context, *, selected=None, checked=None):
             lines.append('Scope target: ' + goal['scope_target'])
         for field in ('statement', 'proof'):
             path = prefix + '/' + field
-            if path in paths:
+            if not reviewing and path in paths:
                 lines.append(field.capitalize() + ' fragment: ' + path)
         if entry['key'] in draft.unproved:
             lines.append('Proof: pending obligation; see child English guidance.')
@@ -60,9 +64,22 @@ def candidate(draft, context, *, selected=None, checked=None):
             lines.append('Definitions in ' + scope + ': ' + (', '.join(names) or 'none'))
         rows.append('\n'.join(lines).encode())
         # Fixed local statements are not editable but still part of the review.
-        if goal['kind'] == 'lemma' and prefix + '/statement' not in paths:
-            rows.append(b'Fixed statement:\n' + exact(goal['statement']))
-    rows.extend(b'Editable fragment: ' + path.encode() + b'\n' + exact(text) for path, text in editable)
+        if goal['kind'] == 'lemma' and (reviewing or prefix + '/statement' not in paths):
+            rows.append((b'Statement:\n' if reviewing else b'Fixed statement:\n') + exact(goal['statement']))
+        if reviewing:
+            if entry['key'] not in draft.unproved:
+                rows.append(b'Proof:\n' + exact(entry['proof']))
+            child = guidance['children'].get(entry['key'])
+            if child:
+                rows.append(b'English proof plan:\n' + exact(child['proof']))
+                if child['usefulness']:
+                    rows.append(b'Usefulness:\n' + exact(child['usefulness']))
+    if reviewing:
+        for key, label in (('proof', b'Overall proof plan'), ('proof_departures', b'Proof departures')):
+            if guidance[key]:
+                rows.append(label + b':\n' + exact(guidance[key]))
+    else:
+        rows.extend(b'Editable fragment: ' + path.encode() + b'\n' + exact(text) for path, text in editable)
     return Section('candidate', 'current-draft', b'\n\n'.join(rows))
 
 

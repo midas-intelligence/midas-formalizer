@@ -488,6 +488,68 @@ class Contracts(unittest.TestCase):
             self.assertFalse({'memory', 'history', 'evidence', 'candidate'} & {s.kind for s in display.sections})
             self.assertNotIn(self.environment.id.encode(), b'\n'.join(s.text for s in display.sections))
 
+    def test_review_uses_read_only_candidate_relevant_lookups_and_its_own_research(self):
+        from midas.prompt import reviewer
+        from tests.test_strategy import decomposition
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        research_route = ModelRoute(provider='openai', model='fixture')
+        lookup = dict(mode='lookup', rationale='Inspect names.', names=['Nat.add', 'Nat.mul'], inspect=False)
+        probe = dict(mode='probe', rationale='Inspect internals.', cases=[dict(id='enumeration', code='pure ()')])
+        action = decomposition()
+        action['children'] = [dict(name='support', statement='True ∧ True', proof='Use Nat.add and the constructor.',
+                                   usefulness='Provides the required fact.', depends_on=[])]
+        action['proof_body'] = 'by exact support'
+        invalid = dict(mode='recall', rationale='Read missing evidence.', result_id='missing-result')
+        research = model_json(dict(verdict='research', rationale='Check the plan.', findings=[],
+                                  question='Can the child use the constructor?', urls=[]))
+        accept = model_json(dict(verdict='accept', rationale='The constructor suffices.', findings=[], question='', urls=[]))
+        answer = model_json(dict(answer='Review-specific supporting answer.', sources=[], unresolved=[]))
+        child = proof()
+        child['proof_body'] = 'by trivial'
+        # The existing compiler fixture returns the selected root's identity for
+        # every binding. Give this derived child its distinct synthetic interface.
+        class ReviewCompiler(Compiler):
+            def prepare(self, operation, *args, **kwargs):
+                request = super().prepare(operation, *args, **kwargs)
+                if operation == 'binding' and kwargs.get('statement') == 'True ∧ True':
+                    from midas.checker import CompilerRequest
+                    from tests.test_checker import name
+                    value = request.decode()
+                    truth = ['const', name('True'), []]
+                    value['packet']['signature']['target'] = ['app', ['app', ['const', name('And'), []], truth], truth]
+                    request = CompilerRequest(codec.encode(value))
+                return request
+        self.app.checker_factory = ReviewCompiler
+        captured = []
+        original = reviewer.render
+        def capture(snapshot):
+            captured.append(snapshot)
+            return original(snapshot)
+        with patch('midas.prompt.reviewer.render', side_effect=capture), self.start(
+                workflow='scripted', config=replace(Config(), prover=route, reviewer=route, research=research_route),
+                script=(('prover', response(invalid)), ('prover', response(lookup)), ('prover', response(probe)),
+                        ('prover', response(action)), ('reviewer', research), ('research', answer),
+                        ('reviewer', accept), ('prover', response(child)))) as run:
+            for _ in range(1000):
+                run.step()
+                if len(captured) == 2:
+                    break
+                time.sleep(.001)
+        self.assertEqual(len(captured), 2)
+        for display in captured:
+            self.assertFalse({'memory', 'history', 'feedback'} & {s.kind for s in display.sections})
+            text = b'\n'.join(s.text for s in display.sections)
+            for clutter in (b'Editable fragment', b'/entries/', b'missing-result', b'Probe enumeration',
+                            b'Nat.mul', b'Helper modes', b'Candidate modes', b'Frozen-source roots'):
+                self.assertNotIn(clutter, text)
+            evidence = b'\n'.join(s.text for s in display.sections if s.kind == 'evidence')
+            self.assertIn(b'Nat.add', evidence)
+            self.assertIn(b'English proof plan:', text)
+        before, after = (b'\n'.join(s.text for s in d.sections if s.kind == 'evidence') for d in captured)
+        self.assertNotIn(b'Review-specific supporting answer', before)
+        # Scripted research has no web events; its failure still belongs to this review.
+        self.assertIn(b'Research performed no recorded web action', after)
+
     def test_frozen_sources_resolve_starter_modules_in_their_admitted_roots(self):
         from midas.application.preparation import FrozenSources
         from midas.environment import File

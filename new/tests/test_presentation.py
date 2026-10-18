@@ -22,9 +22,8 @@ class PresentationTests(unittest.TestCase):
         # No JSON operation is needed even for arbitrarily large authored strings.
         with patch('json.dumps', side_effect=AssertionError('JSON encode')), \
              patch('json.loads', side_effect=AssertionError('JSON decode')):
-            text = presentation.candidate(draft, ctx, selected='parent').text
+            text = presentation.candidate(draft, ctx).text
         self.assertEqual(draft.payload, before)
-        self.assertIn(b'Selected review entry: parent', text)
         self.assertIn(b'first <- local entry first', text)
         self.assertIn(b'Definition: abbrev Shared', text)
         self.assertIn(b'Definitions in statement: Shared', text)
@@ -41,6 +40,15 @@ class PresentationTests(unittest.TestCase):
             presentation.candidate(draft, ctx, selected='parent', checked=b'by trivial')
         reviewed = presentation.candidate(draft, ctx, selected='parent', checked=action['proof_body'].encode())
         self.assertEqual(reviewed.text.count(action['proof_body'].encode()), 1)
+        self.assertIn(b'Selected review entry: parent', reviewed.text)
+        self.assertIn(b'first <- local entry first', reviewed.text)
+        self.assertIn(b'Type:\n' + presentation.exact('Prop'), reviewed.text)
+        self.assertIn(b'Value:\n' + presentation.exact('True'), reviewed.text)
+        for _, raw in fragments(draft, ctx):
+            if raw:
+                self.assertIn(presentation.exact(raw), reviewed.text)
+        for clutter in (b'Editable', b' fragment:', b'/entries/', b'new candidate action', b'by sorry'):
+            self.assertNotIn(clutter, reviewed.text)
 
     def test_exact_string_boundaries_round_trip_large_unicode_and_empty_fields(self):
         for raw in ('', '\n', 'α\\"\n```\ntrailing\n\n' * 20000):
@@ -68,6 +76,50 @@ class PresentationTests(unittest.TestCase):
         self.assertIn(b'Pinned evidence:\nresult-a', memory.text)
         self.assertIn(b'3 older memory record(s) evicted', memory.text)
         self.assertNotIn(old.evidence.id.encode(), history.text)
+
+    def test_review_evidence_filters_search_records_and_binds_research_to_candidate(self):
+        from midas.application import helpers, records as r
+        from midas.prompt import Section
+        from midas.tools import Backend, HelperRequest, Lookup, Research, Retrieve, Scope, Stage, prepare_archive
+        from tests.test_strategy import dispatch, fixture
+        artifacts, snapshot = fixture(conditional=True)
+        _, prepared, _ = dispatch(snapshot, artifacts)
+        scope = Scope(snapshot.version.owner, snapshot.environment_id, snapshot.version.context)
+        saved, archives = {}, []
+        def add(action, rows, *, lookup=None, parent=None, turn=None):
+            request = HelperRequest(scope, action, str(len(archives)))
+            archive = prepare_archive(scope, request.id, rows, (artifact('provenance'),), artifacts)
+            stages = (Stage(request.id, 0, scope, lookup),) if lookup else ()
+            saved[request.id] = dict(request=r.ref(artifacts.save(request.payload)),
+                stages=[r.ref(artifacts.save(s.payload)) for s in stages],
+                results={str(s.ordinal): [s.ordinal, '', None, 'SUCCEEDED', [], list(s.action.names), [], None]
+                         for s in stages}, parent=parent,
+                turn=r.ref(artifacts.save((turn or prepared.turn).payload)))
+            archives.append(archive)
+            return archive
+        retrieval = add(Retrieve(queries=('addition',), backends=(Backend('frozen-source', ('project',)),)),
+            ['theorem Nat.add_comm : a + b = b + a', 'theorem Nat.mul_comm : a * b = b * a',
+             'Search (frozen-source): addition', 'Nat.add_comm\nUnrelated search excerpt'],
+            lookup=Lookup(('Nat.add_comm', 'Nat.mul_comm')))
+        fragmented = add(Lookup(('Nat.add_assoc',)), ['def Nat.add_assoc\n' + 'exact supporting source\n'*1500],
+                         lookup=Lookup(('Nat.add_assoc',)))
+        add(Research('Earlier prover research', (), 1), [dict(answer='PROVER_RESEARCH')])
+        add(Research('Old candidate research', (), 1), [dict(answer='STALE_RESEARCH')],
+            parent=['submission', 'parent'], turn=replace(prepared.turn, candidate_hash='a'*64))
+        current = add(Research('Current review research', (), 1), [dict(answer='CURRENT_RESEARCH')],
+                      parent=['submission', 'parent'])
+        sections = (Section('candidate', 'candidate', b'Use Nat.add_comm and Nat.add_assoc.'),)
+        displayed = tuple(ref for a in archives for ref in a.pages)
+        with patch.object(helpers, 'advertised', return_value=tuple(archives)), \
+             patch.object(r, 'value', side_effect=lambda reader, scope, key: saved[key]):
+            result = tuple(helpers.review_evidence(artifacts, snapshot, ('submission', 'parent'), sections, displayed))
+        text = b'\n'.join(content for _, content in result)
+        for useful in (b'Nat.add_comm', b'Nat.add_assoc', b'CURRENT_RESEARCH'):
+            self.assertIn(useful, text)
+        for clutter in (b'Nat.mul_comm', b'Unrelated search excerpt', b'Search (', b'PROVER_RESEARCH', b'STALE_RESEARCH'):
+            self.assertNotIn(clutter, text)
+        self.assertEqual({ref for ref, _ in result}, set((*retrieval.pages, *fragmented.pages, *current.pages)))
+        self.assertIn(b'Continued excerpt', text)
 
 
 if __name__ == '__main__':

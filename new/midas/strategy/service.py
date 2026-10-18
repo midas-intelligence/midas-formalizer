@@ -92,24 +92,32 @@ class Strategy:
         modes = [mode for mode in ('direct', 'decomposition') if policy.candidate(mode, snapshot.usage).allowed]
         helpers = tuple(mode for mode in capabilities.available_modes
             if (mode != 'recall' or snapshot.recallable) and (mode != 'page' or snapshot.cursors))
-        allowances = [f'{name}: {getattr(capabilities, name)}' for name in (
-            'direct_remaining', 'decomposition_remaining', 'repair_remaining',
-            'retrieval_remaining', 'probe_remaining')]
-        if capabilities.web_calls:
-            allowances.extend((f'research_remaining: {capabilities.research_remaining}',
-                               f'web_calls: {capabilities.web_calls}'))
+        if work.operation == 'review':
+            details = 'Verdicts: accept, reject'
+            if 'research' in helpers:
+                details += (', research' + '\nresearch_remaining: ' +
+                            str(capabilities.research_remaining) + '\nweb_calls: ' + str(capabilities.web_calls))
+            else:
+                details += '\nresearch: disabled'
         else:
-            allowances.append('research: disabled')
-        if not snapshot.recallable:
-            allowances.append('recall: unavailable (no saved first pages outside this prompt)')
-        if not snapshot.cursors:
-            allowances.append('page: unavailable (no additional pages outside this prompt)')
-        details = ('Candidate modes: ' + ', '.join(modes) + '\nHelper modes: ' +
-            ', '.join(helpers) + '\n' + '\n'.join(allowances))
-        if snapshot.recallable or snapshot.cursors:
-            details += '\nSaved evidence not included in this prompt:\n'+'\n'.join((
-                *(f'recall result_id={key} (first page)' for key in snapshot.recallable),
-                *(f'page cursor={cursor}' for cursor in snapshot.cursors)))
+            allowances = [f'{name}: {getattr(capabilities, name)}' for name in (
+                'direct_remaining', 'decomposition_remaining', 'repair_remaining',
+                'retrieval_remaining', 'probe_remaining')]
+            if capabilities.web_calls:
+                allowances.extend((f'research_remaining: {capabilities.research_remaining}',
+                                   f'web_calls: {capabilities.web_calls}'))
+            else:
+                allowances.append('research: disabled')
+            if not snapshot.recallable:
+                allowances.append('recall: unavailable (no saved first pages outside this prompt)')
+            if not snapshot.cursors:
+                allowances.append('page: unavailable (no additional pages outside this prompt)')
+            details = ('Candidate modes: ' + ', '.join(modes) + '\nHelper modes: ' +
+                ', '.join(helpers) + '\n' + '\n'.join(allowances))
+            if snapshot.recallable or snapshot.cursors:
+                details += '\nSaved evidence not included in this prompt:\n'+'\n'.join((
+                    *(f'recall result_id={key} (first page)' for key in snapshot.recallable),
+                    *(f'page cursor={cursor}' for cursor in snapshot.cursors)))
         sections = tuple(s for s in display.sections if s.kind != 'capabilities')
         name = 'strategy-capabilities'
         while name in {s.name for s in sections}:

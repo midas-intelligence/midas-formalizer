@@ -997,6 +997,17 @@ the default renderers include whole pages within `evidence_bytes` and report any
 omissions. Required mathematical context and candidate fragments are never clipped.
 Input and wire limits are 8 MiB; excessive escaped output fails before dispatch.
 
+Application review prompts show the candidate without editing paths, preserving
+full definitions, statements, proofs, dependency maps and English plans. They
+omit prover memory, previous failures, search roots and prover action menus.
+Within the retained evidence window, reviews include successful lookup excerpts
+whose names appear in the formal context or candidate, plus research tied to the
+exact review entry and candidate. General search/probe history is omitted.
+Evidence matching is lexical, not a transitive dependency analysis.
+Executor trace lines (`MIDAS_THREAD_GUARD`, `MIDAS_RUNTIME_OPEN`, `MIDAS_TRACE`)
+are removed from displayed diagnostics for both roles and before new compiler
+failures are truncated into prover memory. Compiler errors remain intact.
+
 The default prover contract returns `{action, memory_update}`; the action covers
 proofs, decomposition, joint candidates, revisions and helpers. The
 reviewer returns `{verdict, rationale, findings, question, urls}`. Research returns
@@ -1025,17 +1036,25 @@ The checked-in prover and reviewer routes enable this mode. Null leaves caching
 to the provider default and emits no explicit boundaries.
 
 Following the [OpenAI prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
-both roles mark the shared contract, the end of formal context, and each retained
-evidence, history and candidate section. Earlier markers remain when more sections
+prover requests mark the shared contract, the end of formal context, and each
+retained evidence, history and candidate section. Earlier markers remain when more sections
 are appended: moving a single marker to the new tail would lose the old lookup
 endpoint. The provider can write at most four prefixes per request, while explicit
 lookup considers the first two and latest fifty markers. The first two delimit the
-contract and formal context in the default renderers.
+contract and formal context in the default prover renderer.
 
-Retained evidence precedes history and the current candidate, so changing a draft
-or memory does not invalidate those evidence prefixes. Memory, feedback, remaining
-allowances and the final action request follow the cache boundaries. Evicting or
-reordering retained content still invalidates prefixes from the first change.
+Explicit reviewer requests mark only the shared developer instructions. Source,
+goals, dependency interfaces, evidence and candidate text follow that
+boundary, avoiding cache-write charges for large review material that is usually
+read once. The instruction prefix must still meet the provider's minimum length
+to be cached; no padding is added. This policy applies to newly built requests;
+retries keep their frozen wire bytes.
+
+In prover requests, retained evidence precedes history and the current candidate,
+so changing a draft or memory does not invalidate those evidence prefixes. Memory,
+feedback, remaining allowances and the final action request follow the cache
+boundaries. Evicting or reordering retained content still invalidates prefixes
+from the first change.
 The action schema excludes unavailable helpers and candidate actions, including
 recall/page without offered results and research without a configured service.
 Reviewer schemas likewise omit unavailable research. Small schema variants are

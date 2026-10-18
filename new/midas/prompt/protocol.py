@@ -1,5 +1,5 @@
 """Immutable display inputs and replaceable role renderers; no I/O or state lookup."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Protocol
 import re
@@ -132,6 +132,14 @@ class Renderer(Protocol):
     def __call__(self, snapshot: Snapshot) -> Prompt: ...
 
 
+_RUNTIME_NOISE = re.compile(rb'(?m)^MIDAS_(?:THREAD_GUARD count=|RUNTIME_OPEN /|TRACE tasks=)[^\r\n]*(?:\r?\n|$)')
+
+
+def clean_diagnostics(data):
+    """Remove executor trace lines, preserving compiler errors and their layout."""
+    return _RUNTIME_NOISE.sub(b'', data) if b'MIDAS_' in data else data
+
+
 def display(snapshot, order):
     """Stable grouping, whole evidence pages only, and an explicit omission notice."""
     if not isinstance(snapshot, Snapshot):
@@ -146,6 +154,10 @@ def display(snapshot, order):
                 omitted += 1
                 continue
             size += len(section.text)
+        if section.kind in ('history', 'feedback', 'evidence'):
+            cleaned = clean_diagnostics(section.text)
+            if cleaned != section.text:
+                section = replace(section, text=cleaned)
         groups[section.kind].append(section)
     if omitted:
         name = 'omitted-evidence'
@@ -155,8 +167,7 @@ def display(snapshot, order):
             suffix += 1
             name = f'omitted-evidence-{suffix}'
         groups['evidence'].append(Section('evidence', name,
-            f'{omitted} evidence section(s) omitted by the display byte limit. '
-            'Use available recall/page actions for additional evidence.'.encode()))
+            f'{omitted} evidence section(s) omitted by the display byte limit.'.encode()))
     return tuple(section for kind in order for section in groups[kind])
 
 

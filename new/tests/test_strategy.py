@@ -410,10 +410,17 @@ class StateTests(unittest.TestCase):
                 (Services(research=True, research_web_calls=3), {'accept', 'reject', 'research'})):
             with self.subTest(services=services):
                 artifacts, snapshot = fixture(conditional=True)
-                snapshot = replace(snapshot, services=services)
+                snapshot = replace(snapshot, services=services, cursors=('unused-cursor',),
+                                   recallable=('unused-result',), allowed_pins=('unused-result',))
                 _, prepared, _ = dispatch(snapshot, artifacts)
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
                 self.assertEqual(set(wire['outputSchema']['properties']['verdict']['enum']), expected)
+                capabilities = next(m['text'] for m in wire['input'] if m['text'].startswith('CAPABILITIES '))
+                self.assertIn('Verdicts: accept, reject', capabilities)
+                for clutter in ('Helper modes', 'Candidate modes', 'direct_remaining', 'decomposition_remaining',
+                                'repair_remaining', 'retrieval_remaining', 'probe_remaining', 'unused-'):
+                    self.assertNotIn(clutter, capabilities)
+                self.assertEqual('research_remaining:' in capabilities, 'research' in expected)
 
     def test_lookup_can_progress_and_unavailable_actions_still_fail_admission(self):
         artifacts, snapshot = fixture()

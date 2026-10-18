@@ -38,6 +38,22 @@ def cache_prefixes(request):
 
 
 class PromptTests(unittest.TestCase):
+    def test_runtime_traces_are_removed_from_prover_and_reviewer_diagnostics(self):
+        noise = (b'MIDAS_THREAD_GUARD count=1\r\nMIDAS_RUNTIME_OPEN /proc/stat\n'
+                 b'MIDAS_TRACE tasks=2 syscalls=105 remaining=0 ready=1\n')
+        error = b'candidate.lean:3:9: error: unknown constant\n  exact missing\nMIDAS_CHECK_REJECTED\n'
+        turn = Snapshot((subject('goal', signature()), Section('candidate', 'proof', noise),
+                         Section('source', 'raw-source', noise),
+                         *(Section(kind, kind, noise + error + noise.rstrip(b'\n'))
+                           for kind in ('history', 'feedback', 'evidence'))))
+        for role in (prover, reviewer):
+            sections = {s.name: s.text for s in role.render(turn).sections}
+            for kind in ('history', 'feedback', 'evidence'):
+                self.assertEqual(sections[kind], error)
+            # Exact program inputs are not diagnostic streams.
+            self.assertEqual(sections['proof'], noise)
+            self.assertEqual(sections['raw-source'], noise)
+
     def test_stable_blocks_precede_changing_turn_material_for_each_role(self):
         turn = replace(snapshot(), sections=(*snapshot().sections,
             Section('history', 'older-check', b'old diagnostic'),
@@ -86,10 +102,11 @@ class PromptTests(unittest.TestCase):
                 cached = [m for m in wire['input'] if isinstance(m['content'], list)]
                 # More than four markers are valid: old endpoints remain lookup
                 # candidates even though the provider limits writes per request.
-                self.assertEqual(len(cached), 7)
+                self.assertEqual(len(cached), 7 if role is prover else 1)
                 self.assertEqual(cached[0]['role'], 'developer')
                 self.assertEqual([m['content'][0]['text'].split()[0] for m in cached[1:]],
-                                 ['SUBJECT', 'EVIDENCE', 'EVIDENCE', 'HISTORY', 'HISTORY', 'CANDIDATE'])
+                                 ['SUBJECT', 'EVIDENCE', 'EVIDENCE', 'HISTORY', 'HISTORY', 'CANDIDATE']
+                                 if role is prover else [])
                 malformed = result.wire.replace(b'"prompt_cache_breakpoint":{"mode":"explicit"}',
                                                 b'"prompt_cache_breakpoint":{"mode":"unknown"}', 1)
                 with self.assertRaisesRegex(ValueError, 'breakpoint'):
@@ -97,30 +114,54 @@ class PromptTests(unittest.TestCase):
                 disabled = build(turn, replace(options, prompt_cache='disabled'), renderer=role.render)
                 self.assertNotIn(b'prompt_cache_breakpoint', disabled.wire)
 
+    def test_large_review_material_stays_outside_writes_without_losing_content(self):
+        kinds = ('source', 'definitions', 'subject', 'interfaces', 'evidence',
+                 'history', 'candidate', 'memory', 'feedback', 'capabilities', 'question')
+        turn = Snapshot(tuple(Section(kind, kind, (kind + '\nα"\\\n').encode() * 4096)
+                              for kind in kinds), evidence_bytes=128 * 1024)
+        changed = replace(turn, sections=tuple(replace(s, text=b'Another review\n' + s.text)
+                                               for s in turn.sections))
+        for transport in ('azure_responses', 'bedrock_responses'):
+            with self.subTest(transport=transport):
+                options = Options(transport, 'model', prompt_cache='explicit', cache_scope='a'*64)
+                before = build(turn, options, renderer=reviewer.render)
+                after = build(changed, options, renderer=reviewer.render)
+                self.assertEqual(len(cache_prefixes(before)), 1)
+                self.assertEqual(cache_prefixes(before), cache_prefixes(after))
+                for snapshot_, result in ((turn, before), (changed, after)):
+                    wire = decode(result.wire, limit=MAX_BYTES)
+                    self.assertEqual(wire['input'][0]['content'][0]['text'].encode(), reviewer.INSTRUCTIONS)
+                    # Every review section remains intact after the final marker,
+                    # including large interfaces and evidence before the candidate.
+                    expected = [s.kind.upper() + ' ' + s.name + '\n' + s.text.decode()
+                                for s in reviewer.render(snapshot_).sections]
+                    self.assertEqual([m['content'] for m in wire['input'][1:]], expected)
+                    self.assertLess(result.wire.rfind(b'"prompt_cache_breakpoint"'),
+                                    result.wire.index(b'SOURCE source'))
+
     def test_growing_evidence_and_history_reuse_previous_written_endpoints(self):
         options = Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)
-        for role in (prover, reviewer):
-            for kind, count in (('evidence', 8), ('history', 60)):
-                with self.subTest(role=role.__name__, kind=kind):
-                    retained = tuple(Section(kind, f'record-{i}', f'Immutable result {i}.'.encode())
-                                     for i in range(count))
-                    turn = replace(snapshot(), sections=(*snapshot().sections, *retained))
-                    for step in range(3):
-                        before = cache_prefixes(build(turn, options, renderer=role.render))
-                        next_record = Section(kind, f'record-{count+step}', b'New result.')
-                        changed = tuple(replace(s, text=b'Updated turn material')
-                                        if s.kind in ('candidate', 'capabilities') else s for s in turn.sections)
-                        after_turn = replace(turn, sections=(*changed, next_record))
-                        after = cache_prefixes(build(after_turn, options, renderer=role.render))
-                        # Exercise the documented write cap and lookup window,
-                        # not merely the presence of annotations on the new tail.
-                        written = set(list(before.values())[-4:])
-                        incoming = list(after.values())
-                        matches = written.intersection(incoming[:2] + incoming[-50:])
-                        self.assertTrue(matches)
-                        self.assertEqual(max(matches, key=len),
-                                         before[f'{kind.upper()} record-{count+step-1}'])
-                        turn = after_turn
+        for kind, count in (('evidence', 8), ('history', 60)):
+            with self.subTest(kind=kind):
+                retained = tuple(Section(kind, f'record-{i}', f'Immutable result {i}.'.encode())
+                                 for i in range(count))
+                turn = replace(snapshot(), sections=(*snapshot().sections, *retained))
+                for step in range(3):
+                    before = cache_prefixes(build(turn, options, renderer=prover.render))
+                    next_record = Section(kind, f'record-{count+step}', b'New result.')
+                    changed = tuple(replace(s, text=b'Updated turn material')
+                                    if s.kind in ('candidate', 'capabilities') else s for s in turn.sections)
+                    after_turn = replace(turn, sections=(*changed, next_record))
+                    after = cache_prefixes(build(after_turn, options, renderer=prover.render))
+                    # Exercise the documented write cap and lookup window,
+                    # not merely the presence of annotations on the new tail.
+                    written = set(list(before.values())[-4:])
+                    incoming = list(after.values())
+                    matches = written.intersection(incoming[:2] + incoming[-50:])
+                    self.assertTrue(matches)
+                    self.assertEqual(max(matches, key=len),
+                                     before[f'{kind.upper()} record-{count+step-1}'])
+                    turn = after_turn
 
     def test_draft_memory_and_allowances_do_not_invalidate_retained_evidence(self):
         options = Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)
@@ -129,18 +170,17 @@ class PromptTests(unittest.TestCase):
             Section('history', 'old-check', b'Old diagnostic'),
             Section('memory', 'strategy', b'Current strategy'),
             Section('feedback', 'new-check', b'Current diagnostic')))
-        for role in (prover, reviewer):
-            before = cache_prefixes(build(turn, options, renderer=role.render))
-            for kind in ('candidate', 'memory', 'feedback', 'capabilities', 'question'):
-                changed = replace(turn, sections=tuple(replace(s, text=b'Changed') if s.kind == kind else s
-                                                       for s in turn.sections))
-                after = cache_prefixes(build(changed, options, renderer=role.render))
-                self.assertEqual(before['EVIDENCE saved-page'], after['EVIDENCE saved-page'])
-                self.assertEqual(before['HISTORY old-check'], after['HISTORY old-check'])
-            wire = build(turn, options, renderer=role.render).wire
-            last = wire.rfind(b'"prompt_cache_breakpoint"')
-            self.assertGreater(wire.index(b'MEMORY strategy'), last)
-            self.assertGreater(wire.index(b'FEEDBACK new-check'), last)
+        before = cache_prefixes(build(turn, options, renderer=prover.render))
+        for kind in ('candidate', 'memory', 'feedback', 'capabilities', 'question'):
+            changed = replace(turn, sections=tuple(replace(s, text=b'Changed') if s.kind == kind else s
+                                                   for s in turn.sections))
+            after = cache_prefixes(build(changed, options, renderer=prover.render))
+            self.assertEqual(before['EVIDENCE saved-page'], after['EVIDENCE saved-page'])
+            self.assertEqual(before['HISTORY old-check'], after['HISTORY old-check'])
+        wire = build(turn, options, renderer=prover.render).wire
+        last = wire.rfind(b'"prompt_cache_breakpoint"')
+        self.assertGreater(wire.index(b'MEMORY strategy'), last)
+        self.assertGreater(wire.index(b'FEEDBACK new-check'), last)
 
     def test_all_roles_produce_provider_accepted_wire(self):
         routes = (Route('openai', 'model', 'codex'),

@@ -122,15 +122,19 @@ def _content(writer, parts, *, breakpoint=False):
 
 
 def _breakpoints(prompt):
-    """Preserve lookup endpoints as retained context grows, for both roles.
+    """Cache reviewer instructions only; preserve growing prover endpoints.
 
-    The provider limits cache *writes*, not the number of retained markers.
+    Reviewer material is usually read once. Its shared instructions are marked
+    by _prefix; no later boundary should write the large review-specific suffix.
+    For provers, the provider limits writes, not the number of retained markers.
     Explicit lookup checks the first two and latest fifty markers. Keep the
     contract and formal context first, then each evidence/history/candidate
     endpoint, so appending a section does not erase the previous cache boundary.
     Memory, feedback and allowances are changing suffixes, not cache writes.
     https://developers.openai.com/api/docs/guides/prompt-caching
     """
+    if prompt.role == 'reviewer':
+        return set()
     formal = ('source', 'definitions', 'subject', 'interfaces')
     points = {0, max((i for i, s in enumerate(prompt.sections, 1) if s.kind in formal), default=0)}
     points.update(i for i, s in enumerate(prompt.sections, 1)

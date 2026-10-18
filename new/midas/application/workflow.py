@@ -120,7 +120,7 @@ class Workflow:
                 alias.encode() + b' :\n' + subject('type', signature).text))
             refs.append(child.interface)
             owners.append(child.owner)
-        if snapshot.context.references:
+        if snapshot.context.references and review is None:
             sections.append(Section('interfaces', 'entry-references', '\n'.join(
                 f'{ref.label}: {ref.key}' for ref in snapshot.context.references).encode()))
         definitions = codec.load_record(snapshot.context.definitions, limit=8*1024**2)
@@ -141,7 +141,8 @@ class Workflow:
             '\nInherited imports: ' + (', '.join(snapshot.context.inherited_imports) or 'none')).encode()))
         if formal_only:
             return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)))
-        sections.extend(presentation.memory(snapshot.memory))
+        if review is None:
+            sections.extend(presentation.memory(snapshot.memory))
         if review is not None:
             key, entry_key = review
             saved = candidates.submission(reader, key)
@@ -170,10 +171,15 @@ class Workflow:
                     dep.alias.encode() + b' :\n' + subject('type', signature).text))
                 refs.append(dep.interface)
                 owners.append(dep.owner)
-        from .helpers import advertised, page_text
+        from .helpers import advertised, page_text, review_evidence
         displayed = tuple(dict.fromkeys(state.evidence[-8:]))
+        if review is not None:
+            for ordinal, (reference, text) in enumerate(review_evidence(reader, snapshot, review, sections, displayed)):
+                sections.append(Section('evidence', f'review-result-{ordinal+1}', text))
+                refs.append(reference)
+            displayed = ()
         pages = {reference: (archive.id, ordinal+1, len(archive.pages))
-                 for archive in advertised(reader, snapshot.version.owner)
+                 for archive in (advertised(reader, snapshot.version.owner) if displayed else ())
                  for ordinal, reference in enumerate(archive.pages) if reference in displayed}
         for ordinal, reference in enumerate(displayed):
             details = pages.get(reference)
@@ -186,7 +192,7 @@ class Workflow:
             sections.append(Section('evidence', f'tool-result-{ordinal+1}',
                 header.encode()+page_text(r.read(reader, reference, 16000))))
             refs.append(reference)
-        if self.search and self.search.index:
+        if review is None and self.search and self.search.index:
             sections.append(Section('source', 'search-roots',
                 ('Frozen-source roots: '+', '.join(self.search.index.roots)).encode()))
         # All retained pages must reach the prompt: recall availability is based
@@ -407,8 +413,10 @@ class Workflow:
             return Effect(disposition='STALE')
         if accepted.failure:
             result = reader.result(invocation.original_execution_id)
-            diagnostics = ((r.read(reader, result.diagnostics, 8*1024**2).decode(errors='replace')[-2000:],)
-                           if result.diagnostics else ())
+            from ..prompt.protocol import clean_diagnostics
+            text = (clean_diagnostics(r.read(reader, result.diagnostics, 8*1024**2))
+                    .decode(errors='replace')[-2000:] if result.diagnostics else '')
+            diagnostics = (text,) if text.strip() else ()
             return self.fail_candidate(reader, key, saved, accepted.failure,
                 reader.receipt(invocation.original_execution_id).result_ref, diagnostics=diagnostics)
         try:

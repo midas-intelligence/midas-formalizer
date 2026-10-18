@@ -1,5 +1,6 @@
 """Helper lowering, retrieval continuations and bounded advisory delivery."""
 from dataclasses import replace
+import re
 
 from ..checker import ProbeCase
 from ..controller import Effect, artifact, reserve_helper
@@ -238,11 +239,74 @@ def recall_effect(flow, reader, snapshot, turn, work, state):
     return replace(state, evidence=tuple(dict.fromkeys((*state.evidence, archive.pages[page.ordinal])))[-8:]), Effect()
 
 
-def page_text(payload):
+_REVIEW_NAME = re.compile(r"[^\W\d][\w'?!]*(?:\.[^\W\d][\w'?!]*)*")
+
+
+def review_evidence(reader, snapshot, review, sections, displayed):
+    """Select named checked lookups and research for this exact review.
+
+    Lookup records precede search hints in retrieval archives. Their original
+    record indices let us select whole excerpts without guessing from prose or
+    loading complete historical results. General searches/probes are omitted.
+    """
+    from ..strategy import Turn
+    from ..strategy.state import candidate_hash
+    if not displayed:
+        return
+    names = {match[0].removeprefix('_root_.') for section in sections
+             if section.kind in ('subject', 'definitions', 'interfaces', 'candidate')
+             for match in _REVIEW_NAME.finditer(section.text.decode())}
+    displayed = set(displayed)
+    for archive in advertised(reader, snapshot.version.owner):
+        if archive.scope.context != snapshot.version.context or not displayed.intersection(archive.pages):
+            continue
+        saved = r.value(reader, 'application.helpers', archive.helper_id)
+        if not saved:
+            continue
+        request = HelperRequest.load(r.read(reader, r.unref(saved['request'])))
+        records = None
+        if isinstance(request.action, Research):
+            if saved['parent'] != list(review):
+                continue
+            turn = Turn.load(r.read(reader, r.unref(saved['turn'])))
+            if turn.candidate_hash != candidate_hash(snapshot.attempt.candidate):
+                continue
+        elif isinstance(request.action, (Lookup, Retrieve)):
+            stages = tuple(Stage.load(r.read(reader, r.unref(s))) for s in saved['stages'])
+            if not stages or any(not isinstance(s.action, Lookup) or
+                    saved['results'][str(s.ordinal)][3] != ResultStatus.SUCCEEDED.value for s in stages):
+                continue
+            records, offset = set(), 0
+            for stage in stages:
+                available = saved['results'][str(stage.ordinal)][5]
+                for index, name in enumerate(stage.action.names):
+                    normalized = name.removeprefix('_root_.')
+                    if (name in available and not normalized.startswith('_private.') and
+                            (normalized in names or normalized.rsplit('.', 1)[-1] in names)):
+                        records.add(str(offset + index))
+                offset += len(stage.action.names)
+            if not records:
+                continue
+        else:
+            continue
+        for ordinal, ref in enumerate(archive.pages):
+            if ref not in displayed:
+                continue
+            text = page_text(r.read(reader, ref, 16000), records=records)
+            if not text:
+                continue
+            header = f'Result ID: {archive.id}\nPage {ordinal+1} of {len(archive.pages)}. '
+            header += 'Selected checked declaration excerpts.\n\n' if records is not None else 'Review research (advisory).\n\n'
+            yield ref, header.encode() + text
+
+
+def page_text(payload, *, records=None):
     """Readable projection of one bounded page; JSON is never used for display."""
     value = codec.load_record(payload, limit=16000)
     lines = []
     for row in value[4]:
+        if records is not None and row[1][0] not in records:
+            continue
         if row[0] == 'text' and len(row[1]) == 1:
             content = row[4]
             if row[2]:
