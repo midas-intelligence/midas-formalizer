@@ -12,7 +12,7 @@ opaque writeControl (line : @& String) : IO Unit
 
 -- Restore only imports in the parent; never elaborate request declarations here.
 def preloadRequest (path : String) : IO Unit := do
-  let packet ← IO.ofExcept (Midas.Binary.decode (← IO.FS.readBinFile path))
+  let packet ← Midas.Check.readPacket path
   let source ← IO.ofExcept (Midas.Check.str packet "source")
   let logical ← IO.ofExcept (Midas.Check.str packet "logical")
   unsafe enableInitializersExecution

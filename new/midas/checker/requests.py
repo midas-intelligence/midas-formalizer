@@ -17,6 +17,7 @@ OPERATIONS = {'binding': JobKind.CHECK_BINDING, 'proof': JobKind.CHECK_PROOF,
               'lookup': JobKind.LOOKUP, 'probe': JobKind.PROBE, 'audit': JobKind.EXPORT_VERIFY,
               'replay': JobKind.ASSEMBLE, 'integrate': JobKind.INTEGRATE}
 _SIGNATURES = Memo(max_entries=128, max_bytes=16 * 1024**2)
+_REQUESTS = Memo(max_entries=128, max_bytes=32 * 1024**2)
 
 
 def signature(value):
@@ -47,6 +48,11 @@ class CompilerRequest:
     payload: bytes
 
     def __post_init__(self):
+        if type(self.payload) is not bytes:
+            raise ValueError('Expected immutable compiler request bytes')
+        _REQUESTS.get(b'', self.payload, self._validate)
+
+    def _validate(self):
         value = codec.decode(self.payload)
         codec.fields(value, ('format', 'operation', 'environment', 'selection', 'owner',
                              'candidate', 'inputs', 'packet', *(('export',) if 'export' in value else ())))
@@ -63,6 +69,13 @@ class CompilerRequest:
         maximum = 40016 if 'export' in value else 20000 if value['operation'] == 'audit' else 256
         if len(refs) > maximum or len(set(refs)) != len(refs):
             raise ValueError('Invalid compiler inputs')
+        if 'modules' in value['packet']:
+            raise ValueError('Inline module inventories are not supported')
+        if 'inventory' in value['packet']:
+            if (value['operation'] not in ('audit', 'integrate')
+                    or ArtifactRef.from_dict(value['packet']['inventory']) not in refs):
+                raise ValueError('Module inventory must be an admitted audit input')
+        return True
 
     @property
     def sha256(self):

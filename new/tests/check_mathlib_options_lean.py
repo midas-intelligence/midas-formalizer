@@ -64,9 +64,17 @@ def main():
             print(f'replayed {len(replay.build_order)} modules with exact artifact hashes ({time.monotonic()-started:.2f}s total)', flush=True)
             library = prepare_library(env, configured, replay, dependencies, context.staging)
             rows = library.decode()
-            assert next(r for r in rows if r['name'] == target)['options'] == [list(p) for p in item.lean_options]
-            workspace, result = rebuild(env, {'modules': rows, 'logical': 'Audit.lean', 'source': ''}, context)
+            assert next(r for r in rows if r.name == target).options == item.lean_options
+            inventory_ref = context.staging.write_bounded(library.payload, max_bytes=64*1024**2)
+            from types import SimpleNamespace
+            # This preparation fixture owns the captured artifacts directly.
+            build_context = SimpleNamespace(workspace=context.workspace, reader=context.staging,
+                check=context.check, run_process=context.run_process, limits=context.limits)
+            env.validate(hash_toolchain=True, fresh=True, check=context.check)
+            workspace, result = rebuild(env, {'inventory': inventory_ref.to_dict(),
+                'logical': 'Audit.lean', 'source': ''}, build_context)
             output(result)
+            env.validate(hash_toolchain=True, fresh=True, check=context.check)
             print(f'independent export rebuild matched {len(rows)} modules ({time.monotonic()-started:.2f}s total)', flush=True)
         operate(check, limits=limits)
 

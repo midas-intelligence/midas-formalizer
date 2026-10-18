@@ -86,9 +86,16 @@ def failure(outcome, detail, *, elapsed_ms=0, limit=None):
 
 def _process_info(pid):
     try:
-        with open(f'/proc/{pid}/stat', 'r') as source:
-            tail = source.read(16384).rsplit(')', 1)[1].split()
-        return (int(tail[1]), int(tail[19]), tail[0])  # parent, start ticks, state
+        # Each scan reads every host process. Use one bounded raw read without
+        # allocating a Python file object; retain no descriptors between reads.
+        # comm itself need not be valid UTF-8.
+        fd = os.open(f'/proc/{pid}/stat', os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            record = os.read(fd, 16384)
+        finally:
+            os.close(fd)
+        tail = record.rsplit(b')', 1)[1].split(None, 20)
+        return (int(tail[1]), int(tail[19]), tail[0].decode('ascii'))  # parent, start ticks, state
     except (FileNotFoundError, ProcessLookupError):
         return None
     except (ValueError, IndexError) as error:
@@ -143,13 +150,14 @@ class _Discovery:
             # Never serve the previous scan after an incomplete/failed refresh.
             self.value = None
             infos, children = {}, {}
-            for entry in Path('/proc').iterdir():
-                if entry.name.isdecimal():
-                    pid = int(entry.name)
-                    info = _process_info(pid)
-                    if info:
-                        infos[pid] = info
-                        children.setdefault(info[0], []).append(pid)
+            with os.scandir('/proc') as entries:
+                for entry in entries:
+                    if entry.name.isdecimal():
+                        pid = int(entry.name)
+                        info = _process_info(pid)
+                        if info:
+                            infos[pid] = info
+                            children.setdefault(info[0], []).append(pid)
             self.started, self.value = now, (infos, children)
             return self.value
 

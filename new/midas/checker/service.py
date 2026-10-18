@@ -84,6 +84,8 @@ class Checker:
     def __init__(self, environment, cache, *, runtime=None, retained=True):
         self.environment, self.cache = environment, Path(cache)
         self.runtime, self.retained = runtime, retained
+        from .native import DeclarationCache
+        self.declarations = DeclarationCache(self.cache / 'declarations')
         if type(retained) is not bool:
             raise ValueError('Expected retained-worker flag')
         if runtime is not None and runtime.environment_id != environment.id:
@@ -113,6 +115,7 @@ class Checker:
         limits = frozen.job.limits
         runtime = self.runtime
         clean_workspace = None
+        clean_roots = ()
 
         def save(data, maximum=MAX_BYTES):
             if type(data) is not bytes or len(data) > maximum:
@@ -142,19 +145,16 @@ class Checker:
                            'detail': process.detail,
                            'termination': process.termination.value, **streams})
 
-        def run(name, packet, native=None):
+        def run(name, packet, natives=()):
             nonlocal diagnostics
             context.check()
-            payload = codec.encode(packet)
+            from .native import frame
+            payload = frame(packet, natives)
             request_path = context.workspace / 'Packet.bin'
             request_path.write_bytes(payload)
             files = [request_path]
-            if native is not None:
-                native_path = context.workspace / (packet['native_proof'] + '.olean')
-                native_path.write_bytes(native)
-                files.append(native_path)
             inputs = self.environment.materialize(tuple(AuthorizedInput(p.name, p,
-                sha256(payload if p == request_path else native).hexdigest(), p.stat().st_size) for p in files),
+                sha256(payload).hexdigest(), p.stat().st_size) for p in files),
                 context.workspace / ('inputs-' + str(uuid4())), check=context.check)
             channel = context.workspace / ('channel-' + str(uuid4()))
             channel.mkdir()
@@ -162,9 +162,8 @@ class Checker:
             fresh = replace(fresh, mounts=(*fresh.mounts, Mount(str(channel), '/channel')),
                             variables=(*fresh.variables, ('MIDAS_EVIDENCE_PATH', '/channel/evidence')))
             if clean_workspace is not None:
-                from .rebuild import clean_launch, trusted_roots
-                fresh = clean_launch(fresh, clean_workspace,
-                    trusted=trusted_roots(self.environment, packet['modules']))
+                from .rebuild import clean_launch
+                fresh = clean_launch(fresh, clean_workspace, trusted=clean_roots)
             if self.retained and runtime.retained and clean_workspace is None:
                 attempts = context.run_import(runtime.recipe(self.environment, limits.memory_mib, files),
                     fresh=fresh, evidence_path=channel / 'evidence').attempts
@@ -201,28 +200,35 @@ class Checker:
             operation, packet, digest = value['operation'], value['packet'], request.sha256
             packet.update(request=digest, max_heartbeat=limits.max_heartbeat, max_rec_depth=limits.max_rec_depth)
             if operation == 'proof':
+                from .native import specification
                 cert, binaries = run('produce', dict(packet, mode='produce'))
                 ev.proof_for(cert, packet, digest)
                 expected = ev.replay_receipt(cert, digest)
                 replay = dict(packet, mode='replay', candidate=None, certificate=cert, replay_receipt=expected)
                 native = next((data for name, data in binaries if name == 'producer'), None)
                 if native is not None:
-                    replay['native_proof'] = 'MidasDecl_' + sha256(native).hexdigest()
-                result, _ = run('replay', replay, native)
+                    replay['native_proof'] = sha256(native).hexdigest()
+                result, _ = run('replay', replay,
+                    ((replay['native_proof'], native),) if native is not None else ())
                 if result != expected:
                     raise ValueError('Kernel replay receipt differs')
                 accepted = save(codec.encode(cert), limits.evidence_bytes)
+                self.declarations.store(binaries, specification(packet, cert, self.environment.id, runtime.id))
             elif operation == 'replay':
+                from .native import specification
                 cert = dict(packet['certificate'], request=digest)
                 ev.certificate(cert, digest)
                 if cert['format'] != ev.PROOF or 'assumptions' in cert:
                     raise ValueError('Assembly requires a closed source certificate')
                 expected = ev.replay_receipt(cert, digest)
-                result, _ = run('replay', dict(packet, mode='replay', candidate=None,
-                    certificate=cert, replay_receipt=expected))
+                spec = specification(packet, cert, self.environment.id, runtime.id)
+                result, binaries = run('replay', dict(packet, mode='replay', candidate=None,
+                    certificate=cert, replay_receipt=expected, native_declarations=spec),
+                    self.declarations.load(spec))
                 if result != expected:
                     raise ValueError('Assembly kernel replay receipt differs')
                 accepted = save(codec.encode(cert), limits.evidence_bytes)
+                self.declarations.store(binaries, spec)
             elif operation == 'binding':
                 if packet['interface'] is not None:
                     packet['interface']['request'] = digest
@@ -243,16 +249,20 @@ class Checker:
                 ev.lookup_for(result, packet, digest)
                 accepted = save(codec.encode(result), limits.evidence_bytes)
             elif operation in ('audit', 'integrate'):
-                if operation == 'audit' and 'modules' in packet:
-                    from .rebuild import rebuild
+                if operation == 'audit' and 'inventory' in packet:
+                    from .rebuild import rebuild, load_inventory, trusted_roots
+                    # One validation boundary surrounds the complete independent
+                    # rebuild and audit; the intermediate build is not admitted.
+                    self.environment.validate(hash_toolchain=True, fresh=True, check=context.check)
                     clean_workspace, built = rebuild(self.environment, packet, context,
                         maximum=value.get('export', {}).get('maximum', 16*1024**3))
+                    clean_roots = trusted_roots(self.environment, load_inventory(packet, context.reader))
                     stage('build', built)
                     if built.outcome != Outcome.COMPLETED or built.returncode != 0:
                         diagnostics = ArtifactRef.from_dict(phases[-1]['stderr']['artifact'])
                         raise _Rejected('invalid_candidate' if built.outcome == Outcome.COMPILER_ERROR else built.outcome.value)
                 result, _ = run('audit', dict(packet, mode='audit'))
-                if clean_workspace is not None and any(row['source'] is None for row in packet['modules']):
+                if clean_workspace is not None:
                     self.environment.validate(hash_toolchain=True, fresh=True, check=context.check)
                 self._audit_result(result, packet, digest)
                 accepted = save(codec.encode(result), limits.evidence_bytes)
@@ -320,7 +330,7 @@ class Checker:
         operation, packet, digest = value['operation'], value['packet'], request.sha256
         expected = (['produce', 'replay'] if operation == 'proof' or operation == 'binding' and packet['interface']
                     else ['replay'] if operation == 'replay'
-                    else ['build', 'audit'] if operation == 'audit' and 'modules' in packet
+                    else ['build', 'audit'] if operation == 'audit' and 'inventory' in packet
                     else ['audit'] if operation in ('audit', 'integrate')
                     else ['produce'] if operation == 'binding' else [operation] if operation == 'lookup'
                     else ['probe:' + c['id'] for c in packet['cases']])
@@ -363,7 +373,7 @@ class Checker:
             if codec.encode(outputs[0]) != payload:
                 raise ValueError('Lookup evidence differs from execution')
         elif operation in ('audit', 'integrate'):
-            if operation == 'audit' and 'modules' in packet:
+            if operation == 'audit' and 'inventory' in packet:
                 from .rebuild import admit_build
                 admit_build(outputs.pop(0), packet)
             self._audit_result(codec.decode(payload), packet, digest)

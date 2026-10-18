@@ -14,6 +14,10 @@ MAX_BYTES = 1024**4
 MAX_INVENTORY = 64 * 1024**2
 MAX_ENTRIES = 500000
 BLOCK = 1024 * 1024
+# A Mathlib/toolchain validation visits about 171,000 files. A smaller LRU
+# evicts the previous pass before it can reuse any digests. Entries contain
+# only fixed-size stat stamps and SHA-256 strings, never file contents.
+DIGEST_ENTRIES = 262144
 U64 = Struct('<Q')
 FILE_INFO = Struct('<QB32s')
 
@@ -118,7 +122,7 @@ def _digest(fd, before, check):
     value = digest.hexdigest()
     with _lock:
         _digests[before] = value
-        if len(_digests) > 32768:
+        if len(_digests) > DIGEST_ENTRIES:
             _digests.popitem(last=False)
     return value
 

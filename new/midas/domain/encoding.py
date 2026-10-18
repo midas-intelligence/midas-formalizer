@@ -28,6 +28,7 @@ JSON_LIMIT = 16 * 1024
 JSON_DEPTH = 16
 _JSON_ESCAPES = re.compile(r'["\\\x00-\x1f]')
 _JSON_ADMISSIONS = Memo(max_entries=2048, max_bytes=32 * 1024**2)
+_GRAPH_ADMISSIONS = Memo(max_entries=128, max_bytes=32 * 1024**2)
 
 
 def canonical(value, *, ascii=False):
@@ -255,11 +256,22 @@ def encode(value, *, limit=MAX_BYTES):
 
 
 def decode(payload, *, limit=MAX_BYTES):
-    if not isinstance(payload, bytes): raise ValueError('Expected certificate bytes')
+    if type(payload) is not bytes: raise ValueError('Expected certificate bytes')
     limit = min(limit, MAX_BYTES)
     if not payload.startswith(MAGIC):
         raise ValueError('Expected binary certificate graph')
     if not 0 < len(payload) <= limit: raise GraphLimit('Certificate graph byte limit exceeded')
+    decoded = []
+    def admit():
+        decoded.append(_decode_graph(payload, limit=limit, canonical=True))
+        return True
+    _GRAPH_ADMISSIONS.get(b'', payload, admit)
+    # Cache only admission of exact immutable bytes. Every caller owns its graph;
+    # limits and structure are checked again without canonical re-serialization.
+    return decoded[0] if decoded else _decode_graph(payload, limit=limit, canonical=False)
+
+
+def _decode_graph(payload, *, limit, canonical):
     pos = len(MAGIC)
     def uint():
         nonlocal pos
@@ -312,7 +324,7 @@ def decode(payload, *, limit=MAX_BYTES):
     value = nodes[root]
     # Reject unused/duplicate nodes and alternative numbering. Also ensures the
     # two implementations agree on one canonical wire representation.
-    if encode(value,limit=limit) != payload: raise ValueError('Noncanonical certificate graph')
+    if canonical and encode(value,limit=limit) != payload: raise ValueError('Noncanonical certificate graph')
     return value
 
 

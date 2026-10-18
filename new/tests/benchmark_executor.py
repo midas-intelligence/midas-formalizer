@@ -2,6 +2,7 @@
 from pathlib import Path
 from statistics import median
 import sys
+from time import perf_counter, thread_time
 from timeit import repeat
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -10,18 +11,24 @@ from midas.domain import ResourceLimits
 from midas.executor import process as new
 
 
-def measure(previous, current, count):
+def measure(previous, current, count, *, timer=perf_counter):
     previous()
     current()
     times = ([], [])
     for sample in range(7):
         for side in (sample % 2, 1 - sample % 2):
-            times[side].append(repeat((previous, current)[side], number=count, repeat=1)[0] / count)
+            times[side].append(repeat((previous, current)[side], number=count, repeat=1, timer=timer)[0] / count)
     before, after = (median(t) for t in times)
     return before * 1e6, after * 1e6, after / before
 
 
 def main():
+    # Fresh scans exercise the CPU hotspot even when only one worker is active;
+    # timing cached snapshots would hide the cost of enumerating host processes.
+    previous_discovery, current_discovery = old._Discovery(), new._Discovery()
+    before, after, ratio = measure(lambda: previous_discovery.snapshot(fresh=True),
+        lambda: current_discovery.snapshot(fresh=True), 100, timer=thread_time)
+    print(f'process_discovery_cpu: v2={before:.2f} us new={after:.2f} us ratio={ratio:.3f}')
     block = b'x' * 65536
     def capture(module):
         out = module._Capture(1024 * 1024)

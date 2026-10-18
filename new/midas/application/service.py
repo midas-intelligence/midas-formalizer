@@ -127,7 +127,7 @@ class Application:
         if isinstance(package, Environment):
             if expected_id is not None and package.id != expected_id:
                 raise ValueError('Environment hash changed')
-            package.validate()
+            package.admit()
             return package
         return Environment.restore(package, expected_id=expected_id, toolchain=toolchain)
 
@@ -136,11 +136,13 @@ class Application:
         return preparation.select(self.checker_factory(environment, self.cache), request, **options)
 
     def start(self, directory, *, package, selection, config=Config(), workflow='live',
-              script=(), instructions=(), library=None, library_reader=None, _lineage=None):
+              script=(), instructions=(), library=None, library_reader=None, cancellation=None, _lineage=None):
         environment = self.environment(package)
         checker = self.checker_factory(environment, self.cache)
-        if not isinstance(selection, FrozenSelection):
-            selection = preparation.select(checker, selection)
+        if isinstance(selection, bytes):
+            selection = load_selection(selection, environment.selection_inputs())
+        elif not isinstance(selection, FrozenSelection):
+            selection = preparation.select(checker, selection, cancellation=cancellation)
         if selection.environment_id != environment.id:
             raise ValueError('Selection environment differs from package')
         if workflow != 'supplied' and not config.prover.configured:

@@ -87,6 +87,27 @@ def selected_problem():
 
 
 class EncodingTests(unittest.TestCase):
+    def test_graph_admission_reuses_bytes_without_sharing_mutations_or_limits(self):
+        shared = ['immutable admission']
+        payload = codec.encode([shared, shared])
+        codec._GRAPH_ADMISSIONS.reset()
+        with patch.object(codec, 'encode', wraps=codec.encode) as encode:
+            first = codec.decode(payload)
+            self.assertIs(first[0], first[1])
+            first[0].append('caller mutation')
+            second = codec.decode(payload)
+            self.assertEqual(second, [shared, shared])
+            self.assertIs(second[0], second[1])
+            self.assertIsNot(first[0], second[0])
+            self.assertEqual(encode.call_count, 1)
+            with self.assertRaises(codec.GraphLimit):
+                codec.decode(payload, limit=len(payload)-1)
+        # Duplicate/unused nodes cannot acquire admission, including after retry.
+        bad = codec.MAGIC + b'\x03\x00\x00\x05\x01\x00\x02'
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, 'Noncanonical'):
+                codec.decode(bad)
+
     def test_binary_identity_fixture(self):
         self.assertEqual(codec.encode(FIXTURE['graph_value']).hex(), FIXTURE['graph_hex'])
         value = codec.decode(bytes.fromhex(FIXTURE['graph_hex']))

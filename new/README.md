@@ -356,8 +356,11 @@ nodes = app.nodes('run', limit=100)  # cursor: after=last.node.owner.obligation_
 ```
 
 `package(destination, PackageConfig(...))` prepares a frozen environment;
-`select` returns checked frozen selections. Start accepts
-either a selection request or an existing `FrozenSelection`. The package locator
+`select` returns checked frozen selections. Start accepts a selection request,
+an existing `FrozenSelection`, or saved selection bytes. CLI startup prepares the
+selection and run with one environment handle and checker; passing an admitted
+environment handle reuses its validation. Explicit `Environment.validate()` still
+rechecks package bytes. The package locator
 lives once in the frozen inputs; jobs, contexts and receipts carry the environment
 hash. Source inventories remain behind an explicit source-reader capability.
 
@@ -529,8 +532,17 @@ different files, symlinks, extra directories and publication races are rejected.
 Cancellation removes only private staging. Successful publication can then be
 recorded by the application/controller.
 
-Bundles contain `src/` Lean sources, `lean-toolchain`, `request.bin`, `audit.bin` and
-`manifest.bin`. File metadata and requests use the binary codec; source is never
+Bundles contain `src/` Lean sources, `lean-toolchain`, `inventory.bin`, `request.bin`,
+`audit.bin` and `manifest.bin`. Integration, verification and build evidence refer
+to the same module inventory artifact instead of embedding its table in each
+request or receipt. The inventory is a frozen input and travels with the bundle;
+every read verifies its hash and length. `Library.decode()` and `load_inventory()`
+return shared tuples of frozen module records: source/asset references are typed,
+and options and compiled hashes are tuples. The bounded 32 MiB inventory cache
+accounts for both input bytes and decoded records. A cache hit skips decoding,
+schema validation and canonical re-encoding; the first admission still performs
+all three checks. General-purpose binary decoding still returns detached mutable
+graphs. File metadata and requests use the binary codec; source is never
 hex-encoded or passed through JSON. Only environment/toolchain hashes cross these
 boundaries. Generated proof names have fixed namespace depth. `read_bundle` checks
 the exact inventory, and `Export.prepare_recheck` prepares a fresh checker audit
@@ -538,11 +550,21 @@ from the bundle's files using any admitted environment with the same toolchain
 hash. This needs no original project, compiled library or run database and grants
 no authority to mutate the original run.
 
+On the saved 8,967-module Morley inventory (4,326,109 bytes), seven alternating
+samples on 2026-10-18 reduced repeated verified inventory loading from **161.74 ms
+to 3.63 ms CPU** (44.5×). This benchmark includes fresh byte copies and hash/length
+verification, but no disk I/O or Lean execution. The retained inventory uses
+**14.6 MiB**, and first admission costs about **0.62 seconds**, versus **0.51 seconds**
+before caching decoded records. The saving pays for that initial cost on the
+second lookup. **80 relevant non-Lean tests passed**, covering immutable records,
+cache bounds, corrupted inventory files, export/recheck and application consumers.
+
 Validation (from `new/`):
 
 ```sh
 python3 -B -m unittest tests.test_export -v
 python3 -B -m tests.benchmark_export
+python3 -B -m tests.benchmark_inventory # Optional argument: a saved library.bin
 # Requires the Lean permission specified by root AGENTS.md:
 python3 -B -m tests.check_export_lean /path/to/lean/bin/lean
 ```
@@ -1399,6 +1421,13 @@ projection budget before calling JSON; loading checks bytes and a depth limit of
 before parsing. Callers cannot raise the byte cap. Generic JSON normalization and
 JSON graph/embedded-evidence fallbacks have been removed.
 
+Binary graph canonical validation and compiler request validation reuse successful
+admissions of identical immutable bytes in bounded process-local caches. Module
+inventory validation uses the same approach. Decoding still returns a private
+mutable graph and enforces the caller's size limit; artifact reads and reservation,
+environment and dependency bindings are checked on every use. Caches retain only
+bytes and admission flags, never decoded graphs or environment objects.
+
 Context namespace hashes process the source scope once and each definition once,
 using length-prefixed UTF-8 fields. Earlier prefix hashes stay stable when later
 definitions are appended. Review hashes likewise process raw review and interface
@@ -1751,6 +1780,19 @@ and **1.002×** for launching/monitoring a Python child that emits 64 KiB. These
 small differences indicate comparable supervisor performance; they do not measure
 end-to-end formalization or compiler import-cache speed.
 
+Worker profiling follow-up on 2026-10-18 optimized the repeated `/proc` discovery
+scan: directory enumeration uses `os.scandir`, and process identities use one
+bounded `os.read` without allocating a Python file object, parsing only through
+the start-time field. Each descriptor closes immediately, including on failed
+reads; descriptors are not cached across scans. The 20 ms
+reuse limit, fresh scans, pidfd identity checks and memory sampling are unchanged.
+Seven alternating benchmark samples measured **2.38 ms CPU per fresh scan versus
+5.23 ms for v2**, **0.999×** v2 wall time for 1 MiB capture, and **0.887×** for
+a fresh Python child. Against the earlier unbuffered-file implementation, the
+raw read reduced fresh-scan CPU from **2.90 to 2.35 ms** (18.8%). All **45
+executor/domain execution tests** passed, including malformed process records,
+non-UTF-8 process names and descriptor cleanup on read failure.
+
 ## Environment
 
 Eight implementation modules plus `__init__.py` consolidate the environment-owned
@@ -1827,6 +1869,17 @@ toolchain admissions are bounded, process-local and keyed by location, exact
 toolchain inventory and policy. `validate(fresh=True)` repeats admission;
 dependency source replay requires content admission before and after execution.
 File digest reuse requires identical device/inode/mode/size/mtime/ctime stamps.
+The process-local LRU retains at most **262,144** entries, containing only these
+stamps and digest strings. The previous 32,768-entry limit caused repeated full
+scans of the Morley environment to evict almost every digest before reuse.
+With approximately 171,000 entries retained, a repeated full validation took
+**5.42 CPU seconds versus 13.31** with the previous limit, using identical content
+and metadata checks. The fixture's retained cache has a conservative size estimate
+of **74 MiB**; the cache contains no file contents. All **43 environment tests**
+passed, including eviction, reset, same-size changes and replacement with a
+preserved modification time. Root validation retains its second metadata pass:
+per-file checks alone cannot detect an earlier file changing while a later file
+is read. That mutation window has a regression test.
 Caches and service admission reset across forks.
 
 An environment service owns stable roots for its lifetime, matching v2's
@@ -1834,6 +1887,25 @@ An environment service owns stable roots for its lifetime, matching v2's
 explicit `validate()` always rechecks package contents. `selection_inputs()`
 returns only the environment hash and authorized source hashes/sizes to domain.
 Manifests, installation paths and package inventories stay with environment.
+
+Independent export verification validates the environment before rebuilding and
+after the final audit. The intermediate build does not publish admitted proof
+evidence, so it no longer repeats full environment validation between those
+steps. The checker owns this complete boundary for both source and compiled
+libraries; the rebuild helper checks generated files within it. Focused checker
+and export tests reject frozen-input changes before rebuilding, during rebuilding
+and during the final audit, while confirming only two complete validations.
+
+The authorized Morley replay on 2026-10-18 consumed all 27 saved model responses
+and matched all 85 original operation outcomes, finishing with verified export.
+Against the preceding profiled replay, wall time fell from **316.55 to 280.44
+seconds**, worker CPU from **83.25 to 48.36 seconds**, and export-verification wall
+time from **86.01 to 57.02 seconds**. Export validation used **14.41 CPU seconds**
+instead of 42.94, and digest misses fell from 514,076 to 17,925. Process-discovery
+CPU fell from **33.90 to 28.04 seconds**. These single-run comparisons include
+selected-function timing overhead and exclude model API latency. Both use the
+same direct-API driver; its duplicate startup restoration is already avoided by
+the ordinary CLI's shared admitted environment handle.
 
 `materialize()` accepts exact `AuthorizedInput` records, copies verified bytes into
 a new private directory, and rejects path conflicts or frozen-module shadowing,
@@ -1927,7 +1999,7 @@ python3 -B -m tests.check_mathlib_options_lean /absolute/path/to/toolchain/bin/l
 
 ## Checker
 
-Six implementation modules plus `__init__.py` separate compiler preparation,
+Eight implementation modules plus `__init__.py` separate compiler preparation,
 execution and evidence admission:
 
 | Module | Responsibility |
@@ -1937,6 +2009,8 @@ execution and evidence admission:
 | `runtime.py` | Exact installed resource hashes, isolated compilation, atomic private runtime cache and explicit fresh/retained recipes |
 | `inspection.py` | Binary Lean declaration inventories and frozen selection construction |
 | `proofs.py` | Rendering admitted earlier definition proofs into their original source scopes |
+| `native.py` | Raw request attachments and a flat, hash-bound compiled-declaration cache |
+| `rebuild.py` | Independent dependency rebuilding and generated-file validation |
 | `service.py` | One executor callback and staging path, cumulative process limits, probe progress and trusted receipt admission |
 
 These replace the checker-owned portions of `check_protocol`, `checker_runtime`,
@@ -2005,6 +2079,36 @@ Conditional assumptions remain explicit and cannot become a direct proof.
 Closed definition dependencies require matching admitted proofs from the same
 joint submission, and are rendered in a flat, explicit dependency order.
 
+Compiled declarations travel as raw attachments in the request file. Only the
+fresh or forked checker child materializes them, outside the import search path;
+the import parent reads the packet header and retains only imported environments.
+The producer and immediate replay therefore share the same import parent without
+loosening the executor's immutable-dependency compatibility checks.
+
+Successful proof and assembly jobs populate a flat `declarations` directory in
+the checker cache. Keys bind the environment/runtime hashes, source prefix,
+logical path, offset, assumptions, imports, declaration source/signature and
+dependency keys. Renaming a normalized root for assembly preserves reuse. Cache
+files contain a raw checksum and compiled bytes, published atomically; missing,
+corrupt or oversized entries are rebuilt from durable source. Every cache hit
+still passes declaration validation, axiom auditing and independent kernel replay.
+Independent integration/export source audits continue to elaborate their source.
+
+Validation on 2026-10-18: 39 focused Python checker/cache/export tests passed,
+along with the existing real Lean checker checks and six new native-reuse
+regressions. The latter verify import-parent identity across producer/replay,
+cached assembly without tactic execution, corruption recovery, reuse after
+rebuilding, malformed-native rejection and a healthy request after rejection.
+A Morley saved-action replay started with an empty declaration cache and prepared
+checker binaries. All 85 operation outcomes matched the source run, all 27 saved
+model outputs were consumed, and it finished `export_verified` with exit 0.
+Median immediate kernel replay fell from 4.103 to 0.317 seconds; assembly's Lean
+phase fell from 47.702 to 22.058 seconds, reusing two of six declarations. Total
+replay wall time fell from 280.441 to 234.351 seconds (16.4%). These are single-run
+comparisons with the prior v2.1 replay, not statistical or v2 throughput claims.
+Timings and cache/import-parent counters are retained in
+`.local/morley-native-replay-20261018/` at the repository root.
+
 `admit_receipt` requires the controller/storage `ReceiptVerifier` capability. It
 checks the seal callback, original invocation, saved result bytes, request hash,
 runtime hash, staged artifacts, phase order, diagnostic accounting, signature and
@@ -2030,8 +2134,9 @@ Compiler input/evidence graphs are capped at **64 MiB**, authored proof/statemen
 terms at **1 MiB**, native cache blobs at **8 MiB** per batch, and result metadata
 at **64 KiB**. Native blobs use memory views until materialization. Signature reuse
 retains only compact immutable bytes in a bounded, fork-safe cache. Runtime files
-are inventoried and hash-checked before use. Source/native scratch files remain
-in private executor workspaces for storage's later publication and cleanup.
+are inventoried and hash-checked before use. Source inputs remain in private
+executor workspaces for storage cleanup. Native request files live in child
+scratch space, which the retained runtime clears after every request.
 
 Validation on 2026-10-15: **13 Python checker tests passed**, covering exact
 requests/dependencies, malformed binary frames, source inventory admission,
@@ -2052,9 +2157,11 @@ across the cases of a probe batch without fallback.
 
 ```sh
 python3 -B -m unittest tests.test_checker -v
+python3 -B -m unittest tests.test_checker_native -v
 python3 -B -m tests.benchmark_checker
 # Requires permission for Lean/bubblewrap:
 python3 -B -m tests.check_checker_lean /absolute/path/to/toolchain/bin/lean
+python3 -B -m tests.check_checker_lean /absolute/path/to/toolchain/bin/lean --native-only
 ```
 
 

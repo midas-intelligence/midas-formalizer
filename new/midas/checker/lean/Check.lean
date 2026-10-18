@@ -551,6 +551,7 @@ def elaborateProofSource (root : Name) (levels : List Name) (expected : Expr)
 -- Native artifacts contain only declarations, never import/extension state.
 initialize nativeRegions : IO.Ref (Array CompactedRegion) ← IO.mkRef #[]
 initialize nativeOutputs : IO.Ref (Array (String × ByteArray)) ← IO.mkRef #[]
+initialize nativeInputs : IO.Ref (Std.HashMap String System.FilePath) ← IO.mkRef {}
 
 def cacheModuleName (id : String) : Name := .str .anonymous ("MidasDecl_" ++ id)
 
@@ -575,6 +576,7 @@ def saveNative (id : String) (before : Environment) (root : Name) : CommandElabM
   -- Disposable cache output must not turn a checked proof into a resource
   -- failure. Bound the entire batch, independently of proof/dependency count.
   let outputs ← nativeOutputs.get
+  if outputs.any (fun item => item.1 == id) then return
   let used := outputs.foldl (fun total (_, bytes) => total + bytes.size) 0
   if outputs.size >= 256 || used >= 8388608 then return
   let constants := ((← getEnv).constants.map₂.toList.filter
@@ -654,7 +656,7 @@ def replayNativeDeclarations (spec : Json) (assumptions : List Name := []) : Com
     let base ← getEnv
     let ty ← checked (readExpr (← checked (field sig "target")))
     let us ← checked ((← checked ((← checked (field sig "universes")).getArr?)).toList.mapM readName)
-    let file ← try pure (some (← findOLean (cacheModuleName id))) catch _ => pure none
+    let file := (← nativeInputs.get)[id]?
     if let some file := file then
       replayNative file n helperBase
     else
@@ -881,7 +883,9 @@ def check (packet : Json) (original : Environment) : CommandElabM Json := do
       unless (← checked (str cert "format")) == "midas-source-proof-v1" do
         throwError "replay requires source proof"
       if let .ok file := packet.getObjValAs? String "native_proof" then
-        replayNative (← findOLean (.str .anonymous file)) root proofBefore
+        let some path := (← nativeInputs.get)[file]?
+          | throwError "missing native proof input"
+        replayNative path root proofBefore
       else if let .ok spec := packet.getObjVal? "native_declarations" then
         replayNativeDeclarations spec assumptionNames
       else
@@ -1061,11 +1065,50 @@ def auditSource (packet : Json) (before : Environment) : CommandElabM Json := do
   return Json.mkObj [("format", toJson (if allowSorry then "midas-source-audit-sorry-v1" else "midas-source-audit-v1")),
     ("request", ← checked (field packet "request")), ("targets", toJson targets)]
 
+-- Only the child materializes raw declarations. The import parent decodes the
+-- packet header but never imports or retains request-owned compiled data.
+def readPacket (path : System.FilePath) (materialize : Bool := false) : IO Json := do
+  let bytes ← IO.FS.readBinFile path
+  if bytes.size > 67108864 then throw (IO.userError "request byte limit exceeded")
+  let magic := "MIDAS_REQUEST_V1\n".toUTF8
+  if bytes.extract 0 magic.size != magic then
+    return ← IO.ofExcept (Midas.Binary.decode bytes)
+  if bytes.size < magic.size + 8 then throw (IO.userError "truncated request header")
+  let mut size := 0
+  for i in [:8] do
+    size := size + bytes[magic.size + i]!.toNat * 256^i
+  let start := magic.size + 8
+  if size > bytes.size - start then throw (IO.userError "truncated request graph")
+  let header ← IO.ofExcept (Midas.Binary.decode (bytes.extract start (start + size)))
+  let packet ← IO.ofExcept (field header "packet")
+  let rows ← IO.ofExcept ((← IO.ofExcept (field header "artifacts")).getArr?)
+  if rows.isEmpty || rows.size > 256 then throw (IO.userError "native input count exceeded")
+  let mut position := start + size
+  let mut total := 0
+  let mut files : Std.HashMap String System.FilePath := {}
+  for row in rows do
+    let id ← IO.ofExcept (str row "id")
+    unless id.length == 64 && id.toList.all (fun c =>
+        ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f')) && !files.contains id do
+      throw (IO.userError "invalid native input identity")
+    let count ← IO.ofExcept (nat row "bytes")
+    total := total + count
+    if count == 0 || total > 8388608 || count > bytes.size - position then
+      throw (IO.userError "native input byte limit exceeded")
+    let file : System.FilePath := "/tmp/MidasDecl_" ++ id ++ ".olean"
+    files := files.insert id file
+    if materialize then IO.FS.writeBinFile file (bytes.extract position (position + count))
+    position := position + count
+  if position != bytes.size then throw (IO.userError "trailing request bytes")
+  if materialize then nativeInputs.set files
+  return packet
+
 end Midas.Check
 
 def main (args : List String) : IO UInt32 := do
   let [packetPath] := args | throw (IO.userError "expected checker packet")
-  let packet ← IO.ofExcept (Midas.Binary.decode (← IO.FS.readBinFile packetPath))
+  Midas.Check.nativeInputs.set {}
+  let packet ← Midas.Check.readPacket packetPath true
   let source ← IO.ofExcept (Midas.Check.str packet "source")
   let logical ← IO.ofExcept (Midas.Check.str packet "logical")
   let offset ← IO.ofExcept (Midas.Check.nat packet "offset")

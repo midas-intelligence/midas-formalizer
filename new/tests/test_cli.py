@@ -53,8 +53,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual([json.loads(line)['type'] for line in text.splitlines()], ['selection', 'target'])
         candidate = self.root/'candidate.bin'
         candidate.write_bytes(fixtures.submission(self.fixture.selected))
-        code, text, error = self.cli('start', self.root/'run', '--package', self.root/'package',
-            '--selection', selection, '--candidates', candidate, '--quiet', '--json')
+        with patch.object(self.app, 'environment', wraps=self.app.environment) as environment:
+            code, text, error = self.cli('start', self.root/'run', '--package', self.root/'package',
+                '--selection', selection, '--candidates', candidate, '--quiet', '--json')
+            environment.assert_called_once()
         self.assertEqual(code, 0, error)
         self.assertEqual(json.loads(text)['outcome'], 'export_verified')
         for command in ('status', 'resume'):
@@ -66,6 +68,28 @@ class CliTests(unittest.TestCase):
         code, text, error = self.cli('verify', self.root/'bundle', '--package', self.root/'package', '--json')
         self.assertEqual(code, 0, error)
         self.assertTrue(json.loads(text)['verified'])
+
+    def test_source_start_reuses_environment_checker_and_cancellation(self):
+        candidate = self.root/'candidate.bin'
+        candidate.write_bytes(fixtures.submission(self.fixture.selected))
+        inspected = []
+        def select(checker, request, *, cancellation):
+            self.assertEqual(request.source, 'Main.lean')
+            self.assertEqual(request.names, ('answer',))
+            self.assertIsInstance(cancellation, threading.Event)
+            inspected.append(checker)
+            return self.fixture.selected
+        with patch.object(self.app, 'environment', wraps=self.app.environment) as environment, \
+             patch.object(self.app, 'checker_factory', wraps=self.app.checker_factory) as checker, \
+             patch('midas.application.preparation.select', side_effect=select) as selection, \
+             patch.object(self.app, '_build', wraps=self.app._build) as build:
+            code, _, error = self.cli('start', self.root/'run', '--package', self.root/'package',
+                '--source', 'Main.lean', '--target', 'answer', '--candidates', candidate, '--quiet')
+            self.assertEqual(code, 0, error)
+            environment.assert_called_once()
+            checker.assert_called_once()
+            selection.assert_called_once()
+            self.assertIs(build.call_args.args[2], inspected[0])
 
     def test_submit_fork_and_explicit_partial_export(self):
         with self.fixture.start():

@@ -85,6 +85,47 @@ class InventoryTests(unittest.TestCase):
             write(self.root / 'a', b'b' * 2000000)
             self.assertNotEqual(scan(self.root)[0], first)
 
+    def test_digest_eviction_reset_and_replacement_with_preserved_mtime(self):
+        from midas.environment import inventory as cache
+        paths = [write(self.root / name, name.encode()) for name in ('a', 'b', 'c')]
+        with patch.object(cache, 'DIGEST_ENTRIES', 2):
+            for path in paths[:2]:
+                cache.file_hash(path)
+            with patch.object(cache.os, 'read', side_effect=AssertionError('cache reread')):
+                self.assertEqual(cache.file_hash(paths[0]), sha256(b'a').hexdigest())
+            cache.file_hash(paths[2])
+            self.assertEqual(len(cache._digests), 2)
+            with patch.object(cache.os, 'read', wraps=os.read) as reads:
+                self.assertEqual(cache.file_hash(paths[1]), sha256(b'b').hexdigest())
+                self.assertTrue(reads.called)  # The least recently used file was evicted.
+        before = paths[1].stat()
+        replacement = write(self.root / 'replacement', b'x')
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        replacement.replace(paths[1])
+        self.assertEqual(cache.file_hash(paths[1]), sha256(b'x').hexdigest())
+        lock = cache._lock
+        reset_cache()
+        self.assertFalse(cache._digests)
+        self.assertIsNot(cache._lock, lock)
+
+    def test_root_validation_detects_earlier_file_changed_during_later_read(self):
+        from midas.environment import inventory as cache
+        from midas.environment.package import _check_root
+        first = write(self.root/'a', b'first')
+        second = write(self.root/'b', b'second')
+        expected, _ = scan(self.root)
+        second_inode = second.stat().st_ino
+        original = cache._digest
+        def change_earlier_file(fd, before, check):
+            if before[1] == second_inode:
+                # The first descriptor has closed. Its own before/after checks
+                # passed, and an in-place write does not change directory mtime.
+                first.write_bytes(b'other')
+            return original(fd, before, check)
+        with patch.object(cache, '_digest', side_effect=change_earlier_file):
+            with self.assertRaisesRegex(EnvironmentError, 'Frozen input differs'):
+                _check_root(self.root, expected)
+
     def test_links_special_files_and_symlink_parents(self):
         write(self.root / 'a')
         (self.root / 'alias').symlink_to('a')
@@ -256,6 +297,31 @@ class EnvironmentTests(unittest.TestCase):
             self.env.validate(fresh=True)
         changed.unlink()
         self.env.validate(hash_toolchain=True)
+
+    def test_application_reuses_admitted_handles_but_preserves_validation(self):
+        from midas.application import Application
+        app = Application(self.root/'cache')
+        with patch.dict(os.environ, {'MIDAS_VERIFY_TOOLCHAIN': '0'}):
+            with patch('midas.environment.package.scan', wraps=scan) as scanning:
+                self.assertIs(app.environment(self.env), self.env)
+                self.assertTrue(scanning.called)
+                scanning.reset_mock()
+                self.assertIs(app.environment(self.env, expected_id=self.env.id), self.env)
+                scanning.assert_not_called()
+                with self.assertRaisesRegex(ValueError, 'hash changed'):
+                    app.environment(self.env, expected_id='env_'+'f'*64)
+            with patch.dict(os.environ, {'MIDAS_VERIFY_TOOLCHAIN': '1'}):
+                with patch('midas.environment.package.scan', wraps=scan) as scanning:
+                    app.environment(self.env)
+                    self.assertTrue(any(call.args[0] == self.env.toolchain and call.kwargs['hash_content']
+                                        for call in scanning.call_args_list))
+        write(self.env.directory/'project/Main.lean', b'changed')
+        with self.assertRaises(EnvironmentError):
+            self.env.validate()
+        with self.assertRaises(EnvironmentError):
+            self.restore()
+        with patch('midas.environment.package.os.getpid', return_value=-1), self.assertRaises(EnvironmentError):
+            app.environment(self.env)
 
     def test_compiled_module_shadowing_and_duplicate_search(self):
         write(self.env.directory / 'project/Init.olean', b'init')

@@ -1,11 +1,12 @@
 """Fresh source builds for independent audits, under the caller's reservation."""
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 from ..domain import ArtifactRef
 from ..domain import encoding as codec
+from ..domain.cache import Memo
 from ..domain.records import identifier
 from ..environment import file_hash, scan
 from ..environment.inventory import relative
@@ -16,50 +17,79 @@ from ..source.context import module_name
 from .requests import read
 
 SUFFIXES = ('.olean', '.olean.private', '.olean.server', '.ilean', '.ir', '.ir.sig')
+_INVENTORIES = Memo(max_entries=32, max_bytes=32 * 1024**2)
+
+
+@dataclass(frozen=True, slots=True)
+class Module:
+    """Validated inventory row; all nested values are immutable."""
+    name: str
+    package: str | None
+    source: ArtifactRef | None
+    assets: tuple[tuple[str, ArtifactRef], ...]
+    options: tuple[tuple[str, str | bool | int], ...]
+    compiled: tuple[tuple[str, str], ...]
+
+
+def inventory(payload):
+    """Decode and validate once, retaining bounded immutable rows for reuse."""
+    if type(payload) is not bytes:
+        raise ValueError('Expected binary module inventory')
+    return _INVENTORIES.get(b'', payload, lambda: modules(codec.decode(payload)))
+
+
+def load_inventory(packet, reader):
+    reference = ArtifactRef.from_dict(packet['inventory'])
+    # Always read through the capability and verify the content, even on a hit.
+    return inventory(read(reader, reference))
 
 
 def modules(value):
     if type(value) is not list or len(value) > 10000:
         raise ValueError('Invalid audit module inventory')
     seen = set()
+    result = []
     for row in value:
         codec.fields(row, ('name', 'package', 'source', 'assets', 'options', 'compiled'))
         module_name(row['name'])
         if row['package'] is not None:
             label(row['package'])
-        saved_options(row['options'])
+        options = saved_options(row['options'])
         if row['name'].casefold() in seen or row['name'] == 'MidasCheck':
             raise ValueError('Duplicate or private audit module')
         seen.add(row['name'].casefold())
+        source = None
         if row['source'] is not None:
-            ArtifactRef.from_dict(row['source'])
+            source = ArtifactRef.from_dict(row['source'])
         elif row['assets'] or row['options']:
             raise ValueError('Trusted compiled modules cannot carry source assets/options')
         if type(row['assets']) is not list or len(row['assets']) > 256:
             raise ValueError('Invalid source assets')
         paths = set()
+        assets = []
         for asset in row['assets']:
             if type(asset) is not list or len(asset) != 2 or relative(asset[0]) in paths:
                 raise ValueError('Invalid source asset path')
             paths.add(asset[0])
-            ArtifactRef.from_dict(asset[1])
+            assets.append((asset[0], ArtifactRef.from_dict(asset[1])))
         compiled = row['compiled']
         if type(compiled) is not dict or '.olean' not in compiled or set(compiled) - set(SUFFIXES):
             raise ValueError('Invalid audit compiled hashes')
         for digest in compiled.values():
             identifier(digest, '')
-    module_files(value)
-    return value
+        result.append(Module(row['name'], row['package'], source, tuple(assets), options,
+                             tuple(sorted(compiled.items()))))
+    module_files(result)
+    return tuple(result)
 
 
 def module_files(rows):
     """Flat source/asset map shared by workspace capture and independent exports."""
-    result = {row['name'].replace('.', '/') + '.lean': ArtifactRef.from_dict(row['source'])
-              for row in rows if row['source'] is not None}
-    sources = {row['name'].replace('.', '/') + '.lean' for row in rows}
+    result = {row.name.replace('.', '/') + '.lean': row.source
+              for row in rows if row.source is not None}
+    sources = {row.name.replace('.', '/') + '.lean' for row in rows}
     for row in rows:
-        for path, value in row['assets']:
-            ref = ArtifactRef.from_dict(value)
+        for path, ref in row.assets:
             if path in sources or path in result and result[path] != ref:
                 raise ValueError('Conflicting source asset: ' + path)
             result[path] = ref
@@ -70,16 +100,16 @@ def trusted_roots(environment, rows):
     """Resolve explicitly trusted objects against the one frozen environment."""
     roots = set()
     for row in rows:
-        if row['source'] is not None:
+        if row.source is not None:
             continue
-        path = environment.manifest.modules.get(row['name'], '')
+        path = environment.manifest.modules.get(row.name, '')
         root = path.split('/')[0]
         if root not in environment.roots or root in ('project', 'toolchain', 'runtime', 'checker', 'inputs', 'channel', 'build'):
             raise ValueError('Trusted compiled module must belong to a dependency root')
         expected = {suffix: item.sha256 for suffix in SUFFIXES
                     if (item := environment.manifest.inventory.by_path.get(path[:-6] + suffix)) is not None}
-        if row['compiled'] != expected:
-            raise ValueError('Trusted compiled dependency differs from frozen artifacts: ' + row['name'])
+        if dict(row.compiled) != expected:
+            raise ValueError('Trusted compiled dependency differs from frozen artifacts: ' + row.name)
         roots.add(root)
     return tuple(sorted(roots))
 
@@ -104,14 +134,15 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
 
     The aggregate keeps one bounded phase in the receipt even for 10,000 modules.
     Every subprocess consumes the executor context's cumulative resource budget.
+    The caller validates the environment around the complete rebuild/audit;
+    this intermediate build result alone is not proof admission.
     """
-    rows = modules(packet['modules'])
+    rows = load_inventory(packet, context.reader)
     trusted = trusted_roots(environment, rows)
-    source_rows = [row for row in rows if row['source'] is not None]
+    source_rows = [row for row in rows if row.source is not None]
     settings = environment.manifest.settings
     if settings.plugins or settings.options or settings.variables:
         raise ValueError('Independent source audit does not admit compiler overrides/plugins')
-    environment.validate(hash_toolchain=True, fresh=True, check=context.check)
     workspace = context.workspace / ('rebuild-' + str(uuid4()))
     workspace.mkdir()
     source, library = workspace / 'src', workspace / 'lib'
@@ -124,7 +155,7 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
         raise ValueError('Audit entry must be Lean source')
     entry_name = entry[:-5].replace('/', '.')
     module_name(entry_name)
-    if entry_name in {row['name'] for row in rows}:
+    if entry_name in {row.name for row in rows}:
         raise ValueError('Audit entry shadows a dependency')
     stdout, stderr, elapsed, rss, anonymous = [], [], 0, 0, 0
     observed = [0, 0]
@@ -135,7 +166,7 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
     files = module_files(rows)
     if entry in files:
         raise ValueError('Source asset shadows audit entry')
-    module_paths = {row['name'].replace('.', '/') + '.lean' for row in rows}
+    module_paths = {row.name.replace('.', '/') + '.lean' for row in rows}
     for path, ref in files.items():
         if path not in module_paths:
             total += ref.byte_count
@@ -174,31 +205,31 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
         return True
 
     for row in source_rows:
-        path = row['name'].replace('.', '/') + '.lean'
+        path = row.name.replace('.', '/') + '.lean'
         target = source / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        ref = ArtifactRef.from_dict(row['source'])
+        ref = row.source
         total += ref.byte_count
         if total > maximum:
             raise ValueError('Rebuilt sources exceed export byte limit')
         target.write_bytes(read(context.reader, ref))
-        if not run(path, row['name'], row['package'], saved_options(row['options'])):
+        if not run(path, row.name, row.package, row.options):
             break
-        stem = library / row['name'].replace('.', '/')
+        stem = library / row.name.replace('.', '/')
         present = {suffix for suffix in SUFFIXES if Path(str(stem) + suffix).exists()}
-        if present != set(row['compiled']) or any(file_hash(Path(str(stem) + suffix),
-                check=context.check) != digest for suffix, digest in row['compiled'].items()):
-            raise ValueError('Rebuilt dependency differs from its admitted compiled interface: ' + row['name'])
+        if present != {suffix for suffix, _ in row.compiled} or any(file_hash(Path(str(stem) + suffix),
+                check=context.check) != digest for suffix, digest in row.compiled):
+            raise ValueError('Rebuilt dependency differs from its admitted compiled interface: ' + row.name)
     else:
         # The audit elaborates and kernel-replays the complete entry itself.
         # Recheck all dependency bytes after the last writable compiler process;
         # a later module must not change an earlier, already checked output.
         for row in source_rows:
-            stem = row['name'].replace('.', '/')
-            ref = ArtifactRef.from_dict(row['source'])
+            stem = row.name.replace('.', '/')
+            ref = row.source
             if file_hash(source / (stem + '.lean'), maximum=ref.byte_count, check=context.check) != ref.sha256:
                 raise ValueError('Rebuilt source changed during compilation')
-            for suffix, digest in row['compiled'].items():
+            for suffix, digest in row.compiled:
                 if file_hash(library / (stem + suffix), check=context.check) != digest:
                     raise ValueError('Rebuilt dependency changed during compilation')
         for path, ref in files.items():
@@ -206,22 +237,21 @@ def rebuild(environment, packet, context, *, maximum=16*1024**3):
                 raise ValueError('Rebuilt source asset changed during compilation')
         inventory, _ = scan(workspace, maximum=maximum, check=context.check)
         expected = {'src/' + path for path in files}
-        expected.update('lib/' + row['name'].replace('.', '/') + suffix for row in source_rows for suffix in row['compiled'])
+        expected.update('lib/' + row.name.replace('.', '/') + suffix for row in source_rows for suffix, _ in row.compiled)
         if set(inventory.by_path) != expected:
             raise ValueError('Rebuild produced unrecorded files')
-    evidence = codec.encode({'format': 'midas-source-build-v1', 'modules': rows,
+    evidence = codec.encode({'format': 'midas-source-build-v2', 'inventory': packet['inventory'],
         'logical': entry, 'source_sha256': sha256(packet['source'].encode()).hexdigest()})
     out, err = b''.join(stdout), b''.join(stderr)
     summary = replace(last, elapsed_ms=elapsed, peak_rss_bytes=rss, peak_anonymous_bytes=anonymous,
         stdout=Diagnostic(out, observed[0], truncated[0]),
         stderr=Diagnostic(err, observed[1], truncated[1]),
         evidence=Diagnostic(evidence, len(evidence), False))
-    environment.validate(hash_toolchain=True, fresh=True, check=context.check)
     return workspace, summary
 
 
 def admit_build(value, packet):
-    expected = {'format': 'midas-source-build-v1', 'modules': packet['modules'],
+    expected = {'format': 'midas-source-build-v2', 'inventory': packet['inventory'],
                 'logical': packet['logical'], 'source_sha256': sha256(packet['source'].encode()).hexdigest()}
     if codec.encode(value) != codec.encode(expected):
         raise ValueError('Independent build receipt differs from requested files')

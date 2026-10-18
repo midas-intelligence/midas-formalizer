@@ -54,13 +54,14 @@ def start(argv, *, application_factory, stdout, stderr):
     # A small adapter supplies the already prepared library to the existing start workflow.
     def factory(*args, **kwargs):
         app = application_factory(*args, **kwargs)
-        bound = workspace.load(app, directory)
+        environment = app.environment(metadata['package'], expected_id=metadata['environment'])
+        bound = workspace.load(app, directory, package=environment)
         class BoundApplication:
             def __getattr__(self, name):
                 return getattr(app, name)
 
             def start(self, *values, **settings):
-                settings.update(package=bound.package, selection=bound.selection,
+                settings.update(package=environment, selection=bound.selection,
                                 library=bound.library, library_reader=bound.library_reader)
                 return app.start(*values, **settings)
         return BoundApplication()

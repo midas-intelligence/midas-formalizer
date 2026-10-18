@@ -393,7 +393,8 @@ class Environment:
         self._admitted = (os.getpid(), content)
         return self.id
 
-    def _admit(self, check=lambda: None):
+    def admit(self, check=lambda: None):
+        """Validate once per handle/process, upgrading toolchain policy if needed."""
         # A service handle owns stable frozen roots for its lifetime, like v2's
         # EnvironmentVerifier. Explicit validate() always rechecks package bytes.
         policy = _hash_policy(None)
@@ -422,7 +423,7 @@ class Environment:
                 raise EnvironmentError('Generated input shadows a frozen module: ' + module)
         workspace = absolute(workspace)
         self._private(workspace)
-        self._admit(check)
+        self.admit(check)
         workspace.mkdir()  # Exclusively owned new workspace; never overlay existing files.
         try:
             files = []
@@ -443,7 +444,7 @@ class Environment:
 
     def launch(self, arguments, *, inputs=None, build=None, executable=None, max_heartbeat=None, max_rec_depth=None):
         """Lower admitted files to executor recipes; no compiler execution or scheduling."""
-        self._admit()
+        self.admit()
         spec = self.manifest.settings
         executable = executable or spec.lean_executable
         if max_heartbeat is not None:

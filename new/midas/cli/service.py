@@ -3,7 +3,7 @@ from contextlib import nullcontext
 import os
 import sys
 
-from ..domain import SelectionRequest, encode_selection, load_selection
+from ..domain import SelectionRequest, encode_selection
 from ..status import record, terminal, write_json
 from ..status.render import safe, write_details, write_nodes
 from .arguments import parser
@@ -22,15 +22,15 @@ def request(args):
     return SelectionRequest(args.source, tuple(args.target or ()), bool(args.all_unfinished or not args.target))
 
 
-def selected(app, args, cancellation):
+def selected(args):
     from ..application import files
     if args.selection is not None:
         if args.target or args.all_unfinished:
             raise ValueError('--selection already contains its target scope')
-        return load_selection(files.read(args.selection, 64*1024**2), app.environment(args.package).selection_inputs())
+        return files.read(args.selection, 64*1024**2)
     if not args.target and not args.all_unfinished:
         raise ValueError('Starting from --source requires --target or --all-unfinished')
-    return app.select(args.package, request(args), cancellation=cancellation)
+    return request(args)
 
 
 def instructions(values):
@@ -128,8 +128,9 @@ def execute(args, out, err, signals, application_factory):
                 raise ValueError('--candidates requires the supplied workflow')
             mode = 'supplied'
         run = app.start(args.directory, package=args.package,
-            selection=selected(app, args, signals.cancelled), config=files.config(args.config),
-            workflow=mode or 'live', script=script or (), instructions=instructions(args.instructions))
+            selection=selected(args), config=files.config(args.config),
+            workflow=mode or 'live', script=script or (), instructions=instructions(args.instructions),
+            cancellation=signals.cancelled)
     elif name == 'fork':
         with app.fork(args.directory, args.output, config=files.config(args.config) if args.config else None,
                       package=args.package, workflow=mode, script=script) as run:

@@ -146,15 +146,15 @@ def main():
             command('prepare', root/'workspace', '--package', root/'package', '--verification-config', config_path)
         bound = workspace.load(app, root/'workspace')
         assert bound.library is not None
-        rows = {row['name']: row for row in bound.library.decode()}
-        assert rows['Fixture']['source'] is None
-        assert rows['Submission.Helper']['source'] is not None
+        rows = {row.name: row for row in bound.library.decode()}
+        assert rows['Fixture'].source is None
+        assert rows['Submission.Helper'].source is not None
         assert all(path.is_file() and len(path.stem) == 64 for path in (root/'workspace/library').iterdir())
         print('archive, exact selection and compiled dependency preparation without replay passed', flush=True)
         command('prepare', root/'replayed-workspace', '--package', root/'package',
                 '--verification-config', config_path, '--replay-dependencies')
         replayed = workspace.load(app, root/'replayed-workspace')
-        assert all(row['source'] is not None for row in replayed.library.decode())
+        assert all(row.source is not None for row in replayed.library.decode())
         print('explicit source replay mode passed', flush=True)
         candidate = encode_submission(dict(format='midas-scoped-candidates', submission_id=str(uuid4()),
             selection_id=bound.selection.id, definitions=[], entries=[dict(key='parent',

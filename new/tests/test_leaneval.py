@@ -172,13 +172,14 @@ class Contracts(unittest.TestCase):
     def test_bundle_rejects_partial_exports_or_a_different_benchmark(self):
         bound = NS(environment_id='e', selection=NS(id='s'), library=None)
         values = dict(environment_id='e', selection_id='s', allow_sorry=False,
-                      decode=lambda: {'packet': {'logical': 'Submission.lean', 'modules': []}})
+                      decode=lambda: {'packet': {'logical': 'Submission.lean',
+                          'inventory': service.reference(codec.encode([])).to_dict()}})
         service.check_bundle(NS(**values), bound)
         for diff in (dict(environment_id='other'), dict(selection_id='other'), dict(allow_sorry=True),
                      dict(decode=lambda: {'packet': {'logical': 'Main.lean'}})):
             with self.assertRaises(ValueError):
                 service.check_bundle(NS(**dict(values, **diff)), bound)
-        bound.library = NS(decode=lambda: [{'name': 'Trusted'}])
+        bound.library = NS(payload=codec.encode([{'name': 'Trusted'}]))
         with self.assertRaisesRegex(ValueError, 'dependency trust'):
             service.check_bundle(NS(**values), bound)
 
@@ -197,17 +198,20 @@ class Contracts(unittest.TestCase):
         bound = NS(package=self.root/'package', selection='selected', library='library', library_reader='reader')
         work = self.root/'work'
         work.mkdir()
-        (work/'workspace.bin').write_bytes(codec.encode(dict(package=str(bound.package))))
+        (work/'workspace.bin').write_bytes(codec.encode(dict(package=str(bound.package), environment='env')))
         received = []
-        app = NS(start=lambda *a, **kw: received.append(kw))
+        environment = NS(directory=bound.package, id='env')
+        app = NS(start=lambda *a, **kw: received.append(kw), environment=lambda *a, **kw: environment)
         def ordinary(argv, **kwargs):
             adapter = kwargs['application_factory'](self.root/'cache')
             adapter.start('run', package='placeholder', selection='placeholder', workflow='supplied')
             self.assertIn(str(bound.package), argv)
             self.assertIn(str(work/'selection.bin'), argv)
             return 0
-        with patch.object(cli.workspace, 'load', return_value=bound), patch.object(cli, 'midas_main', side_effect=ordinary):
+        with patch.object(cli.workspace, 'load', return_value=bound) as load, patch.object(cli, 'midas_main', side_effect=ordinary):
             self.assertEqual(cli.main(['start', 'run', '--workspace', str(work)], application_factory=lambda *a, **kw: app), 0)
+            self.assertIs(load.call_args.kwargs['package'], environment)
+        self.assertIs(received[0]['package'], environment)
         self.assertEqual(received[0]['library'], 'library')
         self.assertEqual(received[0]['workflow'], 'supplied')
         for flag in ('--package', '--source', '--selection', '--target'):

@@ -162,22 +162,27 @@ class Export:
             return ref
 
         source_ref = save(source.data)
+        inventory_data = library.payload if library else codec.encode([])
+        inventory_ref = save(inventory_data)
         # Preparation can use separate read/staging capabilities.
         class SourceReader:
             def read_artifact(self, ref, *, max_bytes):
+                if ref == inventory_ref:
+                    return inventory_ref.verify(inventory_data, max_bytes=max_bytes)
                 return source_ref.verify(source.data, max_bytes=max_bytes) if ref == source_ref else read(reader, ref, max_bytes)
         value = self.checker.prepare('audit', selection, owner, source_ref, SourceReader(), allow_sorry=allow_sorry).decode()
         rows = library.decode() if library else []
         value['operation'] = 'integrate'
-        value['packet']['modules'] = rows
+        value['packet']['inventory'] = inventory_ref.to_dict()
         files = [('src/' + selection.selected.request.source, source_ref),
+                 ('inventory.bin', inventory_ref),
                  ('lean-toolchain', save(('leanprover/lean4:v' + settings.version + '\n').encode()))]
         from ..checker.rebuild import module_files
         files.extend(('src/' + path, ref) for path, ref in module_files(rows).items())
         refs = [r.evidence for r in roots] + [n.interface for n in nodes] + [r for _, r in files]
         request = _request(value, _metadata(profile, roots, maximum, environment.toolchain_id, files=sorted(files),
             allow_sorry=allow_sorry, nodes=nodes), refs)
-        self._layout(request.decode(), reader, source=source.data)
+        self._layout(request.decode(), SourceReader(), source=source.data)
         return request
 
     def prepare_verification(self, integration, selection, graph, reader):
@@ -196,22 +201,24 @@ class Export:
         if metadata['toolchain'] != environment.toolchain_id:
             raise ValueError('Export toolchain pin differs')
         files = file_rows(metadata['files'], metadata['maximum'])
-        from ..checker.rebuild import modules, module_files, trusted_roots
-        rows = modules(packet['modules'])
+        from ..checker.rebuild import load_inventory, module_files, trusted_roots
+        rows = load_inventory(packet, reader)
         trusted_roots(environment, rows)
         if metadata['profile'] == 'source' and rows:
             raise ValueError('Source-only profile cannot contain a library')
-        expected = {'src/' + packet['logical'], 'lean-toolchain'}
+        expected = {'src/' + packet['logical'], 'lean-toolchain', 'inventory.bin'}
+        if files.get('inventory.bin') != ArtifactRef.from_dict(packet['inventory']):
+            raise ValueError('Export inventory differs from its audit input')
         for path, ref in module_files(rows).items():
             path = 'src/' + path
             if path in expected or files.get(path) != ref:
                 raise ValueError('Exported dependency source/asset differs from audit input')
             expected.add(path)
         for row in rows:
-            object_path = environment.manifest.modules.get(row['name'])
+            object_path = environment.manifest.modules.get(row.name)
             if object_path is None or object_path.startswith('toolchain/'):
                 raise ValueError('Unadmitted exported dependency')
-            for suffix, digest in row['compiled'].items():
+            for suffix, digest in row.compiled:
                 item = environment.manifest.inventory.by_path.get(object_path[:-6] + suffix)
                 if item is None or item.sha256 != digest:
                     raise ValueError('Exported dependency compiled identity differs')
@@ -239,9 +246,9 @@ class Export:
             raise ValueError('Standalone audit requires the exported toolchain pin')
         files = file_rows(value['export']['files'], value['export']['maximum'])
         packet = value['packet']
-        from ..checker.rebuild import modules, trusted_roots
-        rows = modules(packet['modules'])
-        if any(row['source'] is None for row in rows):
+        from ..checker.rebuild import load_inventory, trusted_roots
+        rows = load_inventory(packet, reader)
+        if any(row.source is None for row in rows):
             if request.environment_id != self.checker.environment.id:
                 raise ValueError('Trusted compiled bundle requires its original frozen environment')
             trusted_roots(self.checker.environment, rows)
@@ -249,7 +256,7 @@ class Export:
         if data.decode() != packet['source']:
             raise ValueError('Standalone source differs from saved verification')
         from ..checker.rebuild import module_files
-        for path, ref in module_files(packet['modules']).items():
+        for path, ref in module_files(rows).items():
             if files.get('src/' + path) != ref:
                 raise ValueError('Standalone module differs from exported files')
         value.pop('export')
@@ -274,7 +281,7 @@ class Export:
                 raise ValueError('Export receipt roots are stale')
             owner = nodes[0].owner if nodes else roots[0].owner
             packet = value['packet']
-            codec.fields(packet, ('source', 'logical', 'offset', 'targets', 'modules',
+            codec.fields(packet, ('source', 'logical', 'offset', 'targets', 'inventory',
                                   *(('allow_sorry',) if request.allow_sorry else ())))
             targets = [{'constant': codec.load_json(target.constant), 'signature': signature(identity)}
                        for target, identity in zip(selection.selected.targets, selection.identities)]

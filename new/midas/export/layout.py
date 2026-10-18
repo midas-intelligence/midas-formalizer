@@ -9,7 +9,7 @@ import tempfile
 from uuid import UUID, uuid5
 
 from ..checker.requests import read
-from ..checker.rebuild import modules as validate_modules
+from ..checker.rebuild import inventory
 from ..domain import ArtifactRef, JobKind
 from ..domain import encoding as codec
 from ..environment import safe_read, scan
@@ -30,10 +30,11 @@ class Library:
     def __post_init__(self):
         from ..domain.records import identifier
         identifier(self.environment_id, 'env_')
-        validate_modules(codec.decode(self.payload))
+        inventory(self.payload)
 
     def decode(self):
-        return codec.decode(self.payload)
+        """Return shared immutable module records admitted from these bytes."""
+        return inventory(self.payload)
 
 
 def prepare_library(environment, modules, replay, dependencies, staging, *, maximum=16*1024**3):

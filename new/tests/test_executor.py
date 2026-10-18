@@ -20,7 +20,7 @@ from midas.executor import (Executor, ImportInput, ImportRecipe, LaunchSpec, Mou
 from midas.executor.imports import _ImportWorker
 from midas.executor.isolation import _launch
 from midas.executor.process import (_Capture, _Discovery, _ProcessTree, _metadata,
-                                    _run_process, _status_messages, failure)
+                                    _process_info, _run_process, _status_messages, failure)
 
 
 def reference(data=b'x'):
@@ -158,10 +158,50 @@ class ProcessTests(unittest.TestCase):
         discovery = _Discovery(lambda: clock[0])
         a = discovery.snapshot()
         self.assertIs(discovery.snapshot(), a)
-        with patch('pathlib.Path.iterdir', side_effect=OSError('scan failure')):
+        clock[0] += .021
+        b = discovery.snapshot()
+        self.assertIsNot(b, a)
+        self.assertIsNot(discovery.snapshot(fresh=True), b)
+        with patch('midas.executor.process.os.scandir', side_effect=OSError('scan failure')):
             with self.assertRaises(OSError):
                 discovery.snapshot(fresh=True)
         self.assertIsNone(discovery.value)
+
+    def test_process_identity_handles_comm_bytes_and_rejects_bad_records(self):
+        # comm can contain spaces, parentheses and non-UTF-8 bytes. Field 22
+        # (starttime) must still identify the process used for pidfd ownership.
+        tail = b'S 17 ' + b'0 ' * 17 + b'123456 0 0 0\n'
+        for comm in (b'python', b'a (b) c', b'bad\xffname'):
+            with self.subTest(comm=comm), patch('midas.executor.process.os.open', return_value=123), \
+                    patch('midas.executor.process.os.read', return_value=b'42 (' + comm + b') ' + tail), \
+                    patch('midas.executor.process.os.close') as close:
+                self.assertEqual(_process_info(42), (17, 123456, 'S'))
+                close.assert_called_once_with(123)
+        for data in (b'', b'42 (x) S 17', b'42 (x) ' + tail.replace(b'123456', b'bad')):
+            with self.subTest(data=data), patch('midas.executor.process.os.open', return_value=123), \
+                    patch('midas.executor.process.os.read', return_value=data), \
+                    patch('midas.executor.process.os.close') as close:
+                with self.assertRaisesRegex(OSError, 'Malformed /proc process identity'):
+                    _process_info(42)
+                close.assert_called_once_with(123)
+        for error in (FileNotFoundError, ProcessLookupError):
+            with patch('midas.executor.process.os.open', side_effect=error):
+                self.assertIsNone(_process_info(42))
+        with patch('midas.executor.process.os.open', side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                _process_info(42)
+
+    def test_process_identity_closes_descriptor_on_failed_read(self):
+        for error in (ProcessLookupError, PermissionError):
+            with self.subTest(error=error), patch('midas.executor.process.os.open', return_value=123), \
+                    patch('midas.executor.process.os.read', side_effect=error), \
+                    patch('midas.executor.process.os.close') as close:
+                if error is ProcessLookupError:
+                    self.assertIsNone(_process_info(42))
+                else:
+                    with self.assertRaises(error):
+                        _process_info(42)
+                close.assert_called_once_with(123)
 
 
 class IsolationTests(unittest.TestCase):

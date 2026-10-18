@@ -62,7 +62,8 @@ def issue(request, artifacts, *, limits=None):
     owners = tuple(dict.fromkeys((owner, *(OwnerVersion(d[0], d[1]) for d in
                         (value['candidate']['dependencies'] if value['candidate'] else [])))))
     kinds = {'proof': JobKind.CHECK_PROOF, 'binding': JobKind.CHECK_BINDING,
-             'lookup': JobKind.LOOKUP, 'probe': JobKind.PROBE, 'audit': JobKind.EXPORT_VERIFY}
+             'lookup': JobKind.LOOKUP, 'probe': JobKind.PROBE, 'audit': JobKind.EXPORT_VERIFY,
+             'replay': JobKind.ASSEMBLE}
     job = Job(request.sha256, kinds[value['operation']], owner, refs, owners,
               limits or ResourceLimits(120000, 4096, 1024**2, 64 * 1024**2))
     frozen = FrozenRequest(job, value['environment'], artifacts.save(request.payload),
@@ -95,6 +96,20 @@ class Contracts(unittest.TestCase):
         self.artifacts.data[self.candidate.source.id] = b'by sorry'
         with self.assertRaises(ValueError):
             prepare_proof(self.selection, 0, self.candidate, self.artifacts)
+
+    def test_request_admission_reuses_bytes_but_checks_each_reservation(self):
+        request = prepare_proof(self.selection, 0, self.candidate, self.artifacts)
+        inv = issue(request, self.artifacts)
+        with patch.object(CompilerRequest, '_validate', side_effect=AssertionError('revalidated bytes')):
+            admitted = CompilerRequest(request.payload)
+            admitted.validate_for(inv.request, self.artifacts)
+            with self.assertRaises(ValueError):
+                admitted.validate_for(replace(inv.request, job=replace(inv.request.job, input_refs=())), self.artifacts)
+            self.artifacts.data[inv.request.operation_payload.id] = b'changed request'
+            with self.assertRaises(ValueError):
+                admitted.validate_for(inv.request, self.artifacts)
+        with self.assertRaises(ValueError):
+            CompilerRequest(bytearray(request.payload))
 
     def test_large_source_and_compact_signatures_never_use_json(self):
         request = prepare_proof(self.selection, 0, self.candidate, self.artifacts)

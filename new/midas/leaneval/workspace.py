@@ -62,8 +62,8 @@ def load(application, directory, *, package=None):
     codec.fields(value, ('format', 'package', 'environment', 'archive', 'selection', 'library'))
     if value['format'] != 'midas-leaneval-workspace-v1':
         raise ValueError('Unknown LeanEval workspace')
-    package = Path(package or value['package']).absolute()
-    environment = application.environment(package, expected_id=value['environment'])
+    environment = application.environment(package or value['package'], expected_id=value['environment'])
+    package = environment.directory
     archive = load_archive(safe_read(directory/'archive.bin', MAX_BYTES), expected_id=value['archive'])
     selected = safe_read(directory/'selection.bin', MAX_BYTES)
     library = safe_read(directory/'library.bin', MAX_BYTES)

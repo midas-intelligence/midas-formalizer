@@ -1,5 +1,5 @@
 """Export contracts with deterministic compiler evidence; no Lean processes."""
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,6 +20,61 @@ from midas.export import AdmittedStage, Export, Library, Request, read_bundle
 from midas.export import proofs
 from midas.export.layout import materialize
 from tests.test_checker import Artifacts, certificate, name, selection
+
+
+class InventoryTests(unittest.TestCase):
+    def test_cached_rows_are_immutable_and_detached_from_decoded_input(self):
+        from midas.checker.rebuild import inventory, modules, module_files
+        from midas.domain.cache import Memo
+        ref = ArtifactRef(str(uuid4()), sha256(b'source').hexdigest(), 6)
+        asset = ArtifactRef(str(uuid4()), sha256(b'asset').hexdigest(), 5)
+        value = [dict(name='Dep', package='library', source=ref.to_dict(),
+                      assets=[['data.bin', asset.to_dict()]], options=[['maxRecDepth', 400]],
+                      compiled={'.olean': 'a'*64})]
+        payload = codec.encode(value)
+        # Use a private cache so the test does not depend on prior admissions.
+        with patch('midas.checker.rebuild._INVENTORIES', Memo()) as cache:
+            rows = inventory(payload)
+            with patch.object(codec, 'decode', side_effect=AssertionError('decoded cached inventory')):
+                self.assertIs(inventory(memoryview(payload).tobytes()), rows)
+            self.assertGreater(cache.bytes, len(payload))
+        self.assertEqual((rows[0].name, rows[0].source, rows[0].options),
+                         ('Dep', ref, (('maxRecDepth', 400),)))
+        self.assertEqual(module_files(rows), {'Dep.lean': ref, 'data.bin': asset})
+        with self.assertRaises(FrozenInstanceError):
+            rows[0].name = 'Changed'
+        with self.assertRaises(TypeError):
+            rows[0].compiled[0] = ('.olean', 'b'*64)
+        with self.assertRaises(TypeError):
+            rows[0].assets[0] = ('changed.bin', ref)
+        with self.assertRaises(FrozenInstanceError):
+            rows[0].source.sha256 = 'b'*64
+        detached = modules(value)
+        value[0]['compiled']['.olean'] = 'b'*64
+        value[0]['source']['sha256'] = 'b'*64
+        value[0]['options'][0][1] = 800
+        value[0]['assets'][0][0] = 'changed.bin'
+        self.assertEqual(detached, rows)
+
+    def test_inventory_cache_bounds_and_invalid_rows(self):
+        from midas.checker.rebuild import inventory
+        from midas.domain.cache import Memo
+        row = dict(name='Dep', package=None, source=None, assets=[], options=[],
+                   compiled={'.olean': 'a'*64})
+        payload = codec.encode([row])
+        with patch('midas.checker.rebuild._INVENTORIES', Memo(max_bytes=len(payload))) as cache:
+            first, second = inventory(payload), inventory(payload)
+            self.assertEqual(first, second)
+            self.assertIsNot(first, second)
+            self.assertFalse(cache.entries)  # Account for retained rows, not just bytes.
+        invalid = ([row, row], [dict(row, compiled={'.olean': 'invalid'})],
+                   [dict(row, assets=[['bad', {}]])])
+        with patch('midas.checker.rebuild._INVENTORIES', Memo()) as cache:
+            for value in invalid:
+                for _ in range(2):
+                    with self.assertRaises(ValueError):
+                        inventory(codec.encode(value))
+            self.assertFalse(cache.entries)
 
 
 def issue(request, artifacts):
@@ -88,13 +143,15 @@ class Harness:
         self.graph = ProofGraph(0, (self.owner.obligation_id,), (parent, node))
         return request
 
-    def run(self, request, *, corrupt_build=False, mutate_previous=False):
+    def run(self, request, *, corrupt_build=False, mutate_previous=False, during_process=None):
         inv = issue(request, self.artifacts)
         workspace = self.root / str(uuid4())
         workspace.mkdir()
         empty = Diagnostic(b'', 0, False)
         def run(recipe, **kwargs):
             self.launches.append(recipe)
+            if during_process is not None:
+                during_process(recipe)
             if '-o' in recipe.argv:
                 build = Path(next(m.source for m in recipe.mounts if m.target == '/build'))
                 source = (build / recipe.argv[-1].removeprefix('/build/')).read_bytes()
@@ -341,13 +398,111 @@ class Contracts(unittest.TestCase):
         other_compiled = {'.olean': sha256(b'compiled:' + other).hexdigest(), '.ilean': sha256(b'info:' + other).hexdigest()}
         h.modules['Second'] = 'library/Second.olean'
         h.pins.update({'library/Second' + suffix: SimpleNamespace(sha256=digest) for suffix, digest in other_compiled.items()})
-        library = Library(h.environment.id, codec.encode([*library.decode(),
+        library = Library(h.environment.id, codec.encode([*codec.decode(library.payload),
             {'name': 'Second', 'package': None, 'assets': [], 'options': [], 'source': other_ref.to_dict(), 'compiled': other_compiled}]))
         integrated = h.integrate(profile='library', library=library)
         request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
         _, result, _ = h.run(request, mutate_previous=True)
         self.assertEqual(result.status, ResultStatus.FAILED)
         self.assertIn(b'Rebuilt dependency changed', h.artifacts.data[result.diagnostics.id])
+
+    def test_environment_validation_surrounds_complete_rebuild_and_audit(self):
+        h = self.h
+        source = b'def value : Nat := 1\n'
+        compiled = {'.olean': sha256(b'compiled:' + source).hexdigest(),
+                    '.ilean': sha256(b'info:' + source).hexdigest()}
+        local = dict(name='Local', package=None, assets=[], options=[],
+                     source=h.artifacts.save(source).to_dict(), compiled=compiled)
+        h.modules.update(Local='project/Local.olean', Dep='library/Dep.olean')
+        h.pins.update({'project/Local' + suffix: SimpleNamespace(sha256=digest)
+                      for suffix, digest in compiled.items()})
+        h.pins['library/Dep.olean'] = SimpleNamespace(sha256='a'*64)
+        h.environment.roots['library'] = self.root/'library'
+        frozen = self.root/'frozen-input'
+        events = []
+        def validate(**kwargs):
+            self.assertTrue(kwargs['hash_toolchain'])
+            self.assertTrue(kwargs['fresh'])
+            events.append('validate')
+            if frozen.read_bytes() != b'admitted':
+                raise ValueError('Frozen input changed')
+        h.environment.validate = validate
+        for trusted in (False, True):
+            rows = [local]
+            if trusted:
+                rows.insert(0, dict(name='Dep', package='library', assets=[], options=[],
+                                   source=None, compiled={'.olean': 'a'*64}))
+            library = Library(h.environment.id, codec.encode(rows))
+            integrated = h.integrate(profile='library', library=library)
+            request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
+            for changed_at in (None, 'before', 'build', 'audit'):
+                with self.subTest(trusted=trusted, changed_at=changed_at):
+                    frozen.write_bytes(b'changed' if changed_at == 'before' else b'admitted')
+                    events.clear()
+                    def mutate(recipe):
+                        phase = 'build' if '-o' in recipe.argv else 'audit'
+                        events.append(phase)
+                        if phase == changed_at:
+                            frozen.write_bytes(b'changed')
+                    _, result, _ = h.run(request, during_process=mutate)
+                    if changed_at == 'before':
+                        self.assertEqual(events, ['validate'])
+                    else:
+                        self.assertEqual(events, ['validate', 'build', 'audit', 'validate'])
+                    self.assertEqual(result.status,
+                                     ResultStatus.SUCCEEDED if changed_at is None else ResultStatus.FAILED)
+                    if changed_at is not None:
+                        self.assertIn(b'Frozen input changed', h.artifacts.data[result.diagnostics.id])
+
+    def test_shared_inventory_is_referenced_and_bound_through_export_and_recheck(self):
+        from midas.checker.rebuild import load_inventory, admit_build
+        from midas.checker import CompilerRequest
+        h = self.h
+        h.environment.roots['library'] = self.root/'library'
+        rows = []
+        for index in range(256):
+            name = 'Dep'+str(index)
+            h.modules[name] = 'library/'+name+'.olean'
+            digest = sha256(name.encode()).hexdigest()
+            h.pins['library/'+name+'.olean'] = SimpleNamespace(sha256=digest)
+            rows.append(dict(name=name, package='library', source=None, assets=[], options=[],
+                             compiled={'.olean': digest}))
+        library = Library(h.environment.id, codec.encode(rows))
+        integrated = h.integrate(profile='library', library=library)
+        packet = integrated.request.decode()['packet']
+        inventory_ref = ArtifactRef.from_dict(packet['inventory'])
+        self.assertNotIn('modules', packet)
+        self.assertEqual(h.artifacts.read_artifact(inventory_ref, max_bytes=64*1024**2), library.payload)
+        self.assertLess(len(integrated.request.payload), len(library.payload)//5)
+        request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
+        self.assertEqual(request.decode()['packet']['inventory'], packet['inventory'])
+        self.assertEqual(dict(request.files)['inventory.bin'], inventory_ref)
+        # A warm content admission cannot admit a missing frozen input.
+        value = request.decode()
+        value['inputs'].remove(inventory_ref.to_dict())
+        with self.assertRaisesRegex(ValueError, 'admitted audit input'):
+            CompilerRequest(codec.encode(value))
+        invocation, result, receipt = h.run(request)
+        self.assertEqual(result.status, ResultStatus.SUCCEEDED)
+        report = codec.load_record(h.artifacts.read_artifact(result.output, max_bytes=65536), limit=65536)
+        build_ref = ArtifactRef.from_dict(report['phases'][0]['evidence']['artifact'])
+        build = codec.decode(h.artifacts.read_artifact(build_ref, max_bytes=65536))
+        self.assertEqual(build['inventory'], packet['inventory'])
+        self.assertNotIn('modules', build)
+        self.assertLess(build_ref.byte_count, 1024)
+        with self.assertRaisesRegex(ValueError, 'build receipt'):
+            admit_build(dict(build, inventory=h.artifacts.save(codec.encode([])).to_dict()), packet)
+        verified = h.export.admit_receipt(request, invocation, result, receipt, h.artifacts, h.authority,
+            selection=h.selection, graph=h.graph, integration=integrated)
+        destination = self.root/'shared-inventory'
+        h.export.materialize(verified, h.selection, h.graph, h.artifacts, destination)
+        bundled, reader = read_bundle(destination)
+        self.assertEqual(load_inventory(bundled.decode()['packet'], reader), library.decode())
+        h.export.prepare_recheck(bundled, reader)
+        # Every read still verifies bytes even when their original admission is cached.
+        (destination/'inventory.bin').write_bytes(codec.encode([]))
+        with self.assertRaises(ValueError):
+            h.export.prepare_recheck(bundled, reader)
 
     def test_trusted_compiled_dependencies_keep_local_rebuild_and_frozen_identity(self):
         h = self.h

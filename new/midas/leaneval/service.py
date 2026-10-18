@@ -40,8 +40,10 @@ def check_bundle(request, workspace):
     if (request.environment_id != workspace.environment_id or request.selection_id != workspace.selection.id
             or request.allow_sorry or request.decode()['packet']['logical'] != 'Submission.lean'):
         raise ValueError('Bundle must be a complete export of the prepared benchmark selection')
-    rows = workspace.library.decode() if workspace.library else []
-    if request.decode()['packet']['modules'] != rows:
+    from ..domain import ArtifactRef
+    expected = reference(workspace.library.payload if workspace.library else codec.encode([]))
+    actual = ArtifactRef.from_dict(request.decode()['packet']['inventory'])
+    if (actual.sha256, actual.byte_count) != (expected.sha256, expected.byte_count):
         raise ValueError('Bundle dependency trust differs from the prepared workspace')
 
 

@@ -126,6 +126,8 @@ class Request:
             files = {}
         else:
             files = file_rows(metadata['files'], metadata['maximum'])
+            if files.get('inventory.bin') != ArtifactRef.from_dict(value['packet']['inventory']):
+                raise ValueError('Export inventory differs from its audit input')
             if metadata['parent'] is not None or ('src/' + value['packet']['logical']) not in files:
                 raise ValueError('Missing integrated source or unexpected parent')
             if (value['operation'] == 'audit') != (metadata['integration'] is not None):

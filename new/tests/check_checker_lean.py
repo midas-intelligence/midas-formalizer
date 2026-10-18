@@ -4,10 +4,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from uuid import uuid4
+from unittest.mock import patch
 import sys
 import time
 
-from midas.checker import Checker, ProbeCase, admit_probe_progress, inspect, worker_payload
+from midas.checker import Checker, CompilerRequest, ProbeCase, admit_probe_progress, inspect, worker_payload
 from midas.domain import (Candidate, CapacityGrant, Dependency, DependencyOrigin, ObligationIdentity, OwnerVersion,
     ReceiptBinding, ResourceLimits, ResultStatus, SelectionRequest)
 from midas.domain import encoding as codec
@@ -72,7 +73,14 @@ def main():
             def check(label, request, *, candidate=None, valid=True, limits=None, cancel_after=None, expected_outcome=None):
                 inv = issue(request, artifacts, limits=limits)
                 start = time.monotonic()
-                completed = execute(inv, checker.execute, compiler_request=request, cancel_after=cancel_after)
+                from midas.executor.imports import _ImportWorker
+                parents = []
+                original_run = _ImportWorker.run
+                def observed(worker, *args, **kwargs):
+                    parents.append(worker.id)
+                    return original_run(worker, *args, **kwargs)
+                with patch.object(_ImportWorker, 'run', observed):
+                    completed = execute(inv, checker.execute, compiler_request=request, cancel_after=cancel_after)
                 result = completed.result
                 if (result.status == ResultStatus.SUCCEEDED) != valid:
                     print(completed, flush=True)
@@ -95,6 +103,8 @@ def main():
                                   artifacts.data[phase['stdout']['artifact']['id']].decode(errors='replace')[:2000], flush=True)
                     if checker.retained and checker.runtime.retained:
                         assert all(p['outcome'] == 'completed' for p in report['phases']), 'Unexpected retained fallback'
+                        if request.decode()['operation'] == 'proof':
+                            assert len(parents) == 2 and len(set(parents)) == 1, 'Proof replay restarted import parent'
                     receipt = ReceiptBinding(inv.original_execution_id, inv.request.request_ref,
                         artifacts.save(worker_payload(result)), artifacts.save(b'test-controller-seal'))
                     admitted = checker.admit_receipt(request, inv, result, receipt, artifacts,
@@ -105,6 +115,39 @@ def main():
                 return result, admitted
 
             candidate = Candidate(str(uuid4()), owner, selected.environment_id, artifacts.save(b'by trivial'))
+            if '--native-only' in sys.argv:
+                from midas.checker import native
+                candidate = replace(candidate, source=artifacts.save(
+                    b'by\n  run_tac IO.eprintln "NATIVE_CACHE_ELABORATED"\n  trivial'))
+                request = checker.prepare('proof', selected, 0, candidate, artifacts)
+                _, admitted = check('producer/replay preserve import parent', request, candidate=candidate)
+                cert = codec.decode(artifacts.data[admitted.evidence.id])
+                value = request.decode()
+                value.update(operation='replay', candidate=None)
+                value['packet'].update(candidate=None, certificate=cert)
+                assembly = CompilerRequest(codec.encode(value))
+                def stderr(result):
+                    report = codec.load_record(artifacts.data[result.output.id], limit=65536)
+                    return b''.join(artifacts.data[p['stderr']['artifact']['id']] for p in report['phases'])
+                result, _ = check('assembly uses compiled producer declaration', assembly)
+                assert b'NATIVE_CACHE_ELABORATED' not in stderr(result), 'Cached assembly reran tactic'
+                spec = native.specification(value['packet'], cert, checker.environment.id, checker.runtime.id)
+                entry = checker.declarations.directory/spec['nodes'][0]['id']
+                entry.write_bytes(b'corrupted cache')
+                result, _ = check('corrupt cache rebuilds from source', assembly)
+                assert b'NATIVE_CACHE_ELABORATED' in stderr(result), 'Cache miss did not rebuild source'
+                result, _ = check('rebuilt assembly is cached', assembly)
+                assert b'NATIVE_CACHE_ELABORATED' not in stderr(result), 'Rebuilt declaration was not reused'
+                frame = native.frame
+                def corrupt(packet, blobs=()):
+                    if packet.get('native_proof') and blobs:
+                        blobs = ((blobs[0][0], b'invalid compiled data'),)
+                    return frame(packet, blobs)
+                with patch.object(native, 'frame', corrupt):
+                    check('invalid native input cannot produce a receipt', request, candidate=candidate, valid=False)
+                check('healthy proof after invalid native input', request, candidate=candidate)
+                print('native reuse boundary checks passed', flush=True)
+                return
             def recursion_checks(label):
                 from midas.policy import load_config, Failure
                 from midas.controller import checker_operation
