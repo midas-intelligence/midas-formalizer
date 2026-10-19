@@ -92,6 +92,10 @@ Use retrieve to combine searches and checked lookup.
 Backend names are frozen-source and leanexplore; only frozen-source uses prefixes.
 Use the displayed frozen-source roots, including project when offered, or a file,
 directory or module within them. project searches the frozen project sources.
+Frozen-source search returns up to 50 results, with source details for the first
+12 and names for the rest. Exact file/module prefixes give those files a ranking
+preference within the selected scope. Use lookup on a later name for its type,
+or inspect=true for authored source. Large excerpts may continue on another page.
 Queries require backends, and names-only retrieval uses an empty backends array.
 inspect requests authored source; discovery alone does not certify availability.
 Probe cases run in the frozen checked target context, without proposed children or

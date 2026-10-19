@@ -223,9 +223,13 @@ class Application:
         provider = providers.construct(config, transports=self.transports, script=script, codex=self.codex) if inputs.workflow != 'supplied' and not export_only else None
         instructions = tuple((role, r.read(writer, ref, 16384)) for role, ref in inputs.instructions)
         search = self.search_factory() if provider else None
+        if search is not None and search.cache_directory is None:
+            search.cache_directory = self.cache/'search'
         if search is not None and hasattr(environment.manifest, 'inventory') and search.index is None:
             sources = preparation.FrozenSources(environment)
             search.index, search.source_reader = sources.index, sources
+            if search.prepared_path is None:
+                search.prepared_path = environment.directory/preparation.SEARCH_INDEX
         flow = Workflow(selection, Policy(config), checker, Export(checker), mode=inputs.workflow,
             provider=provider, search=search,
             instructions=instructions, script=script, export_only=export_only, allow_sorry=allow_sorry, library=library)

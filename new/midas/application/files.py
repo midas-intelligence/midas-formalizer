@@ -58,7 +58,7 @@ def write(destination, chunks):
 
 def package(application, destination, path, *, base=None, cancellation=None):
     from ..environment import PackageConfig, Dependency, attach
-    from .preparation import operate
+    from .preparation import index_sources, operate
     data = document(path)
     parent = Path(path).resolve().parent
     if type(data) is not dict:
@@ -69,7 +69,8 @@ def package(application, destination, path, *, base=None, cancellation=None):
         dependency = Dependency(data['name'], parent/data['path'], tuple(data['module_paths']), tuple(data['source_roots']))
         environment = application.environment(base)
         prepared, _ = operate(lambda context: attach(environment, destination, dependency,
-            tuple(data['prefixes']), context), cancellation=cancellation)
+            tuple(data['prefixes']), context,
+            _before_publish=lambda attached: index_sources(attached, context)), cancellation=cancellation)
         return prepared
     if set(data) - {'version', 'toolchain', 'roots', 'project_inputs', 'search_paths', 'max_bytes', 'preflight_imports'}:
         raise ValueError('Unknown package configuration field')

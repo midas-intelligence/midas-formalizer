@@ -495,6 +495,72 @@ class Contracts(unittest.TestCase):
             self.assertIn('try.code (line 1 below):\nrun_tac do\n  '+probe['cases'][0]['code'], pages[2])
             self.assertNotRegex('\n'.join(pages), r'(?m)^\d+(?:/[^:]+)?:')
 
+    def test_local_search_delivers_twelve_details_fifty_names_and_tail_lookup(self):
+        from midas.application import helpers, records as r
+        from midas.tools import SearchService, SourceEntry, SourceIndex
+        from tests.test_tools import Artifacts
+        artifacts = Artifacts()
+        source = 'namespace Fixture\n'+''.join(f'def term{i:02} : Nat := {i}\n' for i in range(70))+'end Fixture\n'
+        index = SourceIndex(self.environment.id, (SourceEntry('project/Support.lean', artifacts.save(source.encode())),))
+        self.app.search_factory = lambda: SearchService(index=index, source_reader=artifacts)
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        search = dict(mode='search', rationale='Find declarations.', query='Nat',
+                      backend=dict(name='frozen-source', prefixes=['project']))
+        lookup = dict(mode='lookup', rationale='Expand a tail name.', names=['Fixture.term49'], inspect=False)
+        with self.start(workflow='scripted', config=replace(Config(), prover=route),
+                script=tuple(('prover', response(action)) for action in (search, lookup, proof()))) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(run.workflow.search.cache_directory, self.app.cache/'search')
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            archives = helpers.advertised(run.writer, owner)
+            self.assertEqual(len(archives), 2)
+            self.assertEqual(len(archives[0].pages), 1)
+            text = helpers.page_text(r.read(run.writer, archives[0].pages[0], 16000)).decode()
+            self.assertEqual(text.count('Source:'), 12)
+            self.assertIn('50. Fixture.term49', text)
+            self.assertNotIn('Fixture.term50', text)
+            expanded = helpers.page_text(r.read(run.writer, archives[1].pages[0], 16000)).decode()
+            self.assertIn('Fixture.term49', expanded)
+            self.assertEqual(run.writer.counter('owner:'+owner.obligation_id, 'retrieval'), 2)
+
+    def test_runs_and_resume_reuse_package_postings_with_fresh_application_caches(self):
+        from threading import Event
+        from midas.application import preparation
+        from midas.environment import File
+        from midas.tools import bm25
+        source = b'def helper : Nat := 0\n'
+        project = self.environment.directory/'project'
+        project.mkdir(parents=True)
+        (project/'Support.lean').write_bytes(source)
+        self.environment.roots['project'] = project
+        self.environment.manifest.inventory = SimpleNamespace(files=(
+            File('project/Support.lean', len(source), False, sha256(source).hexdigest()),))
+        self.environment.manifest.modules = {}
+        context = SimpleNamespace(check=lambda: None, cancellation=Event(), deadline=time.monotonic()+30)
+        preparation.index_sources(self.environment, context)
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        search = dict(mode='search', rationale='Find a helper.', query='helper',
+                      backend=dict(name='frozen-source', prefixes=['project']))
+        options = dict(workflow='scripted', config=replace(Config(), prover=route),
+                       script=(('prover', response(search)), ('prover', response(proof()))))
+        with patch.object(bm25, '_build', side_effect=AssertionError('unexpected rebuild')):
+            for number in range(2):
+                self.app.cache = self.root/f'cache-{number}'
+                with self.start(f'run-{number}', **options) as run:
+                    self.assertEqual(run.workflow.search.prepared_path,
+                                     self.environment.directory/preparation.SEARCH_INDEX)
+                    if number == 0:
+                        self.assertEqual(self.finish(run).exit_code, 0)
+                self.assertFalse((self.app.cache/'search').exists())
+            self.app.cache = self.root/'resume-cache'
+            with self.app.resume(self.root/'run-1') as run:
+                self.assertEqual(self.finish(run).exit_code, 0)
+                owner = run.workflow.graph(run.writer).nodes[0].owner
+                from midas.application import helpers, records as r
+                archive = helpers.advertised(run.writer, owner)[0]
+                self.assertIn(b'def helper', helpers.page_text(r.read(run.writer, archive.pages[0], 16000)))
+            self.assertFalse((self.app.cache/'search').exists())
+
     def test_resume_rejects_selected_proof_that_differs_from_its_receipt(self):
         from midas.application.service import commit
         from midas.application import records as r

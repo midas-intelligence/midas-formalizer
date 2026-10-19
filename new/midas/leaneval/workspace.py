@@ -5,7 +5,7 @@ from hashlib import sha256
 from graphlib import TopologicalSorter
 from pathlib import Path
 
-from ..application.preparation import operate
+from ..application.preparation import index_sources, operate
 from ..domain import ArtifactRef, FrozenSelection, SelectionRequest, encode_selection, load_selection
 from ..domain import encoding as codec
 from ..environment import (Archive, Dependency, File, ModulePin, archive_benchmark, describe,
@@ -197,6 +197,7 @@ def prepare(application, destination, *, package, verification, config, cancella
             selection = application.checker_factory(environment, application.cache).inspect(
                 SelectionRequest('Submission.lean', tuple(n for n, _ in benchmark.targets)), context)
             check_selection(selection, archive)
+            index_sources(environment, context)
             selected = encode_selection(selection)
             files = {'archive.bin': b''.join(archive.chunks()), 'selection.bin': selected, 'library.bin': library.payload}
             files['attachments.bin'] = codec.encode([list(row) for row in mappings])

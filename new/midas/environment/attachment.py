@@ -16,7 +16,7 @@ class Attachment:
 
 
 def attach(environment, destination, dependency, prefixes, context, *, bootstrap=None,
-           max_bytes=16 * 1024**3):
+           max_bytes=16 * 1024**3, _before_publish=None):
     if type(prefixes) is not tuple or not prefixes or len(prefixes) > 32:
         raise EnvironmentError('Expected explicit library namespace prefixes')
     for prefix in prefixes:
@@ -61,5 +61,7 @@ def attach(environment, destination, dependency, prefixes, context, *, bootstrap
         _, after = scan(dependency.path, hash_content=False, links=True, maximum=max_bytes, check=context.check)
         if observed != after:
             raise EnvironmentError('Library changed during attachment')
+        if _before_publish is not None:
+            _before_publish(prepared)
     prepared = Environment.prepare(destination, config, context, bootstrap=bootstrap, _before_publish=admit)
     return prepared, Attachment(environment.id, prepared.id, dependency.name, tuple(sorted(modules)))

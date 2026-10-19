@@ -88,7 +88,7 @@ LEXEME = re.compile(r'/-|--[^\n]*|"(?:\\.|[^"\\])*"|«[^»]*»')
 COMMENT = re.compile(r'/-|-/')
 SCOPE = re.compile(r'^(?:(?:noncomputable|public)\s+)?(namespace|section|end)(?:\s+(' + NAME + r'))?\s*$')
 DECL = re.compile(r'^(?P<mod>(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*)'
-                  r'(?:theorem|lemma|def|abbrev|instance|class|structure|inductive|opaque)\s+'
+                  r'(?:theorem|lemma|def|abbrev|instance|class|structure|inductive|opaque|axiom)\s+'
                   r'(?P<name>' + NAME + r')(?=\s|:|\(|\{|\[|\.\{|$)')
 
 

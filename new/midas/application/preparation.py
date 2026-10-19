@@ -13,6 +13,7 @@ from .records import artifact
 
 
 DEFAULT_LIMITS = ResourceLimits(600000, 4096, 8*1024**2, 64*1024**2)
+SEARCH_INDEX = 'search.sqlite'
 
 
 def operate(callback, *, limits=DEFAULT_LIMITS, cancellation=None):
@@ -57,8 +58,20 @@ def operate(callback, *, limits=DEFAULT_LIMITS, cancellation=None):
 
 
 def package(destination, config, *, limits=DEFAULT_LIMITS, cancellation=None):
-    return operate(lambda context: Environment.prepare(destination, config, context),
+    return operate(lambda context: Environment.prepare(destination, config, context,
+                       _before_publish=lambda environment: index_sources(environment, context)),
                    limits=limits, cancellation=cancellation)
+
+
+def index_sources(environment, context):
+    """Keep derived search postings with the package; only refs/hash reach tools."""
+    from ..tools.bm25 import prepare
+    context.check()
+    sources = FrozenSources(environment)
+    path = prepare(sources.index, sources, context.cancellation, context.deadline,
+                   environment.directory/SEARCH_INDEX)
+    context.check()
+    return path
 
 
 def select(checker, request, *, limits=DEFAULT_LIMITS, cancellation=None):
@@ -89,7 +102,7 @@ class FrozenSources:
                 if not relative.startswith('src/lean/'):
                     continue
                 logical = 'lean/'+relative.removeprefix('src/lean/')
-            elif root == 'runtime':
+            elif root in ('checker', 'runtime'):
                 continue
             else:
                 logical = item.path

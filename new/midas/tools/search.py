@@ -1,6 +1,6 @@
 """Bounded frozen-source discovery and one hosted search; no task scheduling."""
 from dataclasses import dataclass, field
-import re
+from math import isfinite
 import time
 from types import MappingProxyType
 from urllib.parse import urlencode
@@ -10,21 +10,11 @@ from ..domain import (ArtifactRef, DeliveryCertainty, ResultStatus, Termination,
 from ..domain import encoding as codec
 from ..domain.records import identifier, items
 from ..domain.wire import decode
-from ..source import declaration_names
 from .protocol import (ENDPOINT, REQUEST_BYTES, SEARCH_BYTES, Search, Stage, pack, read,
                        source_selector, strings, text)
+from .bm25 import DETAILS, FILE_BYTES, TOTAL, corpus_key, database, ranked, stopped
 
-FILE_BYTES = 2 * 1024**2
-SCAN_BYTES = 128 * 1024**2
 HOSTED_BYTES = 5_000_000
-STOP = frozenset(('the', 'and', 'that', 'with', 'from', 'have', 'exists', 'such', 'this', 'are', 'two', 'for'))
-_WORDS = re.compile(r'[^\W_]+')
-_CAMEL = re.compile(r'([a-z])([A-Z])')
-
-
-def stopped(cancel, deadline):
-    if cancel.is_set() or time.monotonic() >= deadline:
-        raise TimeoutError('Search cancelled or deadline exceeded')
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +45,7 @@ class SourceIndex:
     roots: tuple[str, ...] = field(init=False, repr=False)
     by_path: object = field(init=False, repr=False, compare=False)
     by_module: object = field(init=False, repr=False, compare=False)
+    search_key: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         identifier(self.environment_id, 'env_')
@@ -72,6 +63,7 @@ class SourceIndex:
         object.__setattr__(self, 'roots', tuple(sorted(roots)))
         object.__setattr__(self, 'by_path', MappingProxyType({e.path: e for e in self.entries}))
         object.__setattr__(self, 'by_module', MappingProxyType({name: tuple(rows) for name, rows in modules.items()}))
+        object.__setattr__(self, 'search_key', corpus_key(self))
 
     def resolve(self, prefixes):
         resolved = []
@@ -93,7 +85,14 @@ class SourceIndex:
                 if matches:
                     break
             if not matches:
-                raise ValueError('Source selector absent from frozen inputs: ' + raw)
+                # Module names can live below a package's srcDir rather than
+                # immediately below the frozen root.
+                entries = self.by_module.get(stem.replace('/', '.'), ())
+                if len(entries) > 1:
+                    raise ValueError('Ambiguous source selector: ' + raw + '; qualify its source root')
+                if not entries:
+                    raise ValueError('Source selector absent from frozen inputs: ' + raw)
+                matches = [entries[0].path]
             if matches[0] not in resolved:
                 resolved.append(matches[0])
         return tuple(resolved)
@@ -106,24 +105,27 @@ class Match:
     line: int = 0
     start_line: int = 0
     source: str = ''
-    score: int = 0
+    score: float = 0
 
     def __post_init__(self):
         # Hosted names remain hints. Invalid Lean spelling is excluded before lookup.
         strings(self.names, 20, 1024, 'discovered names')
-        if any(type(n) is not int for n in (self.line, self.start_line, self.score)):
+        if (any(type(n) is not int for n in (self.line, self.start_line))
+                or type(self.score) not in (int, float) or not isfinite(self.score) or self.score < 0):
             raise ValueError('Invalid search coordinates/score')
         if self.path is None:
             if len(self.names) != 1 or self.line != 0 or self.start_line != 0 or self.source or self.score != 0:
                 raise ValueError('Invalid hosted hint')
         elif (source_selector(self.path) != self.path or not self.path.endswith('.lean')
                 or type(self.line) is not int or type(self.start_line) is not int
-                or not 1 <= self.start_line <= self.line or type(self.score) is not int or self.score <= 0):
+                or not 1 <= self.start_line <= self.line):
             raise ValueError('Invalid source match')
         text(self.source, 'search excerpt', 6000, empty=True)
 
     def value(self):
-        return [list(self.names), self.path, self.line, self.start_line, self.source, self.score]
+        # Binary records have no float tag. Hex preserves every score bit without
+        # quantization or normalization and does not involve JSON serialization.
+        return [list(self.names), self.path, self.line, self.start_line, self.source, float(self.score).hex()]
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +137,7 @@ class SearchResult:
     def __post_init__(self):
         identifier(self.request_hash, '')
         items(self.records, Match)
-        if len(self.records) > 20 or self.error is not None and self.records:
+        if len(self.records) > TOTAL or self.error is not None and self.records:
             raise ValueError('Invalid search result')
         if self.error is not None:
             text(self.error, 'search error', 2048)
@@ -152,106 +154,39 @@ class SearchResult:
 
     @property
     def payload(self):
-        return pack(['midas-search-result-v1', self.request_hash, [r.value() for r in self.records], self.error], SEARCH_BYTES)
+        return pack(['midas-search-result-v2', self.request_hash, [r.value() for r in self.records], self.error], SEARCH_BYTES)
 
     @classmethod
     def load(cls, payload):
         v = codec.load_record(payload, limit=SEARCH_BYTES)
-        if type(v) is not list or len(v) != 4 or v[0] != 'midas-search-result-v1' or type(v[2]) is not list:
+        if type(v) is not list or len(v) != 4 or v[0] != 'midas-search-result-v2' or type(v[2]) is not list:
             raise ValueError('Invalid search result encoding')
         rows = []
         for row in v[2]:
-            if type(row) is not list or len(row) != 6 or type(row[0]) is not list:
+            if (type(row) is not list or len(row) != 6 or type(row[0]) is not list
+                    or type(row[5]) is not str or len(row[5]) > 32):
                 raise ValueError('Invalid search row encoding')
-            rows.append(Match(tuple(row[0]), *row[1:]))
+            rows.append(Match(tuple(row[0]), *row[1:5], float.fromhex(row[5])))
         return cls(v[1], tuple(rows), v[3])
 
 
-class _Query:
-    def __init__(self, query):
-        self.literal = query.casefold()
-        self.terms = {t.casefold() for t in _WORDS.findall(query) if t.casefold() not in STOP}
-        self.bits = {t: 1 << n for n, t in enumerate(sorted(self.terms))}
-        self.full = (1 << len(self.bits)) - 1
-        self.phrase = re.compile(r'(?<![^\W_])' + re.escape(query.casefold()) + r'(?![^\W_])')
-
-    def mask(self, value):
-        split = _CAMEL.sub(r'\1 \2', value)
-        result = 0
-        for word in _WORDS.findall(value + ' ' + split):
-            result |= self.bits.get(word.casefold(), 0)
-        return result
-
-
-def content_matches(source, query, logical, limit, cancel, deadline):
-    """Query coverage must survive excerpt truncation; paths never supply terms."""
-    query = _Query(query) if isinstance(query, str) else query
-    stopped(cancel, deadline)
-    folded = source.casefold()
-    # A phrase hit contains its literal text; a coverage hit contains every
-    # query term, including terms split from camel-case identifiers. Rejecting
-    # files missing both possibilities avoids tokenizing the whole corpus.
-    if query.literal not in folded and (not query.terms or any(t not in folded for t in query.terms)):
-        return []
-    lines = source.splitlines(keepends=True)
-    hits = []
-    for n, line in enumerate(lines):
-        if n % 256 == 0:
-            stopped(cancel, deadline)
-        hits.append(query.mask(line))
-    candidates = []
-    for n, line in enumerate(lines):
-        if n % 256 == 0:
-            stopped(cancel, deadline)
-        exact = bool(query.phrase.search(line.casefold()))
-        if not hits[n] and not exact:
-            continue
-        start, end = max(0, n-3), min(len(lines), n+6)
-        if not exact:
-            mask = 0
-            for hit in hits[start:end]:
-                mask |= hit
-            if mask != query.full:
-                continue
-        score = hits[n].bit_count() + (len(query.terms)+1 if exact else 0)
-        candidates.append((-score, n, start, end))
-    selected, spans, declarations = [], [], None
-    for neg, n, start, end in sorted(candidates):
-        stopped(cancel, deadline)
-        if any(start < e and s < end for s, e in spans):
-            continue
-        excerpt = ''.join(lines[start:end]).encode()[:6000].decode('utf-8', errors='ignore')
-        if not query.phrase.search(excerpt.casefold()) and not (query.full and query.mask(excerpt) == query.full):
-            continue
-        if declarations is None:
-            declarations = declaration_names(source)
-        names = tuple(dict.fromkeys(declarations[i] for i in range(start, end) if i in declarations))[:20]
-        selected.append(Match(names, logical, n+1, start+1, excerpt, -neg))
-        spans.append((start, end))
-        if len(selected) == limit:
-            break
-    return selected
-
-
-def source_search(stage, index, reader, cancel, deadline):
+def source_search(stage, index, reader, cancel, deadline, *, cache_directory=None, prepared_path=None):
     if index is None or index.environment_id != stage.scope.environment_id:
         raise ValueError('Source index differs from search environment')
     action = stage.action
     prefixes = index.resolve(action.backend.prefixes)
-    query = _Query(action.query)
-    ranked, scanned = [], 0
-    for entry in index.entries:
-        if not any(entry.path == p or entry.path.startswith(p+'/') for p in prefixes):
-            continue
+    with database(index, reader, cancel, deadline, cache_directory, prepared_path=prepared_path) as db:
+        hits = ranked(db, action.query, prefixes, limit=action.limit)
+    result, loaded = [], {}
+    for rank, (name, path, line, start_line, start, end, score) in enumerate(hits):
         stopped(cancel, deadline)
-        scanned += entry.artifact.byte_count
-        if scanned > SCAN_BYTES or entry.artifact.byte_count > FILE_BYTES:
-            raise ValueError('Source search byte allowance exceeded')
-        data = read(reader, entry.artifact, FILE_BYTES).decode('utf-8')
-        ranked.extend(content_matches(data, query, entry.path, action.limit, cancel, deadline))
-        ranked.sort(key=lambda r: (-r.score, r.path, r.line))
-        del ranked[action.limit:]
-    return tuple(ranked)
+        source = ''
+        if rank < DETAILS or not name:
+            if path not in loaded:
+                loaded[path] = read(reader, index.by_path[path].artifact, FILE_BYTES)
+            source = loaded[path][start:min(end, start+6000)].decode('utf-8', errors='ignore').rstrip()
+        result.append(Match((name,) if name else (), path, line, start_line, source, score))
+    return tuple(result)
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -289,11 +224,13 @@ def hosted(action, cancel, deadline, *, opener=None):
     return tuple(result)
 
 
-def execute_search(stage, reader, cancel, deadline, *, index=None, transport=hosted):
+def execute_search(stage, reader, cancel, deadline, *, index=None, transport=hosted,
+                   cache_directory=None, prepared_path=None):
     if not isinstance(stage.action, Search):
         raise ValueError('Expected search stage')
     stopped(cancel, deadline)
-    rows = (source_search(stage, index, reader, cancel, deadline) if stage.action.backend.name == 'frozen-source'
+    rows = (source_search(stage, index, reader, cancel, deadline, cache_directory=cache_directory,
+                          prepared_path=prepared_path) if stage.action.backend.name == 'frozen-source'
             else transport(stage.action, cancel, deadline))
     stopped(cancel, deadline)
     return SearchResult(stage.sha256, rows).validate_for(stage)
@@ -310,8 +247,11 @@ def worker_payload(result):
 
 
 class SearchService:
-    def __init__(self, *, index=None, transport=hosted, source_reader=None):
+    def __init__(self, *, index=None, transport=hosted, source_reader=None,
+                 cache_directory=None, prepared_path=None):
         self.index, self.transport, self.source_reader = index, transport, source_reader
+        self.cache_directory = cache_directory
+        self.prepared_path = prepared_path
 
     def execute(self, frozen, context):
         invocation = context.capacity_grant.invocation
@@ -323,7 +263,8 @@ class SearchService:
         status = ResultStatus.SUCCEEDED
         try:
             result = execute_search(stage, self.source_reader or context.reader, context.cancellation, context.deadline,
-                                    index=self.index, transport=self.transport)
+                                    index=self.index, transport=self.transport, cache_directory=self.cache_directory,
+                                    prepared_path=self.prepared_path)
         except Exception as exc:
             status = ResultStatus.CANCELLED if context.cancellation.is_set() else ResultStatus.FAILED
             message = (type(exc).__name__ + ': ' + str(exc)).encode()[:2048].decode('utf-8', errors='ignore')

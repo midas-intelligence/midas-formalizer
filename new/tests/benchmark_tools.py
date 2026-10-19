@@ -2,18 +2,14 @@
 from pathlib import Path
 from statistics import median
 import sys
-import threading
 from timeit import timeit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from midas_formalizer.combined_retrieval import fuse as old_fuse
-from midas_formalizer.discovery import content_matches as old_matches
-from midas_formalizer.source_names import declaration_names as old_names
 from midas_formalizer.evidence_archive import EvidenceArchive as OldArchive
 from midas_formalizer.probe_runtime import expand_bodies as old_probe_bodies
 from midas.tools import (Backend, HelperRequest, Match, Retrieve, Scope, SearchResult,
                         expand_probe_bodies, fuse, prepare_archive, recall, search_stages)
-from midas.tools.search import content_matches
 from midas.tools.plans import _canonical
 from midas.domain import OwnerVersion
 from tests.test_tools import Artifacts
@@ -53,20 +49,6 @@ def main():
         _canonical.cache_clear()
         return fuse(request, current)
     compare('fusion_1200_hints_cold_names', lambda: old_fuse(spec, previous), cold_fusion, 10)
-
-    cancel, deadline = threading.Event(), float('inf')
-    for label, source, query in (
-            ('source_matching', ('-- compact sets\ntheorem compact : True := by trivial\n'+'\n'*10)*250, 'compact'),
-            ('source_no_matches', ('def unrelated : Nat := 0\n'+'\n'*10)*250, 'compact')):
-        def previous_match():
-            return old_matches(source.splitlines(keepends=True), old_names(source), query,
-                               'lib/X.lean', 20, cancel, deadline)
-        def current_match():
-            return content_matches(source, query, 'lib/X.lean', 20, cancel, deadline)
-        a, b = previous_match(), current_match()
-        assert [(r['line'],r['source'],r['names'],r['score']) for r in a] == [
-            (r.line,r.source,list(r.names),r.score) for r in b]
-        compare(label, previous_match, current_match, 3)
 
     records = [{'body':'α😀 abc '*10000}]
     archive = prepare_archive(scope, 'a'*64, records, (artifacts.save(b'receipt'),), artifacts)

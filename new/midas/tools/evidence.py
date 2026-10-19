@@ -9,6 +9,7 @@ from ..domain.records import identifier, instance, items
 from ..source import SourceFile, code_only
 from .protocol import RESULT_BYTES, Scope, pack, read, text
 from .search import FILE_BYTES, SearchResult
+from .bm25 import DETAILS
 
 PAGE_BYTES = 16000
 MAX_PAGES = 1024
@@ -194,20 +195,38 @@ def source_excerpt(data, location):
 
 
 def search_summary(result, search):
-    """Project admitted search hints in rank order, retaining authored excerpts."""
+    """Twelve detailed hits and a compact name tail, without a score cutoff.
+
+    If full excerpts would push names off the first page, lead with the ranked
+    name list and page the details after it. Anonymous hits always need source.
+    """
     instance(result, SearchResult)
     rows = [f'Search ({search.backend.name}): {search.query}']
     if result.error:
         rows.append('Search failed: '+result.error)
     elif not result.records:
         rows.append('No matches.')
-    for match in result.records:
+    details, names = [], []
+    compact = len(result.records) > DETAILS
+    if compact:
+        detail = f'; first {DETAILS} detailed' if search.backend.name == 'frozen-source' else ''
+        rows.append(f'{len(result.records)} results{detail}. '
+                    'Use lookup with a name for its type or inspect=true for source.')
+    for rank, match in enumerate(result.records, 1):
         name = '\n'.join(match.names) or 'Source match (no declaration name)'
-        if match.path is not None:
+        label = f'{rank}. ' if compact else ''
+        names.append(label+name if match.names else f'{label}{name}: {match.path}:{match.line}')
+        detailed = rank <= DETAILS or not match.names
+        if match.path is not None and detailed:
             name += f'\nSource: {match.path}:{match.line}'
             if match.source:
                 name += f'\nExcerpt starts at line {match.start_line}:\n'+match.source
-        rows.append(name)
+            details.append(label+name)
+        rows.append(label+name)
+    if compact and details and sum(codec.record_size(f, limit=PAGE_BYTES)
+                                   for f in _fragments(rows)) > PAGE_BYTES-1024:
+        return (*rows[:2], 'Ranked names (details follow; use page for further excerpts):\n'+'\n'.join(names),
+                *details)
     return tuple(rows)
 
 

@@ -72,6 +72,10 @@ Dependency roots are referenced in place, including large Mathlib trees. Package
 preparation copies only the project and compiler runtime, and pins dependency
 contents in the binary manifest. Keep referenced directories available and stable;
 restoring or explicitly validating a package rejects changed dependency inputs.
+Package preparation also builds `search.sqlite` for local BM25 search. LeanEval
+`prepare` reuses this index, or builds it for an existing package before publishing
+the workspace. Subsequent starts, resumes and forks share the package index,
+including when they use a different application cache.
 
 Measured on the Morley fixture (2026-10-16): ordinary CLI package preparation
 completed in **67.08 seconds**, referencing **8.28 GB** across ten dependencies.
@@ -1099,21 +1103,22 @@ measure prompt construction, not model proof success or provider cache hit rates
 
 ## Tools
 
-The nine helper modules in the blueprint are consolidated into five implementation
+The nine helper modules in the blueprint are consolidated into six implementation
 modules plus `__init__.py`:
 
 | New module | Responsibility |
 | --- | --- |
 | `tools/protocol.py` | Immutable scoped actions, binary requests, stable identities, bounded stage descriptions and probe-body expansion |
-| `tools/search.py` | Frozen source selectors/content ranking, hosted LeanExplore transport, worker execution and search receipt admission |
+| `tools/search.py` | Frozen source selectors, bounded search projection, hosted LeanExplore transport, worker execution and search receipt admission |
+| `tools/bm25.py` | Lexical declaration extraction, frozen-corpus SQLite FTS5 cache and file-scope preference |
 | `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
 | `tools/research.py` | Structured response validation, recorded web actions, access claims, quote bounds and advisory provenance |
 | `tools/evidence.py` | Readable search/probe results, frozen declaration excerpts, staged binary archives, indexed pages and duplicate-delivery keys |
 
 These replace the tools responsibilities of `combined_retrieval`, `discovery`,
 `discovery_helpers`, `lookup_helpers`, `lookup_source`, `probe_helpers`,
-`research_helpers`, `research_protocol` and `retrieval_helpers`. SQL, publication,
-scheduling and model/compiler execution remain with their owning components.
+`research_helpers`, `research_protocol` and `retrieval_helpers`. Durable run SQL,
+publication, scheduling and model/compiler execution remain with their owning components.
 Research prompt wording and response schemas belong to `prompt/researcher.py`.
 The original `midas_formalizer` files remain unchanged and are not imported.
 
@@ -1147,10 +1152,39 @@ commit this result once against current owner versions and retain every search,
 compiler and model receipt, including failed stages.
 
 Application prepares a `SourceIndex` from admitted frozen file references once per
-environment. Search reads through a verified `ArtifactReader`, with 2 MiB per-file
-and 128 MiB total scan bounds. Dotted modules, paths and stems resolve against this
-index; ambiguous selectors require a qualified root. Query terms must occur in the
-displayed excerpt, including after truncation. Frozen project sources support both
+environment. Package and attachment preparation build a CPU-only SQLite FTS5
+index in the package's flat `search.sqlite` file before publication. Its bytes
+count toward the package allowance. LeanEval preparation also ensures that this
+index exists before publishing the workspace. The derived index stores its format,
+environment hash and frozen source hashes as one corpus key; it does not change
+the environment identity or contain an environment inventory.
+Builds read verified artifacts with 2 MiB per-file and 512 MiB corpus bounds;
+publication is atomic and concurrent builders share a cancellable lock. Warm
+queries open package postings read-only, without creating a runtime search cache,
+and read only the files supplying displayed excerpts, verifying those source
+bytes again. A missing, outdated or corrupt package index falls back to the
+application cache, keyed by the same corpus key. Files, postings and ranges use
+SQLite/raw bytes, without JSON corpus serialization or a GPU/model dependency.
+
+The index uses the tested BM25 field weights: names 3, documentation 2, lexical
+headers 1. Tokens retain words and camel-case components; there is no stemming,
+additional normalization or score cutoff. Query terms are ORed. Filtering happens
+before the best 100 candidates are selected, with corpus-wide IDF. Exact full
+names (optionally prefixed by `_root_.`) stay first. Remaining scores get a 1.5×
+ranking multiplier only for an explicitly selected file/module; directories grant
+no bonus. Ties preserve baseline ordering. Evidence retains raw BM25 scores.
+
+Search returns up to 50 results. The first 12 include source excerpts (up to 6000
+UTF-8 bytes each); subsequent named hits carry only names in the display. Lookup
+can expand any of those names. Anonymous declarations retain excerpts because
+they cannot be looked up by name. When excerpts overflow the first evidence page,
+a compact ranked name list comes first and details follow through ordinary paging.
+Extraction is lexical, not an elaborated declaration inventory: macro-generated
+names are not inferred, and anonymous instances appear as source hints. Thus the
+frozen-source corpus differs from the standalone LeanExplore experiment corpus.
+
+Dotted modules, paths and stems resolve against the frozen index; ambiguous
+selectors require a qualified root. Frozen project sources support both
 lookup excerpts and discovery. `project` is advertised alongside dependency roots;
 selectors can use `project`, explicit project paths, or unambiguous file/module
 names such as `ChallengeDeps` and `Submission.Helpers`. Exact directories take
@@ -1186,6 +1220,25 @@ verifies one indexed page, with no archive-wide decoding or earlier-page scan.
 The controller supplies an indexed duplicate-delivery check and rechecks the returned
 delivery key and scope when committing. Scope changes invalidate recall/cursors.
 Artifact publication and orphaned staging recovery remain storage responsibilities.
+
+BM25 integration validation (2026-10-19): offline contracts cover exact-name
+protection, scope-before-candidate selection, file-only preference, raw score
+roundtrips, cache reuse/invalidation and concurrent builds, 12/50 delivery, paged
+overflow, and tail lookup. A real Lean 4.35.0-rc3 application check passed search,
+checked tail source lookup, retrieval offsets, proof continuation and resume.
+On the experimental Mathlib checkout (`aae61ae`), building 249,981 lexical
+declarations from 8,264 files took 22.6 seconds and produced a 63 MiB index. Warm
+simplicial-nerve search took about 8 ms versus 2.2 seconds for v2's scan of the
+same 1,090-file scope. These are local search timings, not proof throughput.
+Its 25 results and first 12 details fit in a single page (9.1 KB of display text).
+
+```sh
+# From new/; offline tests and source-only benchmark:
+../.venv/bin/python -B -m unittest tests.test_search tests.test_source tests.test_tools tests.test_application tests.test_prompt tests.test_strategy -q
+../.venv/bin/python -B -m tests.benchmark_search /path/to/mathlib-checkout
+# Requires root AGENTS.md permission for Lean/bubblewrap:
+../.venv/bin/python -B -m tests.check_search_lean /absolute/path/to/toolchain/bin/lean
+```
 
 Validation of body-only probes and readable evidence on 2026-10-17: **144 offline
 tests passed**, plus the real Lean application integration check. Coverage includes
@@ -1880,7 +1933,8 @@ file aliases in referenced inputs
 are allowed; external links, directory links and special files are rejected.
 
 The package contains `environment.bin`, `preflight.bin`, a small `location.json`,
-and local `project/` and `runtime/` snapshots. The locator records the toolchain
+and local `project/` and `runtime/` snapshots. The application package command also
+adds the derived BM25 `search.sqlite` index before publication. The locator records the toolchain
 path and a flat dependency-name-to-directory map, capped at 16 KiB. No dependency
 tree, hardlink farm or shared copy is created. Its manifest is a flat binary record stream beginning
 with `MIDASENV` and byte `2`. Paths, settings and file metadata have explicit

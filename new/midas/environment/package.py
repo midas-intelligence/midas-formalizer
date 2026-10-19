@@ -333,8 +333,8 @@ class Environment:
                 target.flush()
                 os.fsync(target.fileno())
             _locator(stage, toolchain, references)
-            # Account for metadata as well as copied payloads before publication.
-            extra = sum((stage / p).stat().st_size for p in ('environment.bin', 'preflight.bin', 'location.json'))
+            # Include package metadata and derived files added by preparation.
+            extra = sum(p.stat().st_size for p in stage.iterdir() if p.is_file())
             if extra > remaining:
                 raise EnvironmentError('Package metadata exceeds remaining byte allowance')
             for name, inventory in inventories.items():

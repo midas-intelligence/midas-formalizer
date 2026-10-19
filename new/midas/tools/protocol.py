@@ -13,7 +13,7 @@ from ..source.names import code_only
 
 REQUEST_BYTES = 256 * 1024
 RESULT_BYTES = 8 * 1024**2
-SEARCH_BYTES = 256 * 1024
+SEARCH_BYTES = 512 * 1024
 ENDPOINT = 'https://www.leanexplore.com/api/v2/search'
 BACKENDS = ('frozen-source', 'leanexplore')
 
@@ -107,13 +107,13 @@ class Backend:
 class Search:
     query: str
     backend: Backend
-    limit: int = 20
+    limit: int = 50
 
     def __post_init__(self):
         text(self.query, 'search query', 2048)
         instance(self.backend, Backend)
-        if type(self.limit) is not int or not 1 <= self.limit <= 20:
-            raise ValueError('Search limit must be 1 through 20')
+        if type(self.limit) is not int or not 1 <= self.limit <= 50:
+            raise ValueError('Search limit must be 1 through 50')
 
 
 @dataclass(frozen=True, slots=True)

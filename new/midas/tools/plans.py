@@ -14,8 +14,8 @@ from .search import SearchResult
 
 # The complete bounded rank domain has one exact denominator. Integer addition
 # preserves Fraction ordering without allocating/reducing a fraction per hit.
-_DENOMINATOR = lcm(*range(60, 460))
-_RANK_WEIGHT = tuple(_DENOMINATOR // rank for rank in range(60, 460))
+_DENOMINATOR = lcm(*range(60, 1060))
+_RANK_WEIGHT = tuple(_DENOMINATOR // rank for rank in range(60, 1060))
 
 
 @lru_cache(maxsize=4096)
