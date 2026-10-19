@@ -12,7 +12,7 @@ from ..environment import Environment
 from ..executor import Executor
 from ..export import Export
 from ..policy import Config, Policy, load_config
-from ..storage import (Changes, FrozenRun, NodeChange, claim_writer, create, open_reader)
+from ..storage import (Changes, CounterChange, FrozenRun, NodeChange, claim_writer, create, open_reader)
 from ..strategy import Context, Subject
 from ..tools import SearchService
 from . import candidates, preparation, providers, records as r
@@ -254,8 +254,14 @@ class Application:
             checker = self.checker_factory(environment, self.cache)
             preparation.ready(checker, cancellation=cancellation)
             if increases:
+                previous = config
                 config = config.increase(increases)
-                commit(writer, 'increase:'+str(uuid4()), r.save(writer, r.SCOPE, 'configuration', config.encode()))
+                effect = r.save(writer, r.SCOPE, 'configuration', config.encode())
+                if config.export != previous.export:
+                    epoch = writer.counter(r.SCOPE, 'export_epoch')
+                    effect = r.merge(effect, Effect(Changes(counters=(
+                        CounterChange(r.SCOPE, 'export_epoch', epoch, epoch+1),))))
+                commit(writer, 'increase:'+str(uuid4()), effect)
             library_record = writer.record(r.SCOPE, 'library')
             library = None
             if library_record:

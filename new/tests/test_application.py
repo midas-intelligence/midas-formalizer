@@ -305,6 +305,132 @@ class Contracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.app.resume(self.root/'run', increases={'run': {'turns': 1}})
 
+    def test_resume_raised_export_limits_retries_without_rechecking_proofs(self):
+        from midas.application import records as r
+        from midas.controller import Accepted
+        from midas.policy import Failure
+        with self.start() as run:
+            frozen = run.writer.frozen_run().configuration
+            run.submit(submission(self.selected))
+            operation = run.controller.operations.integrate
+            run.controller.operations = replace(run.controller.operations,
+                integrate=replace(operation, admit=lambda *args: Accepted(failure=Failure.MEMORY)))
+            self.assertNotEqual(self.finish(run).exit_code, 0)
+            nodes = tuple(run.writer.nodes(limit=100))
+            failed = next(row.key for row in run.writer.records('application.jobs', limit=100)
+                          if row.key.startswith('export:'))
+            original = next(invocation for key in run.writer.executions('RECEIVED', limit=100)
+                            if (invocation := run.writer.invocation(key)).request.job.semantic_key == failed)
+            receipt = run.writer.receipt(original.original_execution_id)
+            usage = r.value(run.writer, 'application.export', 'usage')
+        Compiler.calls = []
+        with self.app.resume(self.root/'run', increases={'run': {'turns': 401}}) as run:
+            self.assertNotEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(Compiler.calls, [])
+        with self.app.resume(self.root/'run', increases={
+                'checker': {'memory_mib': 8192, 'wall_ms': 480000},
+                'export': {'memory_mib': 8192, 'timeout_ms': 480000},
+                'scheduling': {'compiler_memory_mib': 16384, 'compiler_concurrency': 2}}) as run:
+            self.assertEqual(r.value(run.writer, 'application.export', 'usage'), usage)
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(tuple(run.writer.nodes(limit=100)), nodes)
+            self.assertEqual(run.writer.frozen_run().configuration, frozen)
+            self.assertEqual(run.writer.invocation(original.original_execution_id), original)
+            self.assertEqual(run.writer.receipt(original.original_execution_id), receipt)
+            stage = run.workflow.stage(run.writer, 'integration')
+            retried = run.writer.invocation(stage.receipt.original_execution_id)
+            self.assertNotEqual(retried.request.job.semantic_key, failed)
+            self.assertEqual(retried.request.operation_payload, original.request.operation_payload)
+            self.assertEqual(retried.request.job.limits.memory_mib, 8192)
+            self.assertEqual(retried.request.job.limits.wall_ms, 480000)
+            self.assertEqual(Compiler.calls, ['integrate', 'audit'])
+            self.assertEqual(run.writer.status_snapshot().accounting.turns, 0)
+            run.writer.validate(force_artifacts=True)
+        with self.app.resume(self.root/'run') as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(run.workflow.policy.config.export.memory_mib, 8192)
+            self.assertEqual(Compiler.calls, ['integrate', 'audit'])
+
+    def test_pending_export_keeps_frozen_limits_then_retries_with_increase(self):
+        from midas.application import records as r
+        from midas.controller import Accepted
+        from midas.policy import Failure
+        with self.start() as run:
+            run.submit(submission(self.selected))
+            dispatch = run.controller._dispatch
+            def defer_export():
+                if r.value(run.writer, 'application.export', 'integration'):
+                    return 0, ()
+                return dispatch()
+            with patch.object(run.controller, '_dispatch', side_effect=defer_export):
+                for _ in range(1000):
+                    run.step()
+                    pending = r.value(run.writer, 'application.export', 'integration')
+                    if pending:
+                        break
+                    time.sleep(.001)
+            self.assertIsNotNone(pending)
+            old_key = pending[1]
+            self.assertEqual(run.writer.intent_state(old_key)[0], 'PENDING')
+        Compiler.calls = []
+        with self.app.resume(self.root/'run', increases={
+                'export': {'memory_mib': 8192},
+                'scheduling': {'compiler_memory_mib': 8192}}) as run:
+            operation = run.controller.operations.integrate
+            observed = []
+            def admit(invocation, *args):
+                observed.append(invocation.request.job.limits.memory_mib)
+                if invocation.request.job.limits.memory_mib == 4096:
+                    return Accepted(failure=Failure.MEMORY)
+                return operation.admit(invocation, *args)
+            run.controller.operations = replace(run.controller.operations,
+                integrate=replace(operation, admit=admit))
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(observed, [4096, 8192])
+            self.assertEqual(run.writer.intent_state(old_key)[0], 'DONE')
+            self.assertEqual(Compiler.calls, ['integrate', 'integrate', 'audit'])
+
+    def test_failed_export_gets_only_one_new_attempt_per_limit_increase(self):
+        from midas.controller import Accepted
+        from midas.policy import Failure
+        def fail(run):
+            operation = run.controller.operations.integrate
+            run.controller.operations = replace(run.controller.operations,
+                integrate=replace(operation, admit=lambda *args: Accepted(failure=Failure.MEMORY)))
+            self.assertNotEqual(self.finish(run).exit_code, 0)
+        with self.start() as run:
+            run.submit(submission(self.selected))
+            fail(run)
+        Compiler.calls = []
+        for memory in (8192, 16384):
+            with self.app.resume(self.root/'run', increases={
+                    'export': {'memory_mib': memory},
+                    'scheduling': {'compiler_memory_mib': memory}}) as run:
+                fail(run)
+                count = len(Compiler.calls)
+                fail(run)
+                self.assertEqual(len(Compiler.calls), count)
+            with self.app.resume(self.root/'run') as run:
+                fail(run)
+                self.assertEqual(len(Compiler.calls), count)
+        self.assertEqual(Compiler.calls, ['integrate', 'integrate'])
+
+    def test_resume_raised_export_deadline_keeps_consumed_budget(self):
+        from midas.application import records as r
+        from midas.application.service import commit
+        with self.start() as run:
+            spent = run.workflow.policy.config.export.deadline_ms
+            commit(run.writer, 'spent-export-budget',
+                   r.record(run.writer, 'application.export', 'usage', [spent, 0, 0]))
+            run.submit(submission(self.selected))
+            self.assertNotEqual(self.finish(run).exit_code, 0)
+            self.assertIn('deadline', r.value(run.writer, 'application.export', 'integration')[1])
+        Compiler.calls = []
+        with self.app.resume(self.root/'run', increases={'export': {'deadline_ms': spent+90000}}) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(r.value(run.writer, 'application.export', 'usage')[0], spent)
+            self.assertEqual(Compiler.calls, ['integrate', 'audit'])
+
     def test_cache_diagnostic_retains_unknown_telemetry(self):
         from midas.provider import ModelOutput, Route
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses',
@@ -630,6 +756,43 @@ class Contracts(unittest.TestCase):
             changed = replace(result, invocation_id=another.original_execution_id, output=bad, staged_artifacts=(bad,))
             commit(run.writer, 'malformed-usage', run.workflow.export_usage(run.writer, another, changed))
             self.assertFalse(run.workflow.export_retry(run.writer, another))
+
+
+class ExportScheduling(unittest.TestCase):
+    def fixture(self):
+        from unittest.mock import Mock
+        from midas.domain import JobKind
+        request = SimpleNamespace(sha256='a' * 64)
+        work = SimpleNamespace(kind=JobKind.ASSEMBLE, owner=SimpleNamespace(obligation_id='owner'))
+        flow = SimpleNamespace(graph=lambda reader: SimpleNamespace(revision=2), library=None,
+            stage=lambda *args: None, selection=None, allow_sorry=False,
+            export=SimpleNamespace(plan=Mock(return_value=(work,)),
+                                   prepare_assembly=Mock(return_value=request)),
+            parent_request=Mock(), policy=SimpleNamespace(config=Config(), export_limits=Mock()),
+            compiler_job=Mock(side_effect=AssertionError('Duplicate export job')))
+        reader = Mock()
+        reader.counter.return_value = 0
+        return flow, reader, 'export:' + request.sha256
+
+    def test_unrelated_graph_change_keeps_pending_export(self):
+        from midas.application.workflow import Workflow
+        flow, reader, key = self.fixture()
+        for state in ('PENDING', 'RUNNING'):
+            reader.intent_state.return_value = (state, None)
+            with patch('midas.application.records.value', return_value=['pending', key, 1]):
+                self.assertIsNone(Workflow.export_plan(flow, reader))
+        flow.export.prepare_assembly.assert_not_called()
+        flow.compiler_job.assert_not_called()
+
+    def test_unchanged_failed_export_keeps_existing_intent(self):
+        from midas.application.workflow import Workflow
+        flow, reader, key = self.fixture()
+        reader.intent_state.return_value = ('DONE', None)
+        with patch('midas.application.records.value', side_effect=[['failed', 'checker', 1], None]):
+            self.assertIsNone(Workflow.export_plan(flow, reader))
+        flow.export.prepare_assembly.assert_called_once()
+        reader.intent_state.assert_called_once_with(key)
+        flow.compiler_job.assert_not_called()
 
 
 if __name__ == '__main__':

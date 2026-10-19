@@ -387,7 +387,22 @@ settle once through controller transactions.
 
 `resume(directory, increases=...)` restores the package and re-admits selected and
 pending proof evidence, reviews and export stages before stepping. Policy increases
-are prospective; frozen requests retain their original bounds. Received model
+are prospective; frozen requests retain their original bounds. Checker, local and
+export resource limits and scheduling capacity can be raised alongside run and
+mathematics limits. For example, `--raise-limits increase.json` accepts:
+
+```json
+{"checker":{"memory_mib":8192,"wall_ms":480000},"export":{"memory_mib":8192,"timeout_ms":480000},"scheduling":{"compiler_memory_mib":122880}}
+```
+
+The compiler memory pool must cover each compiler/export job. Lower bounds are
+rejected; zero heartbeats means unlimited, so changing it to a finite bound is a
+decrease. Raising export limits permits a new assembly, integration or verification
+attempt with a new request identity, retaining prior receipts and cumulative export
+usage. Completed proofs and current successful export stages are reused. Pending
+jobs finish with their frozen limits; a failed export can then use the raised limits.
+Checker increases apply to newly planned checks; they do not reopen settled candidate
+decisions. Received model
 outputs keep their original accounting identity during recovery. `request_stop()`
 uses controller cancellation/draining. Inspection opens read-only storage without
 constructing providers or compilers. Eight idle read connections and revision-bound
@@ -484,6 +499,9 @@ and exact verified children. Composition shares named declarations and discharge
 polymorphic assumptions without expanding transitive proof trees. Earlier selected
 definition values are replayed before dependent frozen-peer checks. Checker kernel
 replay produces an `AdmittedCheck(ASSEMBLY)` for `domain.accept_assembly`.
+Native-cache restoration rebuilds namespace prefixes from kernel-checked declaration
+names, so later source proofs can open dependency namespaces after cache reuse.
+Cached elaborator extension state remains excluded.
 
 `prepare_integration` renders checked roots through the shared source renderer and
 writes raw source to the supplied staging capability. Authored scopes, attributes,
@@ -1306,7 +1324,8 @@ diagnostic output is retained, including the configured limit; no special model
 prompt instructions are added.
 
 `Policy` and `Config` are immutable. `config.increase(...)` produces a new snapshot
-for prospective run/mathematical increases. It does not reset usage, move the
+for prospective run, mathematical, process/export and scheduling capacity increases.
+It does not reset usage, move the
 run's time origin, enlarge existing repair grants or rewrite frozen requests.
 Storage/controller must persist the change with its audit identity and expected
 version. Recovery rules passed to `retry` come from the **saved request**, even

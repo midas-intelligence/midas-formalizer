@@ -250,6 +250,19 @@ class IsolationTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_combined_policy_capacity(self):
+        from midas.policy.config import SchedulingConfig
+        limits = SchedulingConfig(model_concurrency=1024, compiler_concurrency=1024,
+                                  local_concurrency=1024)
+        with tempfile.TemporaryDirectory() as directory:
+            with Executor(directory, workers=limits.model_concurrency +
+                          limits.compiler_concurrency + limits.local_concurrency,
+                          compiler_slots=limits.compiler_concurrency):
+                pass
+            for workers, compilers in ((3073, 1), (3072, 1025), (2, 3)):
+                with self.assertRaises(ValueError):
+                    Executor(directory, workers=workers, compiler_slots=compilers)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -308,21 +308,27 @@ class Config:
     def increase(self, changes):
         """Prospective live increases; callers persist audit and expected version.
 
-        Frozen requests retain their old Config. Usage and deadlines' origins do
-        not reset. Provider/recovery, helper and resource settings stay frozen.
+        Frozen requests retain their old bounds. Usage and deadlines' origins do
+        not reset. Provider/recovery and helper settings stay frozen.
         """
-        _object(changes, ('run', 'mathematics'))
+        _object(changes, ('run', 'mathematics', 'checker', 'local', 'export', 'scheduling'))
         sections = {}
         changed = False
         for name, patch in changes.items():
             original = getattr(self, name)
-            allowed = ('turns', 'runtime_ms') if name == 'run' else tuple(f.name for f in fields(original))
+            allowed = (('turns', 'runtime_ms') if name == 'run' else
+                ('model_concurrency', 'compiler_concurrency', 'local_concurrency', 'compiler_memory_mib')
+                if name == 'scheduling' else tuple(f.name for f in fields(original)))
             _object(patch, allowed)
             for field, value in patch.items():
                 natural(value, field)
-                if value < getattr(original, field):
+                before = getattr(original, field)
+                # Lean interprets zero heartbeats as unlimited.
+                decreases = ((before == 0 and value != 0) or (value != 0 and value < before)
+                             if field == 'max_heartbeat' else value < before)
+                if decreases:
                     raise DomainError(f'Live limits cannot decrease: {name}.{field}')
-                changed |= value > getattr(original, field)
+                changed |= value != before
             sections[name] = replace(original, **patch)
         if not changed:
             raise DomainError('At least one live limit must increase')

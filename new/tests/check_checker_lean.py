@@ -138,6 +138,22 @@ def main():
                 assert b'NATIVE_CACHE_ELABORATED' in stderr(result), 'Cache miss did not rebuild source'
                 result, _ = check('rebuilt assembly is cached', assembly)
                 assert b'NATIVE_CACHE_ELABORATED' not in stderr(result), 'Rebuilt declaration was not reused'
+                # Cached roots can be renamed into nested dependency namespaces.
+                # A fresh downstream source declaration must be able to open them.
+                from copy import deepcopy
+                scoped = deepcopy(cert)
+                namespace = ['str', ['str', name('MidasCandidateResult'), 'dependencies'], 'nested']
+                alias = ['str', namespace, 'h']
+                scoped['declarations'][0]['name'] = alias
+                scoped['declarations'].append(dict(cert['declarations'][0],
+                    source='open _root_.MidasCandidateResult.dependencies.nested in by exact h',
+                    requires=[alias]))
+                scoped_value = dict(value, packet=dict(value['packet'], certificate=scoped))
+                scoped_request = CompilerRequest(codec.encode(scoped_value))
+                result, _ = check('cached alias namespace opens in fresh dependent proof', scoped_request)
+                assert b'NATIVE_CACHE_ELABORATED' not in stderr(result), 'Alias was not restored from cache'
+                result, _ = check('nested namespace assembly is reusable', scoped_request)
+                assert b'NATIVE_CACHE_ELABORATED' not in stderr(result)
                 frame = native.frame
                 def corrupt(packet, blobs=()):
                     if packet.get('native_proof') and blobs:

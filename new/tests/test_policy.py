@@ -61,8 +61,8 @@ class ConfigTests(unittest.TestCase):
             for invalid in (0, -1, True, 1.5, None, 2**63):
                 with self.subTest(name=name, value=invalid), self.assertRaises(DomainError):
                     replace(section, max_rec_depth=invalid)
-            with self.assertRaises(DomainError):
-                config.increase({name: {'max_rec_depth': count + 1}})
+            self.assertEqual(getattr(config.increase({name: {'max_rec_depth': count + 1}}),
+                                     name).max_rec_depth, count + 1)
         self.assertEqual(config.export.limits(comparator=True).max_rec_depth, 2048)
         self.assertEqual(Policy(config).export_limits(ExportUsage(elapsed_ms=100)).max_rec_depth, 2048)
 
@@ -78,8 +78,12 @@ class ConfigTests(unittest.TestCase):
             for invalid in (-1, True, 1.5, None, 2**63):
                 with self.subTest(name=name, value=invalid), self.assertRaises(DomainError):
                     replace(section, max_heartbeat=invalid)
-            with self.assertRaises(DomainError):
-                config.increase({name: {'max_heartbeat': count + 1}})
+            if count == 0:
+                with self.assertRaises(DomainError):
+                    config.increase({name: {'max_heartbeat': count + 1}})
+            else:
+                self.assertEqual(getattr(config.increase({name: {'max_heartbeat': 0}}),
+                                         name).max_heartbeat, 0)
         self.assertEqual(config.export.limits(comparator=True).max_heartbeat, 54321)
         self.assertEqual(Policy(config).export_limits(ExportUsage(elapsed_ms=100)).max_heartbeat, 54321)
 
@@ -274,6 +278,25 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(Policy(new)._budget_reason(Usage(), RunUsage(turns=400)) is None)
         for change in ({}, {'run': {'turns': 399}}, {'run': {'turns': 400}},
                        {'helpers': {'research': 100}}, {'run': {'max_input_tokens': 5}}):
+            with self.subTest(change=change), self.assertRaises(DomainError):
+                old.increase(change)
+
+    def test_resource_increases_validate_pool_profiles_and_decreases(self):
+        old = Config()
+        changes = {'checker': {'memory_mib': 8192, 'wall_ms': 480000},
+                   'export': {'memory_mib': 8192, 'timeout_ms': 480000},
+                   'scheduling': {'compiler_memory_mib': 16384, 'compiler_concurrency': 2}}
+        new = old.increase(changes)
+        self.assertEqual(load_config(new.encode()), new)
+        self.assertEqual(new.checker.limits().memory_mib, 8192)
+        self.assertEqual(new.export.limits().wall_ms, 480000)
+        self.assertEqual(old.checker.memory_mib, 4096)
+        for change in ({'checker': {'memory_mib': 8192}},
+                       {'export': {'timeout_ms': 1}},
+                       {'checker': {'wall_ms': 86400001}},
+                       {'scheduling': {'compiler_concurrency': 1025}},
+                       {'scheduling': {'backlog_low': 5}},
+                       {'local': {'memory_mib': True}}):
             with self.subTest(change=change), self.assertRaises(DomainError):
                 old.increase(change)
 

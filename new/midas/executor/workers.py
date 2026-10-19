@@ -234,7 +234,9 @@ class Executor:
         for name, value in (('workers', workers), ('compiler_slots', compiler_slots),
                             ('compiler_memory_mib', compiler_memory_mib), ('progress_capacity', progress_capacity)):
             natural(value, name, positive=True)
-        if workers > 1024 or compiler_slots > workers or progress_capacity > 4096:
+        # Application combines model, compiler and local pools, each of which
+        # policy permits up to 1024 concurrent jobs.
+        if workers > 3 * 1024 or compiler_slots > min(workers, 1024) or progress_capacity > 4096:
             raise ValueError('Executor capacity is out of range')
         self.directory = Path(directory).absolute()
         if self.directory.resolve(strict=True) != self.directory or not self.directory.is_dir():

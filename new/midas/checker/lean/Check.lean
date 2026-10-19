@@ -596,6 +596,16 @@ def saveNative (id : String) (before : Environment) (root : Name) : CommandElabM
   catch _ => pure ()
   try IO.FS.removeFile file catch _ => pure ()
 
+-- Kernel insertion does not register name prefixes as normal elaboration does.
+-- Reconstruct only this metadata from checked names, never from cache extensions.
+def registerNativeNamespaces (env : Environment) (name : Name) : Environment :=
+  prefixes env (privateToUserName name)
+where
+  prefixes (env : Environment) : Name → Environment
+    | .str parent _ => if parent.isAnonymous then env
+      else prefixes (env.registerNamespace parent) parent
+    | _ => env
+
 def replayNative (file : System.FilePath) (root : Name) (helperBase : Environment) : CommandElabM Unit := do
   let (data, region) ← readModuleData file
   nativeRegions.modify (·.push region)
@@ -635,6 +645,8 @@ def replayNative (file : System.FilePath) (root : Name) (helperBase : Environmen
       else rest := ci :: rest
     unless progress do throwError "native artifact has cyclic or missing dependencies"
     pending := rest
+  for ci in constants do
+    modifyEnv (registerNativeNamespaces · ci.name)
 
 -- Missing artifacts are rebuilt from durable source and independently audited.
 -- Present artifacts never execute their source or import elaborator extensions.

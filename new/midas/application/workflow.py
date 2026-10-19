@@ -292,7 +292,17 @@ class Workflow:
         name = 'assembly:'+work.owner.obligation_id if work.kind == JobKind.ASSEMBLE else (
             'integration' if work.kind == JobKind.INTEGRATE else 'verification')
         prior = r.value(reader, 'application.export', name)
-        if prior and prior[0] in ('pending', 'failed') and prior[-1] == graph.revision:
+        epoch = reader.counter(r.SCOPE, 'export_epoch')
+        if prior and prior[0] == 'pending':
+            state = reader.intent_state(prior[1])
+            if state and state[0] in ('PENDING', 'RUNNING'):
+                # Other branches can advance the graph while this job runs.
+                # Its explicit owner fences, not the global graph revision,
+                # determine whether the controller must cancel it.
+                return None
+        prior_epoch = prior[-2] if prior and len(prior) == 4 else 0
+        if (prior and prior[0] in ('pending', 'failed') and prior[-1] == graph.revision
+                and prior_epoch == epoch):
             return None
         usage = r.value(reader, 'application.export', 'usage') or [0, 0, 0]
         try:
@@ -307,10 +317,16 @@ class Workflow:
             else:
                 request = self.export.prepare_verification(integration, self.selection, graph, reader)
         except ValueError as error:
-            return r.record(reader, 'application.export', name, ['failed', str(error)[:2048], graph.revision])
+            return r.record(reader, 'application.export', name, ['failed', str(error)[:2048], epoch, graph.revision])
         key = 'export:'+request.sha256
-        return r.merge(self.compiler_job(reader, key, request, request.expected_versions, ['export', name], limits=limits),
-            r.record(reader, 'application.export', name, ['pending', key, graph.revision]),
+        if epoch:
+            key += ':limits:'+str(epoch)
+        if reader.intent_state(key) is not None:
+            # Retries belong to the existing controller intent. Unchanged
+            # export inputs must not publish a second admission for its key.
+            return None
+        return r.merge(self.compiler_job(reader, key, request, request.expected_versions, ['export', name, epoch], limits=limits),
+            r.record(reader, 'application.export', name, ['pending', key, epoch, graph.revision]),
             Effect(artifacts=tuple(buffer.artifacts)))
 
     def plan(self, reader, policy, limit):
@@ -406,7 +422,7 @@ class Workflow:
             from .helpers import reduce
             return reduce(self, reader, invocation, accepted, binding)
         if kind == 'export':
-            return self.on_export(reader, invocation, accepted, binding[1])
+            return self.on_export(reader, invocation, accepted, binding[1], *binding[2:])
         key, entry_key = binding[1:]
         saved = candidates.submission(reader, key)
         if saved is None or saved['current'] != invocation.request.job.semantic_key:
@@ -509,10 +525,10 @@ class Workflow:
                 effects.append(Effect(Changes(counters=(CounterChange(scope, name, before, before+1),))))
         return r.merge(*effects)
 
-    def on_export(self, reader, invocation, accepted, name):
+    def on_export(self, reader, invocation, accepted, name, epoch=0):
         graph = self.graph(reader)
         if accepted.failure:
-            return r.record(reader, 'application.export', name, ['failed', accepted.failure.value, graph.revision])
+            return r.record(reader, 'application.export', name, ['failed', accepted.failure.value, epoch, graph.revision])
         if invocation.request.job.kind == JobKind.ASSEMBLE:
             effect = r.graph_changes(reader, graph, accept_assembly(graph, accepted.value))
             return r.merge(effect, r.record(reader, 'application.export', name, ['done', graph.revision]))
