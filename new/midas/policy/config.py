@@ -47,8 +47,8 @@ class RunConfig:
 @dataclass(frozen=True, slots=True)
 class SchedulingConfig:
     model_concurrency: int = 2
-    compiler_concurrency: int = 1
-    local_concurrency: int = 2
+    network_concurrency: int = 2
+    compiler_concurrency: int = 1  # Shared CPU slots for compiler and local search jobs.
     compiler_memory_mib: int = 4096
     backlog_low: int = 4
     backlog_new_stop: int | None = None
@@ -61,7 +61,7 @@ class SchedulingConfig:
             if getattr(self, name) is None:
                 object.__setattr__(self, name, base + MAX_MODEL_DOWNSTREAM * self.model_concurrency)
         _integers(self)
-        if max(self.model_concurrency, self.compiler_concurrency, self.local_concurrency) > 1024:
+        if max(self.model_concurrency, self.compiler_concurrency, self.network_concurrency) > 1024:
             raise DomainError('Concurrency exceeds 1024')
         if not self.backlog_low < self.backlog_new_stop < self.backlog_all_stop:
             raise DomainError('Backlog thresholds must increase strictly')
@@ -317,7 +317,7 @@ class Config:
         for name, patch in changes.items():
             original = getattr(self, name)
             allowed = (('turns', 'runtime_ms') if name == 'run' else
-                ('model_concurrency', 'compiler_concurrency', 'local_concurrency', 'compiler_memory_mib')
+                ('model_concurrency', 'compiler_concurrency', 'network_concurrency', 'compiler_memory_mib')
                 if name == 'scheduling' else tuple(f.name for f in fields(original)))
             _object(patch, allowed)
             for field, value in patch.items():

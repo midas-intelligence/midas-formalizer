@@ -26,10 +26,17 @@ def submission_path(path):
         raise ValueError('Submission cannot replace trusted workspace inputs')
 
 
-def overlay(trusted, submission):
+def overlay(trusted, submission, *, attached=None):
+    attached = attached or {}
     if 'Submission.lean' not in submission:
         raise ValueError('Submission root is missing')
+    if not attached.keys() <= submission.keys():
+        raise ValueError('Submission omitted attached sources')
     for path, data in submission.items():
+        if path in attached:
+            if path in trusted or data != attached[path]:
+                raise ValueError('Submission attachment differs from the frozen source')
+            continue
         submission_path(path)
         if path != 'Submission.lean' and path in trusted and data != trusted[path]:
             raise ValueError('Submission helper differs from trusted starter')
@@ -68,10 +75,13 @@ def acceptance(result):
         raise ValueError('Comparator did not accept both kernels and the graph comparison')
 
 
-def run(environment, archive, submission, verification, runtime, *, config, cancellation=None):
+def run(environment, archive, submission, verification, runtime, *, config, cancellation=None, attached=None):
     runtime = Path(runtime).absolute()
     trusted = starter(archive)
-    files = overlay(trusted, submission)
+    files = overlay(trusted, submission, attached=attached)
+    if attached:
+        from .attachments import lakefile
+        files['lakefile.toml'] = lakefile(trusted['lakefile.toml'], attached)
     dependencies = tuple(d.name for d in verification.dependencies)
     lock, overrides = lake_metadata(archive, dependencies)
     if any(path == '.lake' or path.startswith('.lake/') for path in files):

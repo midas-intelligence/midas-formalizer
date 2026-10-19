@@ -43,7 +43,7 @@ def progress(reader, *, committed=None, integration=Stage.PENDING, verification=
     counts = dict(committed.intents)
     usage = committed.accounting
     return Progress(sum(roots.values()), roots.get('VERIFIED', 0), integration, verification,
-        active=usage.models+usage.compilers+usage.locals, ready=counts.get('PENDING', 0)+local_ready,
+        active=usage.models+usage.compilers+usage.locals+usage.networks, ready=counts.get('PENDING', 0)+local_ready,
         waiting=counts.get('RUNNING', 0), elapsed_ms=reader.counter('controller', 'elapsed_ms'),
         stopped=bool(reader.counter('controller', 'stopped')), recovery_required=reader.recovery_pending(),
         reasons=tuple(dict.fromkeys(reasons))[:20], allow_sorry=allow_sorry)

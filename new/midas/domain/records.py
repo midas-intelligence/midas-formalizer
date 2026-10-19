@@ -229,6 +229,7 @@ class JobKind(str, Enum):
     ASSEMBLE = "ASSEMBLE"
     INTEGRATE = "INTEGRATE"
     EXPORT_VERIFY = "EXPORT_VERIFY"
+    NETWORK_SEARCH = "NETWORK_SEARCH"
 
 
 class ResultStatus(str, Enum):

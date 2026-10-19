@@ -103,6 +103,8 @@ class Operations:
     export_verify: Operation | None = None
 
     def for_kind(self, kind):
+        if kind == JobKind.NETWORK_SEARCH:
+            return self.search
         names = ('model', 'binding', 'proof', 'lookup', 'probe', 'search',
                  'assemble', 'integrate', 'export_verify')
         return getattr(self, dict(zip(JobKind, names))[kind])

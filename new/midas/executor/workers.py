@@ -15,7 +15,7 @@ from .isolation import LaunchSpec, _launch
 from .process import Outcome, ProcessResult, failure
 
 _LOCAL = threading.local()
-_COMPILER_KINDS = frozenset(JobKind) - {JobKind.MODEL, JobKind.SEARCH}
+_COMPILER_KINDS = frozenset(JobKind) - {JobKind.MODEL, JobKind.SEARCH, JobKind.NETWORK_SEARCH}
 
 
 class WorkerStopped(RuntimeError):
@@ -79,6 +79,8 @@ class WorkerContext:
         self._limits = invocation.request.job.limits
         self._environment_id = invocation.request.environment_id
         self._compiler = invocation.request.job.kind in _COMPILER_KINDS
+        self._cpu = invocation.request.job.kind not in (JobKind.MODEL, JobKind.NETWORK_SEARCH)
+        self._network = invocation.request.job.kind == JobKind.NETWORK_SEARCH
         self._progress = progress
         self._sequence = 0
         self._output = self._evidence = 0
@@ -229,19 +231,19 @@ class Executor:
     mistakes and account for retained memory until actual process exit. Results
     and workspaces are handed back for controller-owned validation/publication.
     """
-    def __init__(self, directory, *, workers=4, compiler_slots=1, compiler_memory_mib=4096,
+    def __init__(self, directory, *, workers=4, compiler_slots=1, compiler_memory_mib=4096, network_slots=2,
                  progress_capacity=64):
         for name, value in (('workers', workers), ('compiler_slots', compiler_slots),
-                            ('compiler_memory_mib', compiler_memory_mib), ('progress_capacity', progress_capacity)):
+                            ('compiler_memory_mib', compiler_memory_mib), ('network_slots', network_slots), ('progress_capacity', progress_capacity)):
             natural(value, name, positive=True)
-        # Application combines model, compiler and local pools, each of which
-        # policy permits up to 1024 concurrent jobs.
-        if workers > 3 * 1024 or compiler_slots > min(workers, 1024) or progress_capacity > 4096:
+        # Model calls have separate slots; compiler and search jobs share CPU slots.
+        if workers > 3 * 1024 or compiler_slots > min(workers, 1024) or network_slots > 1024 or progress_capacity > 4096:
             raise ValueError('Executor capacity is out of range')
         self.directory = Path(directory).absolute()
         if self.directory.resolve(strict=True) != self.directory or not self.directory.is_dir():
             raise ValueError('Executor directory must exist without symlinks')
         self._workers, self._slots, self._memory = workers, compiler_slots, compiler_memory_mib
+        self._network_slots = network_slots
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='midas-worker')
         self._lock = threading.RLock()
         self._entries = {}
@@ -280,7 +282,16 @@ class Executor:
             retained = self._retained.get(grant.retained_worker_id)
             if grant.retained_worker_id is not None and (retained is None or retained.closed or not compiler or retained.memory_mib != memory):
                 raise ValueError('Retained worker transfer differs from the capacity grant')
+            network_jobs = sum(ctx._active and ctx._network for _, ctx, _ in self._entries.values())
+            network_jobs += sum(ctx._network for ctx in self._unconfirmed.values())
+            if invocation.request.job.kind == JobKind.NETWORK_SEARCH and network_jobs >= self._network_slots:
+                raise ValueError('Network capacity grant exceeds executor capacity')
             slots, active_memory = self._capacity()
+            cpu_jobs = sum(ctx._active and inv.request.job.kind not in (JobKind.MODEL, JobKind.NETWORK_SEARCH)
+                           for inv, ctx, _ in self._entries.values())
+            cpu_jobs += sum(ctx._cpu for ctx in self._unconfirmed.values())
+            if invocation.request.job.kind not in (JobKind.MODEL, JobKind.NETWORK_SEARCH) and cpu_jobs >= self._slots:
+                raise ValueError('CPU capacity grant exceeds executor capacity')
             if compiler and (slots >= self._slots or active_memory + memory > self._memory):
                 raise ValueError('Compiler capacity grant exceeds executor capacity')
             if retained is not None:

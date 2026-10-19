@@ -20,7 +20,8 @@ def record(view):
         turns=a.turns, turn_limit=view.turn_limit, elapsed_ms=p.elapsed_ms, runtime_ms=view.runtime_ms,
         usage=usage(a.actual), known_usage=usage(a.known), unknown_reports=usage(a.unknown),
         reserved_usage=usage(a.reserved), models=a.models, model_slots=view.model_slots,
-        compilers=a.compilers, compiler_slots=view.compiler_slots, locals=a.locals,
+        compilers=a.compilers, compiler_slots=view.compiler_slots, locals=a.locals, networks=a.networks,
+        cpu_active=a.compilers+a.locals,
         compiler_memory_mib=a.compiler_memory_mib)
 
 
@@ -45,7 +46,8 @@ def terminal(view):
     return (f'{safe(c.outcome)} | roots: {p.verified_roots}/{p.roots} verified'
             f' | integration: {c.integration_state.value} | verification: {c.export_verification_state.value}\n'
             f'turns: {a.turns}/{view.turn_limit} | cost: {cost}'
-            f' | model: {a.models}/{view.model_slots} | compiler: {a.compilers}/{view.compiler_slots}'
+            f' | model: {a.models}/{view.model_slots} | CPU: {a.compilers+a.locals}/{view.compiler_slots}'
+            f' | LeanExplore: {a.networks}'
             + (f'\nreasons: {reasons}' if reasons else '')+'\n')
 
 

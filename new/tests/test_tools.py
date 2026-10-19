@@ -151,6 +151,19 @@ class ToolsTests(unittest.TestCase):
         for query, data in [('mono', 'def Monoidal : Nat := 0\n'), ('needle tail', '-- needle '+'x'*7000+' tail\n')]:
             self.assertFalse(content_matches(data, query, 'mathlib/X.lean', 20, self.cancel, self.deadline))
 
+    def test_whole_file_search_filter_preserves_camel_unicode_and_stop_only_matches(self):
+        for query, source in (('compact manifold', 'def compactManifold : Nat := 0\n'),
+                              ('strasse', '-- Straße\n'), ('the and', '-- the and\n'),
+                              ('compact manifold', '-- compact\n-- manifold\n')):
+            with self.subTest(query=query, source=source):
+                self.assertTrue(content_matches(source, query, 'mathlib/X.lean', 20, self.cancel, self.deadline))
+        with patch('midas.tools.search._Query.mask', side_effect=AssertionError('Tokenized impossible match')):
+            self.assertEqual(content_matches('-- compact\n'*1000, 'compact manifold',
+                'mathlib/X.lean', 20, self.cancel, self.deadline), [])
+        self.cancel.set()
+        with self.assertRaises(TimeoutError):
+            content_matches('-- unrelated', 'compact manifold', 'mathlib/X.lean', 20, self.cancel, self.deadline)
+
     def test_source_hash_environment_size_and_stop_fail_closed(self):
         index = self.index((('mathlib/Mathlib/X.lean', b'-- compact\n'),))
         stage = self.stage(Search('compact', Backend('frozen-source', ('Mathlib',))))

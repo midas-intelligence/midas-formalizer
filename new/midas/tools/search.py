@@ -169,6 +169,7 @@ class SearchResult:
 
 class _Query:
     def __init__(self, query):
+        self.literal = query.casefold()
         self.terms = {t.casefold() for t in _WORDS.findall(query) if t.casefold() not in STOP}
         self.bits = {t: 1 << n for n, t in enumerate(sorted(self.terms))}
         self.full = (1 << len(self.bits)) - 1
@@ -185,6 +186,13 @@ class _Query:
 def content_matches(source, query, logical, limit, cancel, deadline):
     """Query coverage must survive excerpt truncation; paths never supply terms."""
     query = _Query(query) if isinstance(query, str) else query
+    stopped(cancel, deadline)
+    folded = source.casefold()
+    # A phrase hit contains its literal text; a coverage hit contains every
+    # query term, including terms split from camel-case identifiers. Rejecting
+    # files missing both possibilities avoids tokenizing the whole corpus.
+    if query.literal not in folded and (not query.terms or any(t not in folded for t in query.terms)):
+        return []
     lines = source.splitlines(keepends=True)
     hits = []
     for n, line in enumerate(lines):

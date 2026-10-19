@@ -136,7 +136,7 @@ class Application:
         return preparation.select(self.checker_factory(environment, self.cache), request, **options)
 
     def start(self, directory, *, package, selection, config=Config(), workflow='live',
-              script=(), instructions=(), library=None, library_reader=None, cancellation=None, _lineage=None):
+              script=(), instructions=(), library=None, library_reader=None, imports=(), cancellation=None, _lineage=None):
         environment = self.environment(package)
         checker = self.checker_factory(environment, self.cache)
         if isinstance(selection, bytes):
@@ -170,6 +170,10 @@ class Application:
             raise ValueError('Scripted responses require scripted workflow')
         if library is not None and (library.environment_id != environment.id or library_reader is None):
             raise ValueError('Library requires its admitted environment and source reader')
+        from ..domain.identity import validate_imports
+        validate_imports(list(imports))
+        if imports and not set(imports) <= environment.manifest.modules.keys():
+            raise ValueError('Advertised import is outside the prepared package')
         writer = create(directory)
         try:
             selected = writer.put(encode_selection(selection), max_bytes=r.DATA)
@@ -186,7 +190,7 @@ class Application:
                 iface = artifact(codec.encode({'constant': codec.load_json(target.constant),
                     'signature': {name: codec.decode(getattr(ident, name)) for name in ('target', 'universes', 'context')}}))
                 subjects = tuple(Subject('target', t.selector) for t, _ in joint) if ident.id == coordinator else (Subject('target', target.selector),)
-                context = Context(selection.id, subjects,
+                context = Context(selection.id, subjects, imports=tuple(imports),
                     definition_targets=tuple(t.selector for t, _ in joint if t.kind == 'def') if ident.id == coordinator else ())
                 context_data, identity_data = artifact(context.payload), artifact(ident.reference_payload())
                 owner = OwnerVersion(ident.id, 0)
@@ -229,7 +233,8 @@ class Application:
         workspace = writer.directory/'workers'
         workspace.mkdir(mode=0o700, exist_ok=True)
         executor = Executor(workspace,
-            workers=limits.model_concurrency+limits.compiler_concurrency+limits.local_concurrency,
+            workers=limits.model_concurrency+limits.compiler_concurrency+limits.network_concurrency,
+            network_slots=limits.network_concurrency,
             compiler_slots=limits.compiler_concurrency, compiler_memory_mib=limits.compiler_memory_mib)
         try:
             return Run(writer, executor, flow)

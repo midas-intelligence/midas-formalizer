@@ -30,6 +30,10 @@ def parser():
         option(cmd, '--config', type=Path)
         cmd.add_argument('--json', action='store_true')
         if name == 'prepare':
+            cmd.add_argument('--attachment', type=Path, action='append', default=[],
+                help='attachment configuration already included in --package; repeat for multiple packages')
+            cmd.add_argument('--import', dest='imports', action='append', default=[],
+                help='advertise a prepared module for candidate imports (at most 32)')
             cmd.add_argument('--replay-dependencies', action='store_true',
                 help='rebuild dependency sources; by default trust frozen compiled dependency files')
         if name != 'prepare':
@@ -62,7 +66,7 @@ def start(argv, *, application_factory, stdout, stderr):
 
             def start(self, *values, **settings):
                 settings.update(package=environment, selection=bound.selection,
-                                library=bound.library, library_reader=bound.library_reader)
+                                library=bound.library, library_reader=bound.library_reader, imports=bound.imports)
                 return app.start(*values, **settings)
         return BoundApplication()
     return midas_main(['start', *rest, '--package', metadata['package'], '--selection', str(directory/'selection.bin')],
@@ -91,7 +95,8 @@ def main(argv=None, *, stdout=None, stderr=None, application_factory=Application
             verification = load_config(files.read(args.verification_config, 16384), base=args.verification_config.absolute().parent)
             if args.command == 'prepare':
                 bound = workspace.prepare(app, args.directory, package=args.package, verification=verification,
-                    config=config, cancellation=signals.cancelled, replay_dependencies=args.replay_dependencies)
+                    config=config, cancellation=signals.cancelled, replay_dependencies=args.replay_dependencies,
+                    attachment_configs=tuple(args.attachment), imports=tuple(args.imports))
                 result = dict(type='leaneval-workspace', environment_id=bound.environment_id,
                               archive_id=bound.archive.id, selection_id=bound.selection.id)
             else:

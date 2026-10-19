@@ -14,7 +14,7 @@ from midas.domain import encoding as codec
 from midas.environment import Archive, ArchiveFile, describe
 from midas.executor import Diagnostic, Outcome, ProcessResult
 from midas.export.layout import _Reader, publish_files, reference
-from midas.leaneval import cli, comparator, service, workspace
+from midas.leaneval import attachments, cli, comparator, service, workspace
 from midas.policy import Config
 from tests.test_environment import benchmark_archive, benchmark_config
 
@@ -47,6 +47,22 @@ class Contracts(unittest.TestCase):
                          {'Submission.lean': b'p', 'Submission/x.so': b'x'}):
             with self.subTest(supplied=supplied), self.assertRaises(ValueError):
                 comparator.overlay(starter, supplied)
+
+    def test_attached_source_overlay_is_exact_and_preserves_benchmark_configuration(self):
+        trusted = {'Submission.lean': b'sorry', 'Challenge.lean': b'trusted'}
+        attached = {'Extra.lean': b'theorem Extra.x : True := by trivial'}
+        submission = dict(attached, **{'Submission.lean': b'proof'})
+        self.assertEqual(comparator.overlay(trusted, submission, attached=attached)['Extra.lean'], attached['Extra.lean'])
+        for invalid in ({'Submission.lean': b'proof'}, dict(submission, **{'Extra.lean': b'axiom Extra.x : False'}),
+                        dict(submission, **{'Challenge.lean': b'changed'})):
+            with self.assertRaises(ValueError):
+                comparator.overlay(trusted, invalid, attached=attached)
+        lake = b'name="sample"\n[leanOptions]\nautoImplicit=false\n[[lean_lib]]\nname="Submission"\n'
+        generated = attachments.lakefile(lake, attached)
+        self.assertTrue(generated.startswith(lake))
+        self.assertIn(b'name = "Extra"', generated)
+        with self.assertRaises(ValueError):
+            attachments.lakefile(lake, {'Submission/Injected.lean': b'bad'})
 
     def test_external_json_formatting_preserves_archive_bytes_and_comparator_inputs(self):
         files = tuple(replace(f, data=(json.dumps(codec.load_json(f.data), indent=2) + '\n').encode())
@@ -195,7 +211,7 @@ class Contracts(unittest.TestCase):
             self.assertEqual(ordinary.call_args.args[0], ['status', '/run', '--json'])
 
     def test_workspace_start_uses_standard_cli_and_injects_library(self):
-        bound = NS(package=self.root/'package', selection='selected', library='library', library_reader='reader')
+        bound = NS(package=self.root/'package', selection='selected', library='library', library_reader='reader', imports=('Extra',))
         work = self.root/'work'
         work.mkdir()
         (work/'workspace.bin').write_bytes(codec.encode(dict(package=str(bound.package), environment='env')))
@@ -248,7 +264,7 @@ class PublicationTests(unittest.TestCase):
         self.verification = benchmark_config(self.root)
         archive = changed(benchmark_archive(self.verification), 'generated/sample/Submission.lean', source)
         self.bound = NS(directory=self.root/'workspace', package=self.root/'package', environment_id=f.environment.id,
-                        selection=f.selected, archive=archive, library=None)
+                        selection=f.selected, archive=archive, library=None, attachments=())
         self.options = dict(workspace=self.bound.directory, verification=self.verification,
                             runtime=self.root/'runtime', config=Config())
         self.comparison = self.enterContext(patch.object(service.comparator, 'run', return_value=b'fresh comparator'))

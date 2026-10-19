@@ -7,7 +7,7 @@ from ..domain import encoding as codec
 from ..environment import describe, match_relocation, safe_read
 from ..export import read_bundle
 from ..export.layout import _Reader, publish_files, reference, _inventory
-from . import comparator
+from . import comparator, attachments
 from .workspace import MAX_BYTES, evidence, load, starter
 
 
@@ -17,15 +17,16 @@ def bundle_files(directory, maximum):
     return payload, file_rows(codec.decode(payload)['files'], maximum)
 
 
-def submission_files(archive, source):
+def submission_files(archive, source, attached=None):
     trusted = starter(archive)
     files = {p: data for p, data in trusted.items() if p.startswith('Submission/') and p.endswith('.lean')}
     files['Submission.lean'] = source
-    comparator.overlay(trusted, files)
+    files.update(attached or {})
+    comparator.overlay(trusted, files, attached=attached)
     return files
 
 
-def judge_files(archive, submission):
+def judge_files(archive, submission, attached=None):
     benchmark = describe(archive)
     if benchmark.fixture_only:
         return {}
@@ -33,6 +34,8 @@ def judge_files(archive, submission):
     if tomllib.loads(trusted['lakefile.toml'].decode()).get('name') != benchmark.problem:
         raise ValueError('Judge package name differs from the benchmark problem')
     files = dict(submission, **{p: trusted[p] for p in ('lakefile.toml', 'lean-toolchain')})
+    if attached:
+        files['lakefile.toml'] = attachments.lakefile(trusted['lakefile.toml'], attached)
     return {'judge-submission/'+benchmark.problem+'/'+p: data for p, data in files.items()}
 
 
@@ -62,10 +65,11 @@ def verify(application, bundle, workspace, *, verification, runtime, config, can
         raise ValueError('LeanEval verification deadline exhausted')
     remaining_config = replace(config, export=replace(config.export, deadline_ms=remaining))
     source = reader.read_artifact(dict(request.files)['src/Submission.lean'], max_bytes=MAX_BYTES)
-    submission = submission_files(workspace.archive, source)
     environment = application.environment(workspace.package, expected_id=workspace.environment_id)
+    attached = attachments.sources(environment, workspace.attachments, maximum=config.export.max_bytes)
+    submission = submission_files(workspace.archive, source, attached)
     comparison = comparator.run(environment, workspace.archive, submission, verification, runtime,
-                              config=remaining_config, cancellation=cancellation)
+                              config=remaining_config, cancellation=cancellation, attached=attached)
     after, _ = read_bundle(bundle, maximum=config.export.max_bytes)
     if after.payload != request.payload:
         raise ValueError('Bundle changed during verification')
@@ -81,8 +85,10 @@ def finalize(application, bundle, destination, *, workspace, verification, runti
     workspace = load(application, workspace, package=package)
     request, reader, submission, report = verify(application, bundle, workspace,
         verification=verification, runtime=runtime, config=config, cancellation=cancellation)
+    environment = application.environment(workspace.package, expected_id=workspace.environment_id)
+    attached = attachments.sources(environment, workspace.attachments, maximum=config.export.max_bytes)
     raw = {'verification.bin': report, **{'submission/'+p: data for p, data in submission.items()},
-           **judge_files(workspace.archive, submission)}
+           **judge_files(workspace.archive, submission, attached)}
     raw['bundle/manifest.bin'], bundled = bundle_files(bundle, config.export.max_bytes)
     files = {'bundle/'+path: ref for path, ref in bundled.items()}
     files.update({p: reference(data) for p, data in raw.items()})
@@ -119,8 +125,10 @@ def verify_submission(application, directory, *, workspace, verification, runtim
     request, reader = read_bundle(directory/'bundle', maximum=config.export.max_bytes)
     check_bundle(request, workspace)
     source = reader.read_artifact(dict(request.files)['src/Submission.lean'], max_bytes=MAX_BYTES)
-    submission = submission_files(workspace.archive, source)
-    raw = {**{'submission/'+p: data for p, data in submission.items()}, **judge_files(workspace.archive, submission)}
+    environment = application.environment(workspace.package, expected_id=workspace.environment_id)
+    attached = attachments.sources(environment, workspace.attachments, maximum=config.export.max_bytes)
+    submission = submission_files(workspace.archive, source, attached)
+    raw = {**{'submission/'+p: data for p, data in submission.items()}, **judge_files(workspace.archive, submission, attached)}
     expected = {p: reference(data) for p, data in raw.items()}
     bundled_manifest, bundled = bundle_files(directory/'bundle', config.export.max_bytes)
     expected.update({'bundle/'+path: ref for path, ref in bundled.items()})

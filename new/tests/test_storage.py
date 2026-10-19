@@ -649,7 +649,7 @@ class StorageTests(unittest.TestCase):
         for kind in JobKind:
             self.reserve(kind.value, kind=kind)
         a = self.w.status_snapshot().accounting
-        self.assertEqual((a.models, a.locals, a.compilers, a.compiler_memory_mib), (1, 1, len(JobKind)-2, 128*(len(JobKind)-2)))
+        self.assertEqual((a.models, a.locals, a.networks, a.compilers, a.compiler_memory_mib), (1, 1, 1, len(JobKind)-3, 128*(len(JobKind)-3)))
         self.w.validate()
 
     def test_deep_graph_uses_flat_rows_and_bounded_pages(self):

@@ -407,7 +407,7 @@ settings use defaults; unknown fields and duplicate keys are rejected. See
 | Section | Controls |
 | --- | --- |
 | `run` | Model turns, runtime, intent count, optional token and cost budgets. |
-| `scheduling` | Model/compiler/local concurrency, compiler memory pool, backlog thresholds. |
+| `scheduling` | Model concurrency, shared compiler/search CPU slots, LeanExplore request concurrency, compiler memory pool, backlog thresholds. |
 | `mathematics`, `helpers` | Proof attempts, repairs, backtracks, research, retrieval, and probes. |
 | `checker`, `local`, `export` | Wall time, memory, byte limits; checker/export heartbeats and recursion depth. |
 | `model`, `research_model`, `recovery` | Invocation/transport limits and retry policy. |
@@ -502,6 +502,34 @@ python -B -m midas.leaneval verify-submission result --workspace workspace \
 `--workspace` supplies the package, complete benchmark target selection (including
 definitions), and export library. Do not combine it with package/source/selection
 or target flags. It also supports ordinary scripted and supplied execution.
+
+LeanEval accepts attached packages. Use the same attachment configuration described
+above, then declare it when preparing the workspace. `--import` advertises a module
+that candidates may import; repeat it for up to 32 modules, including modules from
+the benchmark dependencies when needed.
+
+```sh
+python -B -m midas.leaneval package package-with-extra --base benchmark-package \
+  --config attachment.json
+python -B -m midas.leaneval prepare workspace-with-extra --package package-with-extra \
+  --verification-config verification.json --attachment attachment.json --import ExtraLib
+python -B -m midas.leaneval start benchmark-run --workspace workspace-with-extra \
+  --config live.json --output benchmark-bundle
+```
+
+Repeat package attachment and `--attachment` for multiple libraries. The starter
+and benchmark dependency pins remain exact. Attached objects are trusted as frozen
+compiled dependencies during proof checking and ordinary export. Finalization
+copies their frozen sources and literal `include_str` assets into the submission,
+adds local Lake library targets, and rebuilds them through the benchmark harness
+before checking Lean, nanoda, and the comparator. Attachments cannot replace
+benchmark inputs or existing modules. Keep the attached roots available and unchanged.
+
+`scheduling.compiler_concurrency` bounds the combined number of active Lean jobs
+and frozen-source searches. `scheduling.network_concurrency` separately bounds
+LeanExplore API requests; model calls use `model_concurrency`. Compiler memory and
+retained import-worker memory still use `compiler_memory_mib`. Searches retain their
+per-job `local` limits. The former `local_concurrency` setting has been removed.
 
 By default, preparation trusts frozen compiled dependency files, including
 Mathlib, while preserving local helper sources for export rebuilds. Add

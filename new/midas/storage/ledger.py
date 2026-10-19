@@ -9,7 +9,7 @@ from .transaction import StateTransaction, atomic
 
 
 def resource(kind):
-    return 'MODEL' if kind == JobKind.MODEL else 'LOCAL' if kind == JobKind.SEARCH else 'COMPILER'
+    return 'NETWORK' if kind == JobKind.NETWORK_SEARCH else 'MODEL' if kind == JobKind.MODEL else 'LOCAL' if kind == JobKind.SEARCH else 'COMPILER'
 
 
 class Transaction(StateTransaction):
@@ -62,7 +62,7 @@ class Transaction(StateTransaction):
         self._db.execute('UPDATE accounting SET turns=turns+?', (charged,))
         for field, amount in zip(USAGE_FIELDS, amounts):
             self._db.execute(f'UPDATE accounting SET {field}_unknown={field}_unknown+?,{field}_reserved={field}_reserved+?', (charged, amount or 0))
-        column = {'MODEL': 'models', 'COMPILER': 'compilers', 'LOCAL': 'locals'}[kind]
+        column = {'MODEL': 'models', 'COMPILER': 'compilers', 'LOCAL': 'locals', 'NETWORK': 'networks'}[kind]
         self._db.execute(f'UPDATE accounting SET {column}={column}+1,compiler_memory=compiler_memory+?',
                          (job.limits.memory_mib if kind == 'COMPILER' else 0,))
         return invocation
@@ -98,7 +98,7 @@ class Transaction(StateTransaction):
         held, kind, memory, bounds = self._db.execute('SELECT held,resource,memory,bounds FROM executions WHERE id=?', (execution_id,)).fetchone()
         if not held:
             return False
-        column = {'MODEL': 'models', 'COMPILER': 'compilers', 'LOCAL': 'locals'}[kind]
+        column = {'MODEL': 'models', 'COMPILER': 'compilers', 'LOCAL': 'locals', 'NETWORK': 'networks'}[kind]
         self._db.execute(f'UPDATE accounting SET {column}={column}-1,compiler_memory=compiler_memory-?', (memory if kind == 'COMPILER' else 0,))
         for field, amount in zip(USAGE_FIELDS, codec.unpack(bounds)):
             self._db.execute(f'UPDATE accounting SET {field}_reserved={field}_reserved-?', (amount or 0,))

@@ -17,7 +17,7 @@ from .protocol import Accepted, Effect, Operations, Tick
 from .allowances import owner_usage as stored_owner_usage
 
 _OWNERS = weakref.WeakKeyDictionary()
-_COMPILER = frozenset(JobKind) - {JobKind.MODEL, JobKind.SEARCH}
+_COMPILER = frozenset(JobKind) - {JobKind.MODEL, JobKind.SEARCH, JobKind.NETWORK_SEARCH}
 
 
 class Controller:
@@ -434,7 +434,7 @@ class Controller:
         pending = sum(n for kind, n in self.writer.queue_counts() if JobKind(kind) in _COMPILER)
         projected = self.writer.counter(saved.SCOPE, 'downstream')
         return Capacity(a.models, a.compilers, a.locals, a.compiler_memory_mib,
-            sum(w.memory_mib for w in state.retained if w.id != retained_id), pending+projected)
+            sum(w.memory_mib for w in state.retained if w.id != retained_id), pending+projected, networks=a.networks)
 
     def _dispatch(self):
         now = self.now_ms()

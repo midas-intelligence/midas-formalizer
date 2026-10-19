@@ -95,6 +95,7 @@ class Capacity:
     backlog: int = 0
     provider_not_before_ms: int = 0
     provider_unavailable: bool = False
+    networks: int = 0
 
     def __post_init__(self):
         _counts(self, flags=('provider_unavailable',))
@@ -137,8 +138,8 @@ class AdmissionRequest:
         if self.helper_units == 0:
             raise DomainError('Helper units must be positive')
         if self.helper is not None:
-            kinds = {'research': (JobKind.MODEL,), 'search': (JobKind.SEARCH,),
-                     'lookup': (JobKind.LOOKUP,), 'retrieve': (JobKind.SEARCH, JobKind.LOOKUP),
+            kinds = {'research': (JobKind.MODEL,), 'search': (JobKind.SEARCH, JobKind.NETWORK_SEARCH),
+                     'lookup': (JobKind.LOOKUP,), 'retrieve': (JobKind.SEARCH, JobKind.NETWORK_SEARCH, JobKind.LOOKUP),
                      'probe': (JobKind.PROBE,)}
             if self.job.kind not in kinds[self.helper]:
                 raise DomainError('Helper differs from job kind')
@@ -423,7 +424,7 @@ class Policy:
     @staticmethod
     def transient_admission(reason):
         """These waits can clear without a new command or changed frozen inputs."""
-        return reason in ('model_capacity', 'compiler_capacity', 'local_capacity',
+        return reason in ('model_capacity', 'compiler_capacity', 'network_capacity',
                           'provider_cooldown', 'compiler_backlog', 'projected_compiler_backlog',
                           'waiting_dependency')
 
@@ -494,7 +495,8 @@ class Policy:
             if capacity.backlog + request.downstream >= threshold:
                 return Decision('projected_compiler_backlog')
         else:
-            local = job.kind == JobKind.SEARCH
+            network = job.kind == JobKind.NETWORK_SEARCH
+            local = job.kind in (JobKind.SEARCH, JobKind.NETWORK_SEARCH)
             export = job.kind in (JobKind.ASSEMBLE, JobKind.INTEGRATE, JobKind.EXPORT_VERIFY)
             profile = (self._local if local else self._comparator if job.kind == JobKind.EXPORT_VERIFY
                        else self._export if export else self._checker)
@@ -508,11 +510,12 @@ class Policy:
                     or not local and profile.max_heartbeat and (
                         job.limits.max_heartbeat == 0 or job.limits.max_heartbeat > profile.max_heartbeat)):
                 return Decision('process_resource_limit')
-            if local:
-                if capacity.locals >= limits.local_concurrency:
-                    return Decision('local_capacity')
-            elif (capacity.compilers >= limits.compiler_concurrency or capacity.compiler_memory_mib
-                  + capacity.retained_memory_mib + job.limits.memory_mib > limits.compiler_memory_mib):
+            if network and capacity.networks >= limits.network_concurrency:
+                return Decision('network_capacity')
+            if not network and capacity.compilers + capacity.locals >= limits.compiler_concurrency:
+                return Decision('compiler_capacity')
+            if (not local and capacity.compiler_memory_mib
+                    + capacity.retained_memory_mib + job.limits.memory_mib > limits.compiler_memory_mib):
                 return Decision('compiler_capacity')
         uses_repair = bool(request.candidate_mode and getattr(owner, request.candidate_mode)
                           >= getattr(self.config.mathematics, request.candidate_mode))

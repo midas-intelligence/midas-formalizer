@@ -1,6 +1,6 @@
 """The complete SQLite schema; no component outside storage owns SQL."""
 APPLICATION_ID = 0x4D494453
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE run (
@@ -85,7 +85,7 @@ CREATE TABLE executions (
     reservation TEXT NOT NULL REFERENCES artifacts(id), bounds BLOB NOT NULL,
     phase TEXT NOT NULL CHECK(phase IN ('PREPARED','DISPATCHED','UNKNOWN','NOT_SENT','RECEIVED')),
     charged INTEGER NOT NULL CHECK(charged IN (0,1)), held INTEGER NOT NULL CHECK(held IN (0,1)),
-    resource TEXT NOT NULL CHECK(resource IN ('MODEL','COMPILER','LOCAL')), memory INTEGER NOT NULL CHECK(memory>=0),
+    resource TEXT NOT NULL CHECK(resource IN ('MODEL','COMPILER','LOCAL','NETWORK')), memory INTEGER NOT NULL CHECK(memory>=0),
     provider TEXT, provider_request TEXT,
     CHECK(provider_request IS NULL OR provider IS NOT NULL)
 ) STRICT;
@@ -140,7 +140,8 @@ CREATE TABLE accounting (
     input_tokens_reserved INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens_reserved>=0), cache_tokens_reserved INTEGER NOT NULL DEFAULT 0 CHECK(cache_tokens_reserved>=0),
     output_tokens_reserved INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens_reserved>=0), cost_microusd_reserved INTEGER NOT NULL DEFAULT 0 CHECK(cost_microusd_reserved>=0),
     models INTEGER NOT NULL DEFAULT 0 CHECK(models>=0), compilers INTEGER NOT NULL DEFAULT 0 CHECK(compilers>=0),
-    locals INTEGER NOT NULL DEFAULT 0 CHECK(locals>=0), compiler_memory INTEGER NOT NULL DEFAULT 0 CHECK(compiler_memory>=0)
+    locals INTEGER NOT NULL DEFAULT 0 CHECK(locals>=0), compiler_memory INTEGER NOT NULL DEFAULT 0 CHECK(compiler_memory>=0),
+    networks INTEGER NOT NULL DEFAULT 0 CHECK(networks>=0)
 ) STRICT;
 INSERT INTO accounting(singleton) VALUES (1);
 """

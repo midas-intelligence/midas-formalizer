@@ -252,11 +252,10 @@ class IsolationTests(unittest.TestCase):
 class WorkerTests(unittest.TestCase):
     def test_combined_policy_capacity(self):
         from midas.policy.config import SchedulingConfig
-        limits = SchedulingConfig(model_concurrency=1024, compiler_concurrency=1024,
-                                  local_concurrency=1024)
+        limits = SchedulingConfig(model_concurrency=1024, compiler_concurrency=1024)
         with tempfile.TemporaryDirectory() as directory:
             with Executor(directory, workers=limits.model_concurrency +
-                          limits.compiler_concurrency + limits.local_concurrency,
+                          limits.compiler_concurrency,
                           compiler_slots=limits.compiler_concurrency):
                 pass
             for workers, compilers in ((3073, 1), (3072, 1025), (2, 3)):
@@ -343,7 +342,7 @@ class WorkerTests(unittest.TestCase):
         self.start(work)
         self.assertTrue(entered.wait(1))
         try:
-            with self.assertRaisesRegex(ValueError, 'Compiler capacity'):
+            with self.assertRaisesRegex(ValueError, 'CPU capacity'):
                 self.start()
             # Noncompiler work can still use the remaining thread.
             self.start(inv=invocation(kind=JobKind.MODEL))
@@ -351,6 +350,25 @@ class WorkerTests(unittest.TestCase):
         finally:
             release.set()
         self.complete()
+
+    def test_source_search_uses_cpu_and_network_search_has_its_own_limit(self):
+        self.executor.drain()
+        self.executor = Executor(self.directory, workers=4, compiler_slots=1, network_slots=1)
+        self.addCleanup(self.executor.drain)
+        release = threading.Event()
+        def work(request, context):
+            release.wait(3)
+            return success(request, context)
+        try:
+            self.start(work, inv=invocation(kind=JobKind.SEARCH))
+            with self.assertRaisesRegex(ValueError, 'CPU capacity'):
+                self.start()
+            self.start(work, inv=invocation(kind=JobKind.NETWORK_SEARCH))
+            with self.assertRaisesRegex(ValueError, 'Network capacity'):
+                self.start(inv=invocation(kind=JobKind.NETWORK_SEARCH))
+            self.start(inv=invocation(kind=JobKind.MODEL))
+        finally:
+            release.set()
 
     def test_progress_backpressure_is_cancelable_and_bounded(self):
         waiting = threading.Event()

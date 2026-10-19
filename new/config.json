@@ -10,8 +10,8 @@
   },
   "scheduling": {
     "model_concurrency": 2,
+    "network_concurrency": 2,
     "compiler_concurrency": 1,
-    "local_concurrency": 2,
     "compiler_memory_mib": 4096,
     "backlog_low": 4,
     "backlog_new_stop": 52,

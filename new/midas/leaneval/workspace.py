@@ -16,6 +16,7 @@ from ..environment.package import output
 from ..export import BundleReader, Library, prepare_compiled_library, prepare_library
 from ..export.layout import _Reader, publish_files, reference
 from ..checker.rebuild import module_files
+from . import attachments
 
 MAX_BYTES = 64*1024**2
 
@@ -54,25 +55,39 @@ class Workspace:
     selection: FrozenSelection
     library: Library | None
     library_reader: BundleReader
+    imports: tuple[str, ...] = ()
+    attachments: tuple[tuple[str, str], ...] = ()
 
 
 def load(application, directory, *, package=None):
     directory = Path(directory).absolute()
     value = codec.decode(safe_read(directory/'workspace.bin', 16384))
-    codec.fields(value, ('format', 'package', 'environment', 'archive', 'selection', 'library'))
-    if value['format'] != 'midas-leaneval-workspace-v1':
+    codec.fields(value, ('format', 'package', 'environment', 'archive', 'selection', 'library', 'imports', 'attachments'))
+    if value['format'] != 'midas-leaneval-workspace-v2':
         raise ValueError('Unknown LeanEval workspace')
     environment = application.environment(package or value['package'], expected_id=value['environment'])
     package = environment.directory
     archive = load_archive(safe_read(directory/'archive.bin', MAX_BYTES), expected_id=value['archive'])
     selected = safe_read(directory/'selection.bin', MAX_BYTES)
     library = safe_read(directory/'library.bin', MAX_BYTES)
+    attached = safe_read(directory/'attachments.bin', MAX_BYTES)
     if sha256(selected).hexdigest() != value['selection'] or sha256(library).hexdigest() != value['library']:
         raise ValueError('Workspace selection/library changed')
+    if sha256(attached).hexdigest() != value['attachments']:
+        raise ValueError('Workspace attachments changed')
+    mappings = codec.decode(attached)
+    if (type(mappings) is not list or len(mappings) > 10000 or
+            any(type(row) is not list or len(row) != 2 or any(type(p) is not str for p in row) for row in mappings)):
+        raise ValueError('Invalid attachment source mappings')
     selection = load_selection(selected, environment.selection_inputs())
     check_selection(selection, archive)
     library = Library(environment.id, library)
     rows = library.decode()
+    from ..domain.identity import validate_imports
+    validate_imports(value['imports'])
+    available = {row.name for row in rows} | {n for n, p in environment.manifest.modules.items() if p.startswith('toolchain/')}
+    if not set(value['imports']) <= available:
+        raise ValueError('Advertised import is outside the workspace library')
     files = {ref.sha256+'.bin': ref for ref in module_files(rows).values()}
     reader = BundleReader(directory/'library', files)
     # Read each source through its existing bounded artifact verifier.
@@ -80,13 +95,19 @@ def load(application, directory, *, package=None):
         for _ in reader.stream_artifact(ref, max_bytes=MAX_BYTES):
             pass
     return Workspace(directory, package, environment.id, archive, selection,
-                     library if rows else None, reader)
+                     library if rows else None, reader, tuple(value['imports']), tuple(tuple(row) for row in mappings))
 
 
-def prepare(application, destination, *, package, verification, config, cancellation=None, replay_dependencies=False):
+def prepare(application, destination, *, package, verification, config, cancellation=None, replay_dependencies=False,
+            attachment_configs=(), imports=()):
     if type(replay_dependencies) is not bool:
         raise ValueError('Expected a boolean dependency replay option')
     environment = application.environment(package)
+    from ..domain.identity import validate_imports
+    validate_imports(list(imports))
+    configured = tuple(attachments.configuration(path, environment) for path in attachment_configs)
+    if {d.name for d, _ in configured} & {d.name for d in verification.dependencies}:
+        raise ValueError('Attachment cannot replace a benchmark dependency')
 
     def build(context):
         archive = archive_benchmark(verification, context, max_bytes=config.export.max_bytes)
@@ -137,7 +158,7 @@ def prepare(application, destination, *, package, verification, config, cancella
         if len({m.name for m in combined}) != len(combined):
             raise ValueError('Starter shadows a dependency module')
         by_path = {'/'+p: n for n, p in environment.manifest.modules.items()}
-        def imports(source):
+        def imported_modules(source):
             recipe = environment.launch(('--deps', '/project/'+source))
             names = []
             for path in output(context.run_process(recipe)).decode().splitlines():
@@ -147,7 +168,7 @@ def prepare(application, destination, *, package, verification, config, cancella
                 if name not in standard and name not in names:
                     names.append(name)
             return tuple(names)
-        required = imports('Submission.lean')
+        required = imported_modules('Submission.lean')
         modules = replace(modules, required=tuple(required), modules=tuple(sorted(combined, key=lambda m: m.name)))
         dependencies = (*verification.dependencies, Dependency(local_name, environment.roots['project'], ('.',)))
         if replay_dependencies:
@@ -155,7 +176,7 @@ def prepare(application, destination, *, package, verification, config, cancella
             replay = replay_sources(environment, modules, dependencies, context)
         else:
             local_names = {m.name for m in local}
-            graph = {m.name: sorted(set(imports(m.source.path)) & local_names) for m in local}
+            graph = {m.name: sorted(set(imported_modules(m.source.path)) & local_names) for m in local}
             source_order = tuple(TopologicalSorter(graph).static_order())
         # Stream library sources once, without the preparation worker's small artifact quota.
         from ..storage import Staging
@@ -166,14 +187,23 @@ def prepare(application, destination, *, package, verification, config, cancella
             else:
                 library = prepare_compiled_library(environment, modules, source_order, dependencies, staging,
                                                    maximum=config.export.max_bytes)
+            extra, mappings = attachments.capture(environment, configured,
+                {m.name for m in modules.modules} | standard)
+            attachments.sources(environment, mappings, maximum=config.export.max_bytes)
+            library = Library(environment.id, codec.encode([*codec.decode(library.payload), *extra]))
+            available = {row.name for row in library.decode()} | standard
+            if not set(imports) <= available:
+                raise ValueError('Advertised import is outside the workspace library')
             selection = application.checker_factory(environment, application.cache).inspect(
                 SelectionRequest('Submission.lean', tuple(n for n, _ in benchmark.targets)), context)
             check_selection(selection, archive)
             selected = encode_selection(selection)
             files = {'archive.bin': b''.join(archive.chunks()), 'selection.bin': selected, 'library.bin': library.payload}
-            files['workspace.bin'] = codec.encode(dict(format='midas-leaneval-workspace-v1',
+            files['attachments.bin'] = codec.encode([list(row) for row in mappings])
+            files['workspace.bin'] = codec.encode(dict(format='midas-leaneval-workspace-v2',
                 package=str(environment.directory), environment=environment.id, archive=archive.id,
-                selection=sha256(selected).hexdigest(), library=sha256(library.payload).hexdigest()))
+                selection=sha256(selected).hexdigest(), library=sha256(library.payload).hexdigest(),
+                imports=list(imports), attachments=sha256(files['attachments.bin']).hexdigest()))
             environment.validate(check=context.check)
             refs = {p: reference(data) for p, data in files.items()}
             refs.update({'library/'+ref.sha256+'.bin': ref for ref in module_files(library.decode()).values()})

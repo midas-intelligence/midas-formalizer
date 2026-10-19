@@ -198,6 +198,7 @@ class Accounting:
     compilers: int
     locals: int
     compiler_memory_mib: int
+    networks: int = 0
 
     @property
     def actual(self):

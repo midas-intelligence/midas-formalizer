@@ -369,7 +369,7 @@ class AdmissionTests(unittest.TestCase):
 
     def test_all_compiler_operations_share_capacity_and_retained_memory(self):
         for kind in JobKind:
-            if kind in (JobKind.MODEL, JobKind.SEARCH):
+            if kind in (JobKind.MODEL, JobKind.SEARCH, JobKind.NETWORK_SEARCH):
                 continue
             with self.subTest(kind=kind):
                 req = request(kind)
@@ -380,7 +380,17 @@ class AdmissionTests(unittest.TestCase):
         req = request(JobKind.CHECK_PROOF)
         req = replace(req, job=replace(req.job, limits=replace(req.job.limits, memory_mib=4097)))
         self.assertEqual(self.admit(req).reason, 'impossible_memory')
-        self.assertEqual(self.admit(request(JobKind.SEARCH), capacity=Capacity(locals=2)).reason, 'local_capacity')
+        self.assertEqual(self.admit(request(JobKind.SEARCH), capacity=Capacity(locals=1)).reason, 'compiler_capacity')
+
+    def test_source_search_shares_cpu_but_remote_search_has_separate_capacity(self):
+        for kind in (JobKind.SEARCH, JobKind.CHECK_PROOF):
+            for capacity in (Capacity(compilers=1), Capacity(locals=1)):
+                self.assertEqual(self.admit(request(kind), capacity=capacity).reason, 'compiler_capacity')
+            self.assertTrue(self.admit(request(kind), capacity=Capacity(networks=2)).allowed)
+        remote = request(JobKind.NETWORK_SEARCH)
+        self.assertTrue(self.admit(remote, capacity=Capacity(compilers=1, locals=1)).allowed)
+        self.assertEqual(self.admit(remote, capacity=Capacity(networks=2)).reason, 'network_capacity')
+        self.assertTrue(self.admit(request(JobKind.SEARCH), capacity=Capacity(retained_memory_mib=4096)).allowed)
 
     def test_backlog_hysteresis_and_gradual_reopening(self):
         state = self.policy.tick(72)

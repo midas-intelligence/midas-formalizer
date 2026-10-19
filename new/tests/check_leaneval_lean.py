@@ -192,6 +192,40 @@ def main():
         result = command('verify-submission', root/'submission', *options, '--evidence-output', root/'evidence.bin')[0]
         assert result['verified']
         print('real comparator, both kernels, publication and fresh independent verification passed', flush=True)
+        # A supplied compiled package is advertised for proofs and included as
+        # source in independent comparator builds and the final judge layout.
+        extra = root/'extra'
+        (extra/'Extra').mkdir(parents=True)
+        (extra/'Extra/Step.lean').write_text('import Fixture\ntheorem Extra.step : Fixture.value = 7 := by rfl\n')
+        (extra/'Extra.lean').write_text('import Extra.Step\ntheorem Extra.answer : Fixture.value = 7 := Extra.step\n')
+        for name in ('Extra/Step', 'Extra'):
+            subprocess.run([str(toolchain/'bin/lean'), '--root='+str(extra),
+                '-o', str(extra/(name+'.olean')), '-i', str(extra/(name+'.ilean')),
+                str(extra/(name+'.lean'))], check=True, capture_output=True, timeout=60,
+                env=dict(os.environ, LEAN_PATH=str(extra)+':'+str(dependency/'.lake/build/lib/lean')))
+        attachment = root/'attachment.json'
+        attachment.write_bytes(codec.canonical(dict(name='extra', path=str(extra),
+            module_paths=['.'], source_roots=['.'], prefixes=['Extra'])))
+        command('package', root/'attached-package', '--base', root/'package', '--config', attachment)
+        command('prepare', root/'attached-workspace', '--package', root/'attached-package',
+            '--verification-config', config_path, '--attachment', attachment, '--import', 'Extra')
+        attached = workspace.load(app, root/'attached-workspace')
+        assert attached.imports == ('Extra',)
+        assert {p for p, _ in attached.attachments} == {'Extra.lean', 'Extra/Step.lean'}
+        payload = encode_submission(dict(format='midas-scoped-candidates', submission_id=str(uuid4()),
+            selection_id=attached.selection.id, definitions=[], imports=['Extra'], entries=[dict(key='parent',
+            subject=dict(kind='target', name='Submission.goal'), proof='by exact Extra.answer', dependencies=[],
+            review=None, revision_of=None, definition_scope=dict(statement=0, proof=0))]))
+        (root/'attached-candidate.bin').write_bytes(payload)
+        command('start', root/'attached-run', '--workspace', root/'attached-workspace',
+            '--candidates', root/'attached-candidate.bin', '--output', root/'attached-bundle', '--quiet')
+        attached_options = ('--workspace', root/'attached-workspace', '--verification-config', config_path,
+                            '--runtime', runtime)
+        assert command('finalize', root/'attached-bundle', root/'attached-result', *attached_options)[0]['verified']
+        assert command('verify-submission', root/'attached-result', *attached_options)[0]['verified']
+        assert (root/'attached-result/judge-submission/sample/Extra/Step.lean').read_bytes() == (extra/'Extra/Step.lean').read_bytes()
+        assert b'name = "Extra"' in (root/'attached-result/judge-submission/sample/lakefile.toml').read_bytes()
+        print('attached package, advertised imports, both kernels and judge source layout passed', flush=True)
         target = root/'submission/submission/Submission.lean'
         target.write_bytes(target.read_bytes()+b'-- tampered\n')
         command('verify-submission', root/'submission', *options, code=2)

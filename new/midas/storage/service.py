@@ -268,14 +268,14 @@ class RunWriter(RunReader):
                 or known != tuple(getattr(a.known, k) for k in USAGE_FIELDS)
                 or unknown != tuple(getattr(a.unknown, k) for k in USAGE_FIELDS)):
             raise StorageError('Accounting differs from original invocation ledger')
-        capacity = {'MODEL': 0, 'COMPILER': 0, 'LOCAL': 0}
+        capacity = {'MODEL': 0, 'COMPILER': 0, 'LOCAL': 0, 'NETWORK': 0}
         memory, reserved = 0, [0]*4
         for kind, footprint, bounds in self._db.execute('SELECT resource,memory,bounds FROM executions WHERE held=1'):
             capacity[kind] += 1
             memory += footprint if kind == 'COMPILER' else 0
             for i, v in enumerate(codec.unpack(bounds)):
                 reserved[i] += v or 0
-        if ((*capacity.values(), memory) != (a.models, a.compilers, a.locals, a.compiler_memory_mib)
+        if ((*capacity.values(), memory) != (a.models, a.compilers, a.locals, a.networks, a.compiler_memory_mib)
                 or tuple(reserved) != tuple(getattr(a.reserved, k) for k in USAGE_FIELDS)):
             raise StorageError('Capacity differs from held reservations')
         if self._db.execute("""SELECT 1 FROM executions e LEFT JOIN receipts r ON r.execution=e.id

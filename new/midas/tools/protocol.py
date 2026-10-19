@@ -294,6 +294,8 @@ class Stage:
 
     @property
     def kind(self):
+        if isinstance(self.action, Search) and self.action.backend.name == 'leanexplore':
+            return JobKind.NETWORK_SEARCH
         return {Search: JobKind.SEARCH, Lookup: JobKind.LOOKUP, Probe: JobKind.PROBE,
                 Research: JobKind.MODEL}[type(self.action)]
 
@@ -310,7 +312,7 @@ class Stage:
         return Job(self.key, self.kind, self.scope.owner, self.inputs, (self.scope.owner,), limits)
 
     def validate_for(self, frozen, reader):
-        if (self.kind != JobKind.SEARCH or frozen.job != self.job(frozen.job.limits)
+        if (self.kind not in (JobKind.SEARCH, JobKind.NETWORK_SEARCH) or frozen.job != self.job(frozen.job.limits)
                 or frozen.environment_id != self.scope.environment_id
                 or read(reader, frozen.operation_payload, REQUEST_BYTES) != self.payload):
             raise ValueError('Search stage differs from frozen request')
