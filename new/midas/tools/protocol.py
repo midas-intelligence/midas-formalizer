@@ -119,12 +119,11 @@ class Search:
 @dataclass(frozen=True, slots=True)
 class Lookup:
     names: tuple[str, ...]
-    inspect: bool = False
 
     def __post_init__(self):
         strings(self.names, 16, 1024, 'lookup names', names=True)
-        if not self.names or type(self.inspect) is not bool:
-            raise ValueError('Expected lookup names and inspection flag')
+        if not self.names:
+            raise ValueError('Expected lookup names')
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +132,6 @@ class Retrieve:
     names: tuple[str, ...] = ()
     backends: tuple[Backend, ...] = ()
     offset: int = 0
-    inspect: bool = False
 
     def __post_init__(self):
         strings(self.queries, 3, 2048, 'retrieval queries')
@@ -141,9 +139,8 @@ class Retrieve:
         items(self.backends, Backend)
         if (not self.queries and not self.names or bool(self.backends) != bool(self.queries)
                 or len(self.backends) > 2 or len({b.name for b in self.backends}) != len(self.backends)
-                or type(self.offset) is not int or not 0 <= self.offset <= 200
-                or type(self.inspect) is not bool):
-            raise ValueError('Invalid retrieval query/backends/offset/inspection')
+                or type(self.offset) is not int or not 0 <= self.offset <= 200):
+            raise ValueError('Invalid retrieval query/backends/offset')
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,10 +195,10 @@ def action_value(action):
     if isinstance(action, Search):
         return ['search', action.query, action.backend.value(), action.limit]
     if isinstance(action, Lookup):
-        return ['lookup', list(action.names), action.inspect]
+        return ['lookup', list(action.names)]
     if isinstance(action, Retrieve):
         return ['retrieve', list(action.queries), list(action.names), [b.value() for b in action.backends],
-                action.offset, action.inspect]
+                action.offset]
     if isinstance(action, Probe):
         return ['probe', [c.to_dict() for c in action.cases]]
     if isinstance(action, Research):
@@ -223,10 +220,10 @@ def load_action(value):
     kind = value[0]
     if kind == 'search' and len(value) == 4:
         return Search(value[1], backend(value[2]), value[3])
-    if kind == 'lookup' and len(value) == 3:
-        return Lookup(array(value[1]), value[2])
-    if kind == 'retrieve' and len(value) == 6:
-        return Retrieve(array(value[1]), array(value[2]), tuple(backend(b) for b in array(value[3])), *value[4:])
+    if kind == 'lookup' and len(value) == 2:
+        return Lookup(array(value[1]))
+    if kind == 'retrieve' and len(value) == 5:
+        return Retrieve(array(value[1]), array(value[2]), tuple(backend(b) for b in array(value[3])), value[4])
     if kind == 'probe' and len(value) == 2:
         return Probe(tuple(ArtifactRef.from_dict(c) for c in array(value[1])))
     if kind == 'research' and len(value) == 4:

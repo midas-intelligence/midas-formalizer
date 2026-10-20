@@ -46,6 +46,7 @@ class Compiler(Checker):
         elif value['operation'] == 'proof':
             evidence = save(codec.encode(certificate(packet, request.sha256)))
         elif value['operation'] == 'lookup':
+            assert packet['include_body'] is True and packet.get('body_format') == 'source'
             evidence = save(codec.encode(dict(request=request.sha256, records=[
                 dict(query=name, status='available', source_range=None) for name in packet['names']])))
         elif value['operation'] == 'probe':
@@ -591,7 +592,7 @@ class Contracts(unittest.TestCase):
         self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         search = dict(mode='search', rationale='Find addition.', query='addition', backend=dict(name='leanexplore', prefixes=[]))
-        lookup = dict(mode='lookup', rationale='Inspect addition.', names=['Nat.add'], inspect=True)
+        lookup = dict(mode='lookup', rationale='Inspect addition.', names=['Nat.add'])
         probe = dict(mode='probe', rationale='Try the proof.', cases=[dict(id='try',
             code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))'),
             dict(id='second', code='Lean.Elab.Tactic.evalTactic (← `(tactic| exact True.intro))')])
@@ -626,7 +627,7 @@ class Contracts(unittest.TestCase):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         search = dict(mode='search', rationale='Find declarations.', query='Nat',
                       backend=dict(name='frozen-source', prefixes=['project']))
-        lookup = dict(mode='lookup', rationale='Expand a tail name.', names=['Fixture.term49'], inspect=False)
+        lookup = dict(mode='lookup', rationale='Expand a tail name.', names=['Fixture.term49'])
         with self.start(workflow='scripted', config=replace(Config(), prover=route),
                 script=tuple(('prover', response(action)) for action in (search, lookup, proof()))) as run:
             self.assertEqual(self.finish(run).exit_code, 0)
@@ -768,7 +769,7 @@ class Contracts(unittest.TestCase):
         self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         retrieve = dict(mode='retrieve', rationale='Check a discovered name.', queries=['addition'], names=[],
-            backends=[dict(name='leanexplore', prefixes=[])], offset=0, inspect=False)
+            backends=[dict(name='leanexplore', prefixes=[])], offset=0)
         research = dict(mode='research', rationale='Read supporting context.', question='What proves True?', urls=[])
         action = proof()
         action['proof_body'] = 'by trivial'
@@ -805,7 +806,7 @@ class Contracts(unittest.TestCase):
         from tests.test_strategy import decomposition
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         research_route = ModelRoute(provider='openai', model='fixture')
-        lookup = dict(mode='lookup', rationale='Inspect names.', names=['Nat.add', 'Nat.mul'], inspect=False)
+        lookup = dict(mode='lookup', rationale='Inspect names.', names=['Nat.add', 'Nat.mul'])
         probe = dict(mode='probe', rationale='Inspect internals.', cases=[dict(id='enumeration', code='pure ()')])
         action = decomposition()
         action['children'] = [dict(name='support', statement='True ∧ True', proof='Use Nat.add and the constructor.',

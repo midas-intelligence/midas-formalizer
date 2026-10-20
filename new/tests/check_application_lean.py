@@ -98,7 +98,7 @@ def main():
         assert app.export(root/'partial', root/'partial-export', allow_sorry=True).exit_code == 0
         assert app.verify(root/'partial-export', package=package).verified
         print('explicit partial export and standalone recheck passed', flush=True)
-        lookup = dict(mode='lookup', rationale='Inspect a library declaration.', names=['Nat.add'], inspect=True)
+        lookup = dict(mode='lookup', rationale='Inspect a library declaration.', names=['Nat.add'])
         probe = dict(mode='probe', rationale='Try closing the current goal.', cases=[
             dict(id='inspect', code='let env ← Lean.getEnv\nLean.logInfo m!"Nat.add available: {(env.find? `Nat.add).isSome}"'),
             dict(id='close', code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))')])

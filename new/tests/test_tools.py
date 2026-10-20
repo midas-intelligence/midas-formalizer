@@ -80,7 +80,7 @@ class ToolsTests(unittest.TestCase):
         return ReceiptBinding(str(uuid4()), self.a.save(raw), self.a.save(b'result'), self.a.save(b'seal'))
 
     def test_request_binary_roundtrips_and_binding(self):
-        for action in (Search('compact', Backend('leanexplore')), Lookup(('Nat.add',), True),
+        for action in (Search('compact', Backend('leanexplore')), Lookup(('Nat.add',)),
                 Retrieve(('compact',), ('Nat.add',), (Backend('frozen-source', ('Mathlib',)),)),
                 Probe((self.a.save(pack({'id': 'p', 'code': 'simp'})),)), Research('Why?', ('https://example.test',))):
             request = self.request(action)
@@ -92,7 +92,7 @@ class ToolsTests(unittest.TestCase):
             self.assertNotEqual(request.id, replace(request, scope=replace(self.scope, owner=replace(self.scope.owner, generation=1))).id)
             self.assertNotIn(b'toolchain', request.payload)
         with self.assertRaises(ValueError):
-            HelperRequest.load(pack(['midas-helper-v1', self.scope.value(), ['lookup', 'Nat.add', False], 'c', []]))
+            HelperRequest.load(pack(['midas-helper-v1', self.scope.value(), ['lookup', 'Nat.add'], 'c', []]))
 
     def test_action_validation(self):
         invalid = (lambda: Lookup(('by exact True.intro',)), lambda: Lookup(('Nat.add', 'Nat.add')),
@@ -246,14 +246,14 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(fusion.ranked, tuple(sorted(expected, key=lambda n: (-expected[n], n))))
         self.assertEqual(fusion.next_offset, 12)
 
-    def test_retrieval_partial_failure_and_source_inspection(self):
-        plan = self.plan(Retrieve(('q',), ('Nat.add',), (Backend('leanexplore'),), inspect=True))
+    def test_retrieval_partial_failure_preserves_explicit_names(self):
+        plan = self.plan(Retrieve(('q',), ('Nat.add',), (Backend('leanexplore'),)))
         reports = (SearchResult(plan.stages[0].sha256, error='transport failure'),)
         following, fusion = continue_retrieval(plan, reports, self.scope)
-        self.assertFalse(following.stages[0].action.inspect)
+        self.assertEqual(following.stages[0].action, Lookup(('Nat.add',)))
         self.assertEqual(fusion.errors, ((0, 'transport failure'),))
-        direct = self.plan(Retrieve(names=('Nat.add',), inspect=True))
-        self.assertTrue(direct.stages[0].action.inspect)
+        direct = self.plan(Retrieve(names=('Nat.add',)))
+        self.assertEqual(direct.stages[0].action, following.stages[0].action)
 
     def test_finish_exact_stage_receipts_and_resume(self):
         plan = self.plan(Retrieve(('q',), backends=(Backend('leanexplore'),)))
@@ -422,7 +422,7 @@ class ToolsTests(unittest.TestCase):
                                 prefix=SourceFile('Submission.lean', b''), reader=self.a)
         self.assertIn('missing or ambiguous frozen module', result[0])
 
-    def test_inspected_aliases_retain_checked_signatures_and_authored_source(self):
+    def test_inspected_theorems_and_aliases_use_checked_signatures_without_source_reads(self):
         sources = ('alias law_sin := original',
                    '/-- A named consequence. -/\n@[simp] protected alias law_sin := original',
                    'alias ⟨forward, backward⟩ := original_iff',
@@ -439,10 +439,20 @@ class ToolsTests(unittest.TestCase):
                         patch('json.loads', side_effect=AssertionError('JSON')):
                     result = lookup_sources((record,), environment_id=self.scope.environment_id,
                                             index=index, prefix=SourceFile('Main.lean', b''), reader=self.a)
-                if 'theorem ordinary' in source:
-                    self.assertEqual(result, (source,))
-                else:
-                    self.assertEqual(result, ('theorem Geometry.law_sin : ∀ (x : ℝ), f x = g x\n\n' + source,))
+                self.assertEqual(result, ('theorem Geometry.law_sin : ∀ (x : ℝ), f x = g x',))
+                self.assertEqual(self.a.reads, [])
+
+    def test_inspected_definitions_keep_bodies_and_theorems_need_no_source_range(self):
+        source = 'def value : Nat := by\n  exact 42\n'
+        index = self.index((('project/Helpers.lean', source.encode()),))
+        records = (dict(query='result', status='available', kind='theorem', type='value = 42',
+                        source_range=None),
+                   dict(query='value', status='available', kind='def', type='Nat',
+                        source_range=dict(module='Helpers', start=[1, 0], end=[2, 10])))
+        result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
+                                prefix=SourceFile('Main.lean', b''), reader=self.a)
+        self.assertEqual(result, ('theorem result : value = 42', source.rstrip()))
+        self.assertEqual(self.a.reads, [index.entries[0].artifact])
 
     def test_archive_large_unicode_indexed_reads_and_duplicate_guard(self):
         value = 'α😀"\\\n'*180000

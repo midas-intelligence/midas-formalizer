@@ -61,10 +61,42 @@ class SearchTests(unittest.TestCase):
         self.assertNotIn('rfl', header)
         excerpt = source.encode()[start:end].decode()
         self.assertTrue(excerpt.startswith('/-- α'))
-        self.assertTrue(excerpt.endswith('  rfl\n'))
+        self.assertTrue(excerpt.endswith('theorem result (n : Nat := 2) : n = n'))
+        self.assertNotIn('rfl', excerpt)
         self.assertEqual(docs[1][-1], 'axiom next : True')
         self.assertEqual(bm25.statement('def complex : let x := Nat; x := 0'), '')
         self.assertEqual(bm25.statement('def unbalanced (x : Nat := 0'), '')
+
+    def test_search_keeps_theorem_statements_and_definition_bodies(self):
+        source = ('namespace N\n/-- α documentation with := and by. -/\n'
+            '@[simp] theorem «résult:=» (n : Nat := 2) :\n'
+            '    (let x := n; x = x) := by\n  exact theoremProof\n'
+            'protected lemma consequence : True := lemmaProof\n'
+            'lemma equations : ∀ n : Nat, n = n\n  | n => equationProof\n'
+            'theorem complex : let x := Nat; x = x := complexProof\n'
+            'def value : Nat := by\n  exact definitionBody\n'
+            'abbrev abbreviation : Nat := abbreviationBody\n'
+            'instance : Inhabited Nat := ⟨instanceBody⟩\nend N\n')
+        index = self.index(('lib/Mathlib/X.lean', source))
+        with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
+            result = self.search(index, 'Nat True')
+        excerpts = {r.names[0]: r.source for r in result.records if r.names}
+        self.assertEqual(excerpts['N.«résult:=»'],
+            '/-- α documentation with := and by. -/\n@[simp] theorem «résult:=» (n : Nat := 2) :\n'
+            '    (let x := n; x = x)')
+        self.assertEqual(excerpts['N.consequence'], 'protected lemma consequence : True')
+        self.assertEqual(excerpts['N.equations'], 'lemma equations : ∀ n : Nat, n = n')
+        # Uncertain lexical boundaries retain a discoverable name, with checked
+        # types available through lookup rather than an untrimmed proof excerpt.
+        complex_result = self.search(index, 'N.complex')
+        self.assertEqual(complex_result.records[0].names, ('N.complex',))
+        self.assertEqual(complex_result.records[0].source, '')
+        self.assertIn(':= by\n  exact definitionBody', excerpts['N.value'])
+        self.assertIn(':= abbreviationBody', excerpts['N.abbreviation'])
+        self.assertIn(':= ⟨instanceBody⟩', next(r.source for r in result.records if not r.names))
+        display = '\n'.join(search_summary(result, Search('Nat True', Backend('frozen-source', ('Mathlib',)))))
+        for proof in ('theoremProof', 'lemmaProof', 'equationProof', 'complexProof'):
+            self.assertNotIn(proof, display)
 
     def test_exact_name_stays_first_and_scores_roundtrip_losslessly(self):
         index = self.index(('lib/Mathlib/A.lean', 'namespace N\ndef result : Nat := 0\nend N\n'),
@@ -145,7 +177,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(display.count('Source:'), 12)
         for rank, row in enumerate(result.records[12:], 13):
             self.assertIn(f'{rank}. {row.names[0]}', rows)
-        self.assertEqual(Lookup(result.records[-1].names, True).names, ('term49',))
+        self.assertEqual(Lookup(result.records[-1].names).names, ('term49',))
         archive = prepare_archive(self.scope, 'a'*64, rows, (self.scope.context,), self.artifacts)
         self.assertEqual(len(archive.pages), 1)
         self.assertIn(b'50. term49', page_text(self.artifacts.data[archive.pages[0].id]))

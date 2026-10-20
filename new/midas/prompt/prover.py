@@ -20,10 +20,10 @@ universe signatures, and checked dependency aliases. Do not emit top-level comma
 
 Choose one action using the CAPABILITIES section before filling its fields.
 If you need the meaning of a named constant in the goal and lookup is enabled,
-your next action must be lookup with its Lean name and inspect=true. Missing
+your next action must be lookup with its Lean name. Missing
 definitions are a reason to call lookup. An import does not
 display the definitions it contains; lookup retrieves them. For example:
-{"action":{"mode":"lookup","rationale":"Inspect the definition used in the goal.","names":["Nat.Prime"],"inspect":true},"memory_update":null}
+{"action":{"mode":"lookup","rationale":"Inspect the definition used in the goal.","names":["Nat.Prime"]},"memory_update":null}
 Use the actual names from your task in place of this example's name.
 
 lookup.names identifies Lean declarations. recall.result_id identifies an earlier
@@ -79,25 +79,26 @@ are usable only through explicit dependencies in source order; never assume late
 outputs. Definition outputs need values and theorem outputs need proofs about the
 same chosen objects. Preserve monomorphic values across uses and universe instances.
 No joint output is committed until the whole group checks.
-Use revise only for exact displayed fragment names. Null old replaces a whole
-fragment; otherwise old must match exactly once. Structural changes require a
-complete new proof, decomposition or candidate.
+Use revise only when CAPABILITIES marks it available, and only for exact displayed
+fragment names. Null old replaces a whole fragment; otherwise old must match
+exactly once. Structural changes require a complete new proof, decomposition or
+candidate.
 
 Helpers continue this task with advisory evidence. Use search to discover Lean
 declaration names. Use lookup with names to check declarations and obtain their
-types; inspect=true also requests definition bodies and available authored source.
-For a named definition in the goal whose meaning you need, use lookup with
-inspect=true. Lookup takes Lean names and needs no prior evidence result ID.
-Use retrieve to combine searches and checked lookup.
+types and available authored definition source. Theorems return checked signatures
+without proof bodies. For a named definition in the goal whose meaning you need,
+use lookup. Lookup takes Lean names and needs no prior evidence result ID.
+Use retrieve to combine searches and checked lookup with definition source.
 Backend names are frozen-source and leanexplore; only frozen-source uses prefixes.
 Use the displayed frozen-source roots, including project when offered, or a file,
 directory or module within them. project searches the frozen project sources.
 Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
-preference within the selected scope. Use lookup on a later name for its type,
-or inspect=true for authored source. Large excerpts may continue on another page.
+preference within the selected scope. Use lookup on a later name for its type
+and available definition source. Large excerpts may continue on another page.
 Queries require backends, and names-only retrieval uses an empty backends array.
-inspect requests authored source; discovery alone does not certify availability.
+Discovery alone does not certify availability.
 Probe cases run in the frozen checked target context, without proposed children or
 definitions. Supply one through three cases, each containing only id and code.
 Each id is distinct, begins with a letter, then letters/digits/underscore/hyphen,
@@ -173,10 +174,9 @@ def schema():
         action('stop', objection=nullable(obj(category={'type': 'string', 'enum':
             ['suspected_false', 'missing_assumption', 'context_mismatch']}, evidence=text))),
         action('search', query=string(2048), backend=ref('backend')),
-        action('lookup', names=array(string(1024), 16), inspect={'type': 'boolean'}),
+        action('lookup', names=array(string(1024), 16)),
         action('retrieve', queries=array(string(2048), 3), names=array(string(1024), 12),
-               backends=array(ref('backend'), 2), offset={'type': 'integer', 'minimum': 0, 'maximum': 200},
-               inspect={'type': 'boolean'}),
+               backends=array(ref('backend'), 2), offset={'type': 'integer', 'minimum': 0, 'maximum': 200}),
         action('probe', cases=dict(array(obj(id=string(48), code=dict(string(16000),
                description='Only the TacticM do-block body after run_tac do; omit the wrapper.')), 3), minItems=1)),
         action('research', question=string(8000), urls=array(string(8000), 6)),
@@ -220,6 +220,6 @@ def render(snapshot):
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
         b'The application will execute a helper action and supply its result on the next turn. '
         b'If lookup is enabled and you need definitions of named constants in this goal, return a lookup action with '
-        b'those names and inspect=true. Use the enabled helpers to obtain missing context. '
+        b'those names. Use the enabled helpers to obtain missing context. '
         b'Return the action JSON now.'))),)
     return Prompt('prover', 'prover-v4', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)

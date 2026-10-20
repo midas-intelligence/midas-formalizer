@@ -12,7 +12,7 @@ from ..source import CheckedAlias, SourceFile
 from ..strategy import Context
 from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retrieve, Search,
     SearchResult, SourceIndex, Stage, StageEvidence, admit_checked, admit_research, continue_retrieval,
-    lookup_sources, lookup_summary, prepare_archive, probe_summary, search_stages, search_summary)
+    lookup_sources, prepare_archive, probe_summary, search_stages, search_summary)
 from . import records as r
 
 
@@ -76,7 +76,7 @@ def lower(flow, reader, stage, inputs=None):
     if isinstance(action, Lookup):
         request = flow.checker.prepare('lookup', flow.selection, state.index, owner, action.names,
             aliases=tuple(aliases), imports=context.inherited_imports,
-            include_body=action.inspect, source_ranges=action.inspect)
+            include_body=True, source_ranges=True)
     elif isinstance(action, Probe):
         cases = tuple(ProbeCase(**codec.load_record(r.read(inputs, ref), limit=r.META)) for ref in action.cases)
         ident = identity(reader, state, stage.scope.environment_id)
@@ -178,9 +178,6 @@ def reduce(flow, reader, invocation, accepted, binding):
                 continue
             if isinstance(item.stage.action, Lookup) and item.status == ResultStatus.SUCCEEDED:
                 records = tuple(codec.decode(data)['records'])
-                if not item.stage.action.inspect:
-                    rows.extend(lookup_summary(records))
-                    continue
                 from ..checker import CompilerRequest
                 executed = reader.invocation(item.receipt.original_execution_id)
                 packet = CompilerRequest(r.read(reader, executed.request.operation_payload, r.DATA)).decode()['packet']

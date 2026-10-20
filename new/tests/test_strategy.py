@@ -157,6 +157,18 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], action['proof_body'])
             self.assertEqual(Draft.load(draft.payload), draft)
 
+    def test_lookup_and_retrieve_responses_have_no_inspection_flag(self):
+        actions = (dict(mode='lookup', rationale='Read the definition.', names=['Nat.add']),
+                   dict(mode='retrieve', rationale='Find supporting declarations.', queries=['addition'],
+                        names=[], backends=[dict(name='leanexplore', prefixes=[])], offset=0))
+        for action in actions:
+            with self.subTest(mode=action['mode']):
+                parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+                self.assertEqual(parsed.value, action)
+                for flag in (False, True):
+                    with self.assertRaises(ValueError):
+                        interpret(response(dict(action, inspect=flag)), role='prover', contract='prover-action-v2')
+
     def test_review_findings_and_research_invariants(self):
         value = dict(verdict='accept', rationale='A valid plan.', findings=[], question='', urls=[])
         parse = lambda v: interpret(model_json(v), role='reviewer', contract='review-verdict-v1')
@@ -343,7 +355,7 @@ class StateTests(unittest.TestCase):
     def setUp(self):
         self.strategy, self.policy = Strategy(), Policy(Config())
 
-    def test_prompt_schema_includes_only_available_actions(self):
+    def test_prompt_schema_filters_helpers_but_always_includes_revise(self):
         cases = (
             (Services(), OwnerUsage(), (), (), {'search', 'lookup', 'retrieve', 'probe'}),
             (Services(), OwnerUsage(), ('result-1',), (), {'search', 'lookup', 'retrieve', 'probe', 'recall'}),
@@ -364,7 +376,7 @@ class StateTests(unittest.TestCase):
                 actions = {a['properties']['mode']['enum'][0] for a in schema['properties']['action']['anyOf']}
                 self.assertEqual(actions & set(prover.HELPER_MODES), expected)
                 self.assertEqual(actions - set(prover.HELPER_MODES),
-                                 {'proof', 'decomposition', 'candidate', 'stop'})
+                                 {'proof', 'decomposition', 'candidate', 'revise', 'stop'})
                 capabilities = wire['input'][-1]['text']
                 self.assertTrue(capabilities.startswith('QUESTION next-action\nCAPABILITIES strategy-capabilities\n'))
                 self.assertTrue(capabilities.endswith('Return the action JSON now.'))
@@ -381,6 +393,30 @@ class StateTests(unittest.TestCase):
                 expected_schema = prover.action_schema(tuple(sorted(actions)))
                 self.assertEqual(schema, decode(expected_schema, limit=16384))
                 self.assertEqual(prepared.turn.schema_hash, sha256(expected_schema).hexdigest())
+
+    def test_revision_availability_preserves_schema_and_cache_key(self):
+        artifacts, snapshot = fixture()
+        display = Display((Section('subject', 'goal', b'Goal: True'),),
+                          (snapshot.version.context,), (snapshot.version.owner,))
+        for transport in ('azure_responses', 'bedrock_responses'):
+            with self.subTest(transport=transport):
+                options = Options(transport, 'model', prompt_cache='explicit', cache_scope='a'*64)
+                prepared = []
+                for base in (None, expand(proof(), snapshot.context, uid('direct-base')),
+                             expand(decomposition(), snapshot.context, uid('decomposition-base'))):
+                    current = replace(snapshot, base=base)
+                    work = self.strategy.plan(current, self.policy).work[0]
+                    prepared.append(self.strategy.prepare_model(current, self.policy, work, display, options))
+                first = decode(prepared[0].wire.wire, limit=8*1024**2)
+                self.assertIn('revise: unavailable (no existing candidate)', first['input'][-1]['content'])
+                for changed in prepared[1:]:
+                    wire = decode(changed.wire.wire, limit=8*1024**2)
+                    self.assertEqual(prepared[0].turn.schema_hash, changed.turn.schema_hash)
+                    self.assertEqual(first['text'], wire['text'])
+                    self.assertEqual(first['prompt_cache_key'], wire['prompt_cache_key'])
+                    self.assertIn('revise: available', wire['input'][-1]['content'])
+                    self.assertEqual(prepared[0].wire.wire.partition(b'QUESTION next-action\\n')[0],
+                                     changed.wire.wire.partition(b'QUESTION next-action\\n')[0])
 
     def test_counters_preserve_cache_key_but_action_availability_changes_schema(self):
         artifacts, snapshot = fixture()
@@ -442,11 +478,10 @@ class StateTests(unittest.TestCase):
                 self.strategy.on_model(snapshot, self.policy, dispatched,
                     admitted(artifacts, dispatched, response(action)), artifacts)
         action = dict(mode='lookup', rationale='Inspect the definition used in the goal.',
-                      names=['Nat.Prime'], inspect=True)
+                      names=['Nat.Prime'])
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action)), artifacts)
         self.assertEqual(changes.helper.request.action.names, ('Nat.Prime',))
-        self.assertTrue(changes.helper.request.action.inspect)
 
     def test_stop_waits_for_review_and_only_approval_reports_objections(self):
         artifacts, snapshot = fixture()
@@ -525,7 +560,7 @@ class StateTests(unittest.TestCase):
             'law_cos', 'law_sin', 'angle_add_angle_add_angle_eq_pi',
             'ne₁₂_of_not_collinear', 'sin_pos_of_not_collinear')]
         action = dict(mode='retrieve', rationale='Check the geometric interfaces.', names=names,
-                      queries=['angle_add_angle_add_angle_eq_pi'], offset=0, inspect=True,
+                      queries=['angle_add_angle_add_angle_eq_pi'], offset=0,
                       backends=[dict(name='frozen-source', prefixes=['mathlib/Mathlib/Geometry/Euclidean'])])
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action)), artifacts)
@@ -547,7 +582,7 @@ class StateTests(unittest.TestCase):
                 admitted(artifacts, dispatched, response(action)), artifacts)
         memory = dict(strategy='Use the displayed definition.', upsert=[], forget=[],
                       pin_evidence=['displayed-result'], unpin_evidence=[])
-        action = dict(mode='lookup', rationale='Inspect a related definition.', names=['Nat.add'], inspect=True)
+        action = dict(mode='lookup', rationale='Inspect a related definition.', names=['Nat.add'])
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action, memory)), artifacts)
         self.assertEqual(changes.memory.pins, ('displayed-result',))
@@ -676,6 +711,16 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'dispatched base'):
             self.strategy.on_model(initial, self.policy, initial_dispatch,
                 admitted(artifacts, initial_dispatch, response(action)), artifacts, submission_id=uid('new'))
+        exhausted = replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct))
+        exhausted_dispatch, prepared, _ = dispatch(exhausted, artifacts)
+        wire = decode(prepared.wire.wire, limit=8*1024**2)
+        actions = {a['properties']['mode']['enum'][0]
+                   for a in wire['outputSchema']['properties']['action']['anyOf']}
+        self.assertIn('revise', actions)
+        self.assertIn('revise: unavailable (direct allowance exhausted)', wire['input'][-1]['text'])
+        with self.assertRaisesRegex(ValueError, 'direct_allowance_exhausted'):
+            self.strategy.on_model(exhausted, self.policy, exhausted_dispatch,
+                admitted(artifacts, exhausted_dispatch, response(action)), artifacts, submission_id=uid('new'))
 
     def test_unrelated_graph_commit_preserves_turn_but_owner_state_change_does_not(self):
         artifacts, snapshot = fixture()
@@ -713,7 +758,7 @@ class StateTests(unittest.TestCase):
     def test_helpers_resume_same_turn_without_new_helper_charge(self):
         artifacts, snapshot = fixture()
         dispatched, _, _ = dispatch(snapshot, artifacts)
-        action = dict(mode='lookup', rationale='Check a lemma.', names=['Nat.add_comm'], inspect=False)
+        action = dict(mode='lookup', rationale='Check a lemma.', names=['Nat.add_comm'])
         result = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action)), artifacts)
         plan = result.helper

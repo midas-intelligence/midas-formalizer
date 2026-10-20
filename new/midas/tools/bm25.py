@@ -31,7 +31,7 @@ _ATTR = re.compile(r'@\[[^\]]*\]')
 _COMMENT_BOUNDARY = re.compile(r'/-|-/')
 _MODIFIERS = r'(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*'
 _DECLARATION = re.compile(r'(?m)^[ \t]*'+_MODIFIERS+
-    r'(?:theorem|lemma|def|abbrev|instance|class|structure|inductive|opaque|axiom)\b')
+    r'(?P<kind>theorem|lemma|def|abbrev|instance|class|structure|inductive|opaque|axiom)\b')
 _COMMAND = re.compile(r'(?m)^(?P<indent>[ \t]*)'+_MODIFIERS+
     r'(?:theorem|lemma|def|abbrev|instance|class|structure|inductive|opaque|axiom|example|'
     r'namespace|section|end|open|variable|universe|attribute|set_option|include|omit|'
@@ -39,7 +39,7 @@ _COMMAND = re.compile(r'(?m)^(?P<indent>[ \t]*)'+_MODIFIERS+
 _HEADER_TOKEN = re.compile(r'«[^»]*»|:=|[()\[\]{}⟨⟩]|(?<![\w.])(?:where|let|match|by|do)(?![\w.])|(?m:^\s*\|)')
 _OPEN = {'(': ')', '[': ']', '{': '}', '⟨': '⟩'}
 WEIGHTED_RANK = 'bm25(3.0, 2.0, 1.0)'
-FORMAT = b'midas-bm25-source-v1'
+FORMAT = b'midas-bm25-source-v2'
 
 
 def stopped(cancel, deadline):
@@ -63,11 +63,11 @@ def token_text(value):
     return ' '.join(out)
 
 
-def statement(clean):
-    """Header from comment/attribute-blanked code; implementation excluded."""
+def _statement_end(clean):
+    """Header boundary in comment/attribute-blanked code, or None if uncertain."""
     declaration = _DECLARATION.match(clean)
     if declaration is None:
-        return ''
+        return None
     stack = []
     for match in _HEADER_TOKEN.finditer(clean, declaration.end()):
         token = match[0]
@@ -77,18 +77,25 @@ def statement(clean):
             stack.append(_OPEN[token])
         elif token in _OPEN.values():
             if not stack or stack.pop() != token:
-                return ''
+                return None
         elif not stack:
             if token in ('let', 'match', 'by', 'do'):
-                return ''
+                return None
             if token in (':=', 'where') or token.lstrip().startswith('|'):
-                return clean[:match.start()].strip()
-    return '' if stack else clean.strip()
+                return match.start()
+    return None if stack else len(clean)
+
+
+def statement(clean):
+    """Header from comment/attribute-blanked code; implementation excluded."""
+    end = _statement_end(clean)
+    return clean[:end].strip() if end is not None else ''
 
 
 def documents(source):
     """Yield name, line, excerpt line/byte range, documentation and header.
 
+    Theorem/lemma excerpts stop before the proof; definitions retain their bodies.
     Anonymous instances retain their source since there is no name to look up.
     Commands delimit excerpts, including documentation before the next command.
     """
@@ -119,7 +126,8 @@ def documents(source):
                     break
         commands.append((match, line, start, documentation))
     for i, (match, line, start, doc) in enumerate(commands):
-        if not _DECLARATION.match(clean, match.start()):
+        declaration = _DECLARATION.match(clean, match.start())
+        if declaration is None:
             continue
         name = names.get(line, '')
         if name and parse_identifier(name) is None:
@@ -135,8 +143,17 @@ def documents(source):
         # Blank lines between commands are not part of the authored declaration.
         while end > line+1 and not lines[end-1].strip():
             end -= 1
-        header = statement(clean[chars[line]:chars[end]])
-        yield name, line+1, start+1, offsets[start], offsets[end], doc, header
+        text = clean[chars[line]:chars[end]]
+        boundary = _statement_end(text)
+        header = text[:boundary].strip() if boundary is not None else ''
+        excerpt_end = offsets[end]
+        if declaration['kind'] in ('theorem', 'lemma'):
+            # Preserve authored documentation, attributes and binder spelling.
+            # If lexical syntax is uncertain, keep the name for checked lookup
+            # instead of falling back to an excerpt that could include a proof.
+            excerpt_end = (offsets[line] + len(source[chars[line]:chars[line]+boundary].rstrip().encode())
+                           if boundary is not None else offsets[start])
+        yield name, line+1, start+1, offsets[start], excerpt_end, doc, header
 
 
 def corpus_key(index):

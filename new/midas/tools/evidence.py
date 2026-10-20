@@ -211,7 +211,7 @@ def search_summary(result, search):
     if compact:
         detail = f'; first {DETAILS} detailed' if search.backend.name == 'frozen-source' else ''
         rows.append(f'{len(result.records)} results{detail}. '
-                    'Use lookup with a name for its type or inspect=true for source.')
+                    'Use lookup with a name for its type and available definition source.')
     for rank, match in enumerate(result.records, 1):
         name = '\n'.join(match.names) or 'Source match (no declaration name)'
         label = f'{rank}. ' if compact else ''
@@ -277,7 +277,7 @@ def lookup_summary(records):
 
 
 def lookup_sources(records, *, environment_id, index, prefix, reader):
-    """Return authored declarations, retaining checked types for alias commands.
+    """Return checked theorem signatures and authored bodies for definitions.
 
     prefix is the exact checked SourceFile prefix. Installed modules are resolved
     only against the admitted index, and bytes are verified on every read.
@@ -287,7 +287,7 @@ def lookup_sources(records, *, environment_id, index, prefix, reader):
     result, loaded = [], {}
     for row, summary in zip(records, lookup_summary(records)):
         location = row.get('source_range')
-        if row['status'] != 'available':
+        if row['status'] != 'available' or row.get('kind') == 'theorem':
             result.append(summary)
             continue
         data, path, note = prefix.data, prefix.path, None

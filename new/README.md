@@ -1089,11 +1089,13 @@ so changing a draft or memory does not invalidate those evidence prefixes. Memor
 feedback, remaining allowances and the final action request follow the cache
 boundaries. Evicting or reordering retained content still invalidates prefixes
 from the first change.
-The action schema excludes unavailable helpers and candidate actions, including
+The action schema always includes `revise`; capabilities report whether a current
+candidate and its mathematical allowance permit it. Gaining a candidate alone
+preserves the schema and cache key. Other unavailable actions are excluded, including
 recall/page without offered results and research without a configured service.
 Reviewer schemas likewise omit unavailable research. Small schema variants are
 cached by available actions: changing remaining counters alone preserves the
-schema, while enabling or exhausting an action changes its hash and cache identity.
+schema, while enabling or exhausting a filtered action changes its hash and cache identity.
 Strategy admission still checks every response and returns bounded rejection
 details in the next prompt so invalid replies can be corrected.
 Disabled caching emits no breakpoint annotations.
@@ -1157,8 +1159,11 @@ rank domain. Explicit names retain priority; forbidden names, equivalent escaped
 spellings, internal Midas names and invalid identifiers cannot become lookup jobs.
 Searches must all have exact, ordered outcomes, including explicit failures.
 Names are checked before their availability is reported. Search-driven retrieval
-retains authored excerpts; names-only inspection can request original declaration
-ranges. `finish_helper` validates the expected stages and current scope and returns
+retains authored theorem statements and definition bodies. Lookup always requests
+original source for definitions and returns checked theorem signatures without proof
+bodies. This also applies to lookup stages in retrieval, including those following
+searches. Model lookup/retrieve responses have no `inspect` field.
+`finish_helper` validates the expected stages and current scope and returns
 advisory evidence with the original strategy continuation. Storage/controller must
 commit this result once against current owner versions and retain every search,
 compiler and model receipt, including failed stages.
@@ -1188,7 +1193,12 @@ no bonus. Ties preserve baseline ordering. Evidence retains raw BM25 scores.
 
 Search returns up to 50 results. The first 12 include source excerpts (up to 6000
 UTF-8 bytes each); subsequent named hits carry only names in the display. Lookup
-can expand any of those names. Anonymous declarations retain excerpts because
+can expand any of those names. Theorem and lemma excerpts retain documentation,
+attributes and statements, ending before the proof. Definitions, abbreviations
+and instances retain their bodies. If a theorem header boundary is lexically
+uncertain, search retains its name for checked lookup and omits the source excerpt.
+The derived index format is versioned so older full-proof excerpt ranges rebuild.
+Anonymous declarations retain excerpts because
 they cannot be looked up by name. When excerpts overflow the first evidence page,
 a compact ranked name list comes first and details follow through ordinary paging.
 Extraction is lexical, not an elaborated declaration inventory: macro-generated

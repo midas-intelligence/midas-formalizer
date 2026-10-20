@@ -144,11 +144,7 @@ def fuse(request, reports):
 
 
 def lookup_stages(request, fusion):
-    action = request.action
-    # Query-driven retrieval uses original search excerpts; names-only inspection
-    # asks the checker for source ranges, leaving source projection to tools.
-    inspect = action.inspect and not action.queries
-    actions = (Lookup(fusion.selected[i:i+12], inspect) for i in range(0, len(fusion.selected), 12))
+    actions = (Lookup(fusion.selected[i:i+12]) for i in range(0, len(fusion.selected), 12))
     return _stages(request, actions, start=len(search_stages(request)))
 
 

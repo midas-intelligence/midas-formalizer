@@ -112,6 +112,12 @@ class Strategy:
             allowances = [f'{name}: {getattr(capabilities, name)}' for name in (
                 'direct_remaining', 'decomposition_remaining', 'repair_remaining',
                 'retrieval_remaining', 'probe_remaining')]
+            if snapshot.base is None:
+                allowances.append('revise: unavailable (no existing candidate)')
+            elif snapshot.base.mode not in modes:
+                allowances.append(f'revise: unavailable ({snapshot.base.mode} allowance exhausted)')
+            else:
+                allowances.append('revise: available')
             if capabilities.web_calls:
                 allowances.extend((f'research_remaining: {capabilities.research_remaining}',
                                    f'web_calls: {capabilities.web_calls}'))
@@ -143,17 +149,15 @@ class Strategy:
             if role == 'reviewer':
                 schema = reviewer.verdict_schema('research' in helpers)
             else:
-                actions = [*helpers, 'stop']
+                actions = [*helpers, 'stop', 'revise']
                 if modes:
                     actions.append('candidate')
                 if len(snapshot.context.subjects) == 1:
                     actions.extend(action for mode, action in
                         (('direct', 'proof'), ('decomposition', 'decomposition')) if mode in modes)
-                if snapshot.base is not None and snapshot.base.mode in modes:
-                    actions.append('revise')
                 schema = prover.action_schema(tuple(sorted(actions)))
-            # Only changes to action availability change this small cached schema;
-            # declining counters and changing evidence keep the same contract.
+            # Revision availability belongs in capabilities so gaining a base
+            # does not change the schema/cache key. Other actions remain filtered.
             prompt = replace(prompt, schema=schema)
         wire = build(display, options, renderer=lambda _: prompt)
         turn = Turn(snapshot.version, work.operation, prompt.contract, sha256(prompt.schema).hexdigest(),
@@ -226,7 +230,7 @@ class Strategy:
             if key not in (snapshot.recallable if mode == 'recall' else snapshot.cursors):
                 if mode == 'recall':
                     raise ValueError('recall requires an advertised saved result_id. '
-                        'To inspect Lean declarations, use lookup with names and inspect=true.')
+                        'To inspect Lean declarations, use lookup with names.')
                 raise ValueError('page requires an advertised cursor for an undisplayed evidence page. '
                     'Use the evidence already shown or choose an enabled helper from CAPABILITIES.')
             result = Changes(snapshot.version, (_work(snapshot, mode, detail=pack([key, dispatch.turn.id])),))
@@ -266,10 +270,10 @@ class Strategy:
         if mode == 'search':
             helper = Search(action['query'], Backend(action['backend']['name'], tuple(action['backend']['prefixes'])))
         elif mode == 'lookup':
-            helper = Lookup(tuple(action['names']), action['inspect'])
+            helper = Lookup(tuple(action['names']))
         elif mode == 'retrieve':
             helper = Retrieve(tuple(action['queries']), tuple(action['names']), tuple(
-                Backend(b['name'], tuple(b['prefixes'])) for b in action['backends']), action['offset'], action['inspect'])
+                Backend(b['name'], tuple(b['prefixes'])) for b in action['backends']), action['offset'])
         elif mode == 'research':
             helper = Research(action['question'], tuple(action['urls']))
         elif mode == 'probe':
