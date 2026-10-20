@@ -149,6 +149,126 @@ class Contracts(unittest.TestCase):
             self.assertEqual(run.writer.status_snapshot().accounting.turns, 1)
             self.assertEqual(Compiler.calls, ['binding', 'proof', 'integrate', 'audit'])
 
+    def test_stop_approval_and_rejection_use_review_and_feedback(self):
+        from midas.application import records as r
+        from midas.prompt import prover, reviewer
+        from midas.strategy import Memory
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        action = dict(mode='stop', rationale='No proof route is available.', objection=None)
+        advice = 'Use the constructor True.intro.'
+        finding = dict(category='progress', location='goal', issue='True is inhabited.', suggested_revision=advice)
+        for verdict in ('accept', 'reject'):
+            with self.subTest(verdict=verdict):
+                raw = model_json(dict(verdict=verdict, rationale='Independent review decision.',
+                    findings=[finding] if verdict == 'reject' else [], question='', urls=[]))
+                captured = []
+                original = prover.render
+                def capture(snapshot):
+                    captured.append(snapshot)
+                    return original(snapshot)
+                with patch('midas.prompt.prover.render', side_effect=capture), self.start(name=verdict,
+                        workflow='scripted', config=replace(Config(), prover=route, reviewer=route),
+                        script=(('prover', response(action)), ('reviewer', raw),
+                                ('prover', response(dict(proof(), proof_body='by trivial'))))) as run:
+                    completion = self.finish(run)
+                    _, state = r.owner_state(run.writer, self.selected.identities[0].id)
+                    self.assertIsNone(state.stop_request)
+                    self.assertEqual(state.stopped, verdict == 'accept')
+                    self.assertEqual(completion.exit_code, 1 if verdict == 'accept' else 0)
+                    self.assertEqual(run.writer.status_snapshot().accounting.turns, 2 if verdict == 'accept' else 3)
+                    self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'protocol'), 0)
+                    observation = Memory.load(r.read(run.writer, state.memory)).observations[-1]
+                    self.assertEqual(observation.status, 'stop_approved' if verdict == 'accept' else 'stop_rejected')
+                    if verdict == 'reject':
+                        self.assertIn(advice.encode(), b'\n'.join(s.text for s in captured[-1].sections if s.kind == 'feedback'))
+                    else:
+                        self.assertEqual(len(captured), 1)
+                        self.assertFalse(Compiler.calls)
+                    # Saved role instructions must include stop review guidance.
+                    self.assertIn(reviewer.STOP_INSTRUCTIONS, run.workflow.instructions['reviewer'])
+                with self.app.resume(self.root/verdict) as resumed:
+                    self.assertEqual(self.finish(resumed).exit_code, 1 if verdict == 'accept' else 0)
+
+    def test_pending_stop_and_review_receipt_survive_resume(self):
+        from midas.application import records as r
+        from midas.application.inspection import node_details
+        from midas.strategy import Turn
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        action = dict(mode='stop', rationale='The statement cannot be proved.', objection=None)
+        review = model_json(dict(verdict='accept', rationale='The request is justified.', findings=[], question='', urls=[]))
+        run = self.start(workflow='scripted', config=replace(Config(), prover=route, reviewer=route),
+                         script=(('prover', response(action)), ('reviewer', review)))
+        owner = self.selected.identities[0].id
+        try:
+            for _ in range(1000):
+                run.step()
+                _, state = r.owner_state(run.writer, owner)
+                if state.stop_request:
+                    break
+                time.sleep(.001)
+            self.assertIsNotNone(state.stop_request)
+            self.assertFalse(state.stopped)
+            self.assertIn(('stop_request', state.stop_request), node_details(run.writer, owner).artifacts)
+            self.assertIsNone(r.value(run.writer, 'application.objections', owner))
+            with patch.object(run.controller, '_accept', return_value=0):
+                for _ in range(1000):
+                    run.step()
+                    if run.writer.pending_receipts():
+                        break
+                    time.sleep(.001)
+                self.assertTrue(run.writer.pending_receipts())
+                job = r.value(run.writer, 'application.pending', owner)
+                binding = r.value(run.writer, 'application.jobs', job)
+                turn = Turn.load(r.read(run.writer, r.unref(binding[1])))
+                self.assertEqual(turn.operation, 'review_stop')
+                run.close()
+        finally:
+            if not run.closed:
+                run.close()
+        with self.app.resume(self.root/'run') as resumed:
+            self.assertEqual(self.finish(resumed).exit_code, 1)
+            _, state = r.owner_state(resumed.writer, owner)
+            self.assertTrue(state.stopped)
+            self.assertIsNone(state.stop_request)
+            self.assertEqual(resumed.writer.status_snapshot().accounting.turns, 2)
+
+    def test_stop_review_research_and_invalid_verdict_keep_request_pending(self):
+        from midas.application import records as r
+        from midas.prompt import reviewer
+        from midas.strategy import Memory
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        research_route = ModelRoute(provider='openai', model='fixture')
+        action = dict(mode='stop', rationale='No route found.', objection=None)
+        research = model_json(dict(verdict='research', rationale='Investigate.', findings=[], question='Which constructor?', urls=[]))
+        answer = model_json(dict(answer='Use True.intro as the proof.', sources=[], unresolved=[]))
+        finding = dict(category='progress', location='goal', issue='There is a constructor.', suggested_revision='')
+        malformed = dict(verdict='reject', rationale='Use the constructor.', findings=[finding], question='', urls=[])
+        rejected = dict(malformed, findings=[dict(finding, suggested_revision='Apply True.intro.')])
+        captured, original = [], reviewer.render
+        def capture(snapshot):
+            captured.append(snapshot)
+            return original(snapshot)
+        with patch('midas.prompt.reviewer.render', side_effect=capture), self.start(workflow='scripted',
+                config=replace(Config(), prover=route, reviewer=route, research=research_route),
+                script=(('prover', response(action)), ('reviewer', research), ('research', answer),
+                        ('reviewer', model_json(malformed)), ('reviewer', model_json(rejected)),
+                        ('prover', response(dict(proof(), proof_body='by trivial'))))) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(len(captured), 3)
+            for display in captured:
+                self.assertEqual(next(s.text for s in display.sections if s.name == 'stop-request'),
+                    next(s.text for s in captured[0].sections if s.name == 'stop-request'))
+            evidence = b'\n'.join(s.text for s in captured[1].sections if s.kind == 'evidence')
+            # Scripted research has no web events; its admitted failure still
+            # returns to this review instead of resuming the prover.
+            self.assertIn(b'Research performed no recorded web action', evidence)
+            _, state = r.owner_state(run.writer, self.selected.identities[0].id)
+            self.assertFalse(state.stopped)
+            self.assertIsNone(state.stop_request)
+            self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'protocol'), 1)
+            self.assertEqual(run.writer.status_snapshot().accounting.turns, 6)
+            self.assertIn('Apply True.intro.', Memory.load(r.read(run.writer, state.memory)).observations[-1].messages)
+
     def test_protocol_rejection_reaches_next_model_prompt(self):
         from midas.application import records as r
         from midas.provider import ModelOutput, Route

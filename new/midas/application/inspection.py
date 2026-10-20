@@ -54,7 +54,7 @@ def nodes(directory, **options):
 def node_details(reader, owner):
     from ..status.views import NodeDetails
     _, state = r.owner_state(reader, owner)
-    references = [(name, reference) for name in ('context', 'identity', 'base', 'memory')
+    references = [(name, reference) for name in ('context', 'identity', 'base', 'memory', 'stop_request')
                   if (reference := getattr(state, name)) is not None]
     references.extend(('evidence', ref) for ref in state.evidence)
     return NodeDetails(owner, state.stopped, state.reason, state.submission, tuple(references))

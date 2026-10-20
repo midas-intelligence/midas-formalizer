@@ -159,8 +159,15 @@ A smaller `live.json` can omit settings that should use defaults:
 }
 ```
 
-Configure a reviewer for independent review of decompositions. Research is
+Configure a reviewer for independent review of decompositions and node stop requests. Research is
 disabled when the `research` route is omitted or unconfigured.
+
+A prover can return `stop` with a rationale and a nullable statement objection.
+The node stays active while the reviewer decides. Acceptance stops the node;
+an accepted statement objection also asks its current parents to reconsider their
+decompositions. Rejection returns actionable feedback to the prover so it can
+continue. Stop requests and decisions survive resume and use model turns without
+spending a mathematical attempt.
 
 | Provider | Transport | Authentication/setup |
 | --- | --- | --- |

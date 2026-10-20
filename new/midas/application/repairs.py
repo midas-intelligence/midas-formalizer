@@ -38,14 +38,14 @@ def plan(flow, reader, owner):
         objection.source, (objection.evidence,)))
     data = artifact(memory.payload)
     effects.extend((Effect(artifacts=(data,)), r.save_owner(reader, owner.obligation_id,
-        replace(state, memory=data.reference, stopped=False, reason=None))))
+        replace(state, memory=data.reference, stopped=False, reason=None, stop_request=None))))
     for old in proposal.cancel_after_commit:
         _, child = r.owner_state(reader, old.obligation_id)
         if child.submission:
             submission = candidates.submission(reader, child.submission)
             effects.extend((settle_candidate(reader, old, AttemptDecision(submission['attempt'], 'abandoned', 0)),
                 r.record(reader, 'application.submissions', child.submission, dict(submission, phase='failed', current=None))))
-        effects.extend((r.save_owner(reader, old.obligation_id, replace(child, submission=None, stopped=True)),
+        effects.extend((r.save_owner(reader, old.obligation_id, replace(child, submission=None, stopped=True, stop_request=None)),
                         r.record(reader, 'application.pending', old.obligation_id, None)))
     scope = 'owner:'+owner.obligation_id
     changes = []

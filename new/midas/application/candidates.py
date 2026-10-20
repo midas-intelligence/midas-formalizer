@@ -53,7 +53,8 @@ def begin(flow, reader, owner, draft, *, supplied=False, state=None):
                  order=[k for k, _ in draft.checks()], rows={}, phase='binding', current=None)
     return r.merge(reserve_candidate(reader, flow.policy, owner, attempt, draft.mode),
         r.record(reader, 'application.submissions', key, saved),
-        r.save_owner(reader, owner.obligation_id, replace(state, base=data.reference, submission=key, reason=None)),
+        r.save_owner(reader, owner.obligation_id, replace(state, base=data.reference, submission=key,
+                                                       reason=None, stop_request=None)),
         Effect(artifacts=(data,)))
 
 

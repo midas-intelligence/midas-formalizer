@@ -129,21 +129,39 @@ def main():
             assert b'Goal 1:' in text, text
             assert b'0/' not in text, text
         print('lookup, probe, advisory evidence and original continuations passed', flush=True)
-        objection = dict(mode='stop', rationale='Exercise a saved statement objection.',
-            objection=dict(category='context_mismatch', evidence='Reconsider the chosen decomposition.'))
-        with app.start(root/'unsupported-stop', package=package, selection=selected, config=config, workflow='scripted',
-            script=(('prover', response(decompose)), ('prover', response(objection)),
-                    ('prover', response(proof())), ('reviewer', review))) as run:
-            complete(run)
-            graph = run.workflow.graph(run.writer)
-            child = next(n for n in graph.nodes if n.owner.obligation_id not in graph.roots)
-            assert child.owner.generation == 0
-            assert not run.writer.counter('owner:'+selected.identities[0].id, 'backtracks')
-            assert not run.writer.counter('owner:'+selected.identities[0].id, 'repair_open')
-            assert run.writer.status_snapshot().accounting.turns == 4
-        with app.resume(root/'unsupported-stop') as run:
-            assert run.run().exit_code == 0
-        print('unsupported stop rejected without backtracking; proof continuation and resume passed', flush=True)
+        for approved in (False, True):
+            name = 'stop-approved' if approved else 'stop-rejected'
+            plan = dict(decompose, children=[dict(decompose['children'][0], statement='False')]) if approved else decompose
+            objection = dict(mode='stop', rationale='The child statement appears unprovable.',
+                objection=dict(category='suspected_false', evidence='No witness of False exists.' if approved else
+                    'The equality appears unprovable.'))
+            finding = dict(category='mathematical', location='goal', issue='Equality is reflexive.',
+                           suggested_revision='Use by rfl to prove 1 = 1.')
+            verdict = model_json(dict(verdict='accept' if approved else 'reject',
+                rationale='False cannot be proved.' if approved else 'Reflexivity proves the child.',
+                findings=[] if approved else [finding], question='', urls=[]))
+            with app.start(root/name, package=package, selection=selected, config=config, workflow='scripted',
+                script=(('prover', response(plan)), ('prover', response(objection)),
+                        ('prover', response(action if approved else proof())), ('reviewer', review),
+                        ('reviewer', verdict))) as run:
+                complete(run)
+                graph = run.workflow.graph(run.writer)
+                child = next(n for n in graph.nodes if n.owner.obligation_id not in graph.roots)
+                assert child.owner.generation == int(approved)
+                assert run.writer.counter('owner:'+selected.identities[0].id, 'backtracks') == int(approved)
+                assert not run.writer.counter('owner:'+selected.identities[0].id, 'repair_open')
+                assert run.writer.status_snapshot().accounting.turns == 5
+                from midas.application import records as r
+                from midas.strategy import Memory
+                report = r.value(run.writer, 'application.objections', child.owner.obligation_id)
+                assert bool(report) == approved
+                if not approved:
+                    _, state = r.owner_state(run.writer, child.owner.obligation_id)
+                    assert any('Use by rfl' in message for observation in Memory.load(r.read(run.writer, state.memory)).observations
+                               for message in observation.messages)
+            with app.resume(root/name) as run:
+                assert run.run().exit_code == 0
+        print('reviewed stop approval repairs parent; rejection continues child; both resume passed', flush=True)
         joint_fixture = Path('/tmp/midas-application-joint-fixture')
         joint_fixture.mkdir(exist_ok=True)
         if not (joint_fixture/'package').exists():

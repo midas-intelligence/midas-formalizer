@@ -385,7 +385,12 @@ hash-checked original source excerpts. Child prompts retain their own proof guid
 definitions and prerequisite interfaces. Conditional
 proofs require independent review in model workflows. Joint definition/property
 submissions check closed definitions first and publish the group atomically.
-Statement objections reach current direct consumers, preserve shared reachable
+Prover `stop` actions save a pending request for the reviewer; they do not stop
+the node or report a statement objection immediately. The reviewer accepts stopping
+or rejects with actionable continuation guidance. Rejection returns its findings
+to the prover's memory without spending a mathematical attempt. Research continues
+the same stop review, and pending requests survive resume with exact request and
+owner bindings. Accepted statement objections reach current direct consumers, preserve shared reachable
 work, and enter the repaired owner's memory. Mathematical and helper reservations
 settle once through controller transactions.
 
@@ -966,7 +971,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording plus one native provider output schema; renderer versions are `prover-v3`, `reviewer-v2`, and `researcher-v2`. |
+| Fixed role instructions and response schema | Role wording plus one native provider output schema; renderer versions are `prover-v4`, `reviewer-v3`, and `researcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat, complete retained observation sections in saved order. No nested reference dictionary or prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
@@ -976,7 +981,14 @@ adaptation keeps these responsibilities without importing the old implementation
 The mathematical guidance retains v2's requirements for useful decomposition,
 explicit child hypotheses, concrete next steps, consistent witnesses and joint
 outputs, and independent review. Response fields and helper behavior follow v2.1:
-there are no copied v2 identity fields, import actions, or stop actions.
+there are no copied v2 identity fields or import actions. A `stop` action has a
+nonempty `rationale` and nullable `objection`; a statement objection contains
+`category` (`suspected_false`, `missing_assumption`, or `context_mismatch`) and
+nonempty `evidence`. It requests independent reviewer approval to stop this node.
+For this review, `accept` stops the node and delivers any statement objection to
+its current parents; `reject` requires at least one nonempty `suggested_revision`
+and continues the prover with the review feedback. This is an advisory work decision,
+not a compiler certificate of unprovability.
 Probes follow v2's body-only approach: each case has only `id` and `code`, where
 `code` is the TacticM body following `run_tac do`. The application rejects outer
 `by`, `run_tac`, `run_elab` and `do` wrappers, then adds `run_tac do` and indentation.
@@ -1031,7 +1043,7 @@ are removed from displayed diagnostics for both roles and before new compiler
 failures are truncated into prover memory. Compiler errors remain intact.
 
 The default prover contract returns `{action, memory_update}`; the action covers
-proofs, decomposition, joint candidates, revisions and helpers. The
+proofs, decomposition, joint candidates, revisions, stop requests and helpers. The
 reviewer returns `{verdict, rationale, findings, question, urls}`. Research returns
 `{answer, sources, unresolved}`, matching tools' existing research evidence
 admission. Response interpretation, semantic validation, helper lowering and

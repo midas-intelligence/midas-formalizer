@@ -12,8 +12,8 @@ from ..tools import (Backend, HelperRequest, Lookup, Probe, Research, Retrieve, 
 from .candidates import expand, revise, supplied
 from .memory import Observation, pack, update_memory
 from .protocol import CONTRACTS, RESPONSE_BYTES, interpret
-from .state import (ArtifactData, Attempt, AttemptDecision, Changes, Dispatch,
-                    PreparedModel, Snapshot, Turn, Work, candidate_hash)
+from .state import (ArtifactData, Attempt, AttemptDecision, Changes, Dispatch, Objection,
+                    PreparedModel, Snapshot, StopRequest, Turn, Work, candidate_hash)
 
 
 def _work(snapshot, operation, *, detail=b''):
@@ -46,6 +46,8 @@ class Strategy:
             return result('verified')
         if snapshot.stopped:
             return result('strategy_stopped')
+        if snapshot.stop_request is not None:
+            return result(work=(_work(snapshot, 'review_stop'),))
         attempt = snapshot.attempt
         if attempt is not None:
             if attempt.candidate.id in snapshot.graph.retired_candidates:
@@ -78,11 +80,16 @@ class Strategy:
 
     def prepare_model(self, snapshot, policy, work, display, options, *, renderer=None):
         """Render once and bind its exact schema/wire to the dispatched snapshot."""
-        if work not in self.plan(snapshot, policy).work or work.operation not in ('generate', 'revise', 'review'):
+        if work not in self.plan(snapshot, policy).work or work.operation not in ('generate', 'revise', 'review', 'review_stop'):
             raise ValueError('Model work is not ready in this snapshot')
         instance(display, Display)
         if snapshot.version.owner not in display.owners or snapshot.version.context not in display.artifacts:
             raise ValueError('Presentation lacks exact owner/context bindings')
+        if work.operation == 'review_stop':
+            request = snapshot.stop_request
+            if (request.source not in display.artifacts or not any(
+                    s.kind == 'candidate' and s.name == 'stop-request' for s in display.sections)):
+                raise ValueError('Stop review presentation lacks exact request binding')
         if work.operation == 'review':
             candidate = snapshot.attempt.candidate
             if (candidate.source not in display.artifacts or any(d.interface not in display.artifacts
@@ -92,13 +99,15 @@ class Strategy:
         modes = [mode for mode in ('direct', 'decomposition') if policy.candidate(mode, snapshot.usage).allowed]
         helpers = tuple(mode for mode in capabilities.available_modes
             if (mode != 'recall' or snapshot.recallable) and (mode != 'page' or snapshot.cursors))
-        if work.operation == 'review':
+        if work.operation in ('review', 'review_stop'):
             details = 'Verdicts: accept, reject'
             if 'research' in helpers:
                 details += (', research' + '\nresearch_remaining: ' +
                             str(capabilities.research_remaining) + '\nweb_calls: ' + str(capabilities.web_calls))
             else:
                 details += '\nresearch: disabled'
+            if work.operation == 'review_stop':
+                details += '\nReview subject: stop request; accept stops this node; reject continues proof work.'
         else:
             allowances = [f'{name}: {getattr(capabilities, name)}' for name in (
                 'direct_remaining', 'decomposition_remaining', 'repair_remaining',
@@ -112,7 +121,7 @@ class Strategy:
                 allowances.append('recall: unavailable (no saved first pages outside this prompt)')
             if not snapshot.cursors:
                 allowances.append('page: unavailable (no additional pages outside this prompt)')
-            details = ('Candidate modes: ' + ', '.join(modes) + '\nHelper modes: ' +
+            details = ('Candidate modes: ' + ', '.join(modes) + '\nStop mode: request reviewer approval' + '\nHelper modes: ' +
                 ', '.join(helpers) + '\n' + '\n'.join(allowances))
             if snapshot.recallable or snapshot.cursors:
                 details += '\nSaved evidence not included in this prompt:\n'+'\n'.join((
@@ -123,7 +132,7 @@ class Strategy:
         while name in {s.name for s in sections}:
             name += '-current'
         display = replace(display, sections=sections + (Section('capabilities', name, details.encode()),))
-        role = 'reviewer' if work.operation == 'review' else 'prover'
+        role = 'reviewer' if work.operation in ('review', 'review_stop') else 'prover'
         default = reviewer if role == 'reviewer' else prover
         prompt = (renderer or default.render)(display)
         if prompt.role != role:
@@ -134,7 +143,7 @@ class Strategy:
             if role == 'reviewer':
                 schema = reviewer.verdict_schema('research' in helpers)
             else:
-                actions = list(helpers)
+                actions = [*helpers, 'stop']
                 if modes:
                     actions.append('candidate')
                 if len(snapshot.context.subjects) == 1:
@@ -150,8 +159,9 @@ class Strategy:
         turn = Turn(snapshot.version, work.operation, prompt.contract, sha256(prompt.schema).hexdigest(),
             sha256(wire.wire).hexdigest(), sha256(wire.setup).hexdigest() if wire.setup is not None else None,
             snapshot.base.id if snapshot.base else None,
-            candidate_hash(snapshot.attempt.candidate) if role == 'reviewer' else None,
-            snapshot.environment_id, snapshot.graph.revision)
+            candidate_hash(snapshot.attempt.candidate) if work.operation == 'review' else None,
+            snapshot.environment_id, snapshot.graph.revision,
+            snapshot.stop_request.id if work.operation == 'review_stop' else None)
         return PreparedModel(turn, wire)
 
     def on_model(self, snapshot, policy, dispatch, admitted, reader, *, submission_id=None):
@@ -176,6 +186,8 @@ class Strategy:
             if response.value['verdict'] == 'research':
                 return self._helper(snapshot, policy, dispatch.turn, 'research', dict(
                     question=response.value['question'], urls=response.value['urls']))
+            if dispatch.turn.operation == 'review_stop':
+                return self.on_stop_review(snapshot, response.value, evidence=admitted.raw)
             review = AdmittedReview(snapshot.attempt.candidate, admitted.receipt,
                                     response.value['verdict'] == 'accept')
             return self.on_review(snapshot, policy, review, evidence=admitted.raw,
@@ -195,6 +207,15 @@ class Strategy:
             if not decision.allowed:
                 raise ValueError(decision.reason)
             result = Changes(snapshot.version, (_work(snapshot, 'admit_candidate'),), draft=draft)
+        elif mode == 'stop':
+            if snapshot.attempt is not None or snapshot.stop_request is not None:
+                raise ValueError('Stop requires an idle node')
+            objection = action['objection']
+            request = StopRequest(snapshot.version.owner, action['rationale'], admitted.raw,
+                Objection(snapshot.version.owner, objection['category'], objection['evidence'], admitted.raw)
+                if objection is not None else None)
+            result = Changes(snapshot.version, (_work(snapshot, 'review_stop'),),
+                             reason='stop_review_pending', stop_request=request)
         elif mode in ('search', 'lookup', 'retrieve', 'probe', 'research'):
             result = self._helper(snapshot, policy, dispatch.turn, mode, action)
         elif mode in ('recall', 'page'):
@@ -213,6 +234,23 @@ class Strategy:
             raise ValueError('Unsupported prover action')
         memory = update_memory(snapshot.memory, response.memory, allowed_pins=snapshot.allowed_pins)
         return replace(result, memory=memory if memory != snapshot.memory else None)
+
+    def on_stop_review(self, snapshot, verdict, *, evidence):
+        request = snapshot.stop_request
+        if request is None:
+            raise ValueError('Stop review requires a pending request')
+        approved = verdict['verdict'] == 'accept'
+        suggestions = tuple(f['suggested_revision'] for f in verdict['findings'] if f['suggested_revision'].strip())
+        if not approved and not suggestions:
+            raise ValueError('Stop rejection requires feedback on how to continue in suggested_revision')
+        reason = 'stop_approved' if approved else 'stop_rejected'
+        # Retain actionable continuation advice before other diagnostics when
+        # the bounded memory observation cannot hold every review finding.
+        messages = (*suggestions, verdict['rationale'], *(f['issue'] for f in verdict['findings']))
+        memory = update_memory(snapshot.memory, observation=Observation.select('stop_review', reason, evidence, messages))
+        objection = replace(request.objection, source=evidence) if approved and request.objection else None
+        work = () if approved else (_work(snapshot, 'revise' if snapshot.base else 'generate'),)
+        return Changes(snapshot.version, work, reason=reason, stopped=approved, memory=memory, objection=objection)
 
     def submit(self, snapshot, policy, payload, *, guidance):
         if snapshot.attempt is not None:
@@ -352,5 +390,6 @@ class Strategy:
                            memory=memory, decision=decision)
         if snapshot.workflow == 'supplied':
             return Changes(snapshot.version, reason='supplied_candidate_required', memory=memory, decision=decision)
-        return Changes(snapshot.version, (_work(snapshot, 'revise' if snapshot.base else 'generate'),),
+        operation = 'review_stop' if snapshot.stop_request else 'revise' if snapshot.base else 'generate'
+        return Changes(snapshot.version, (_work(snapshot, operation),),
                        memory=memory, decision=decision, revision_charge=exception)

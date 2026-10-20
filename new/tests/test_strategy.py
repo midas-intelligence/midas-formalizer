@@ -16,7 +16,7 @@ from midas.policy import Config, OwnerUsage, Policy, Services
 from midas.prompt import Options, Section, Snapshot as Display, prover
 from midas.prompt.wire import _Writer
 from midas.strategy import (Attempt, Context, Dispatch, Draft, Lesson, Memory, Observation, Objection,
-    Prerequisite, Reference, Snapshot, Strategy, Subject, Turn, Update, Version,
+    Prerequisite, Reference, Snapshot, StopRequest, Strategy, Subject, Turn, Update, Version,
     child_context, consumers, expand, fragments, interpret, reopen, revise, update_memory)
 from midas.strategy.memory import pack
 from midas.tools import Scope, StageEvidence, prepare_archive
@@ -111,7 +111,11 @@ def dispatch(snapshot, artifacts, strategy=None):
         value = snapshot.attempt.candidate
         refs += (value.source,) + tuple(d.interface for d in value.dependencies)
         owners += tuple(d.owner for d in value.dependencies)
-    display = Display((Section('subject', 'goal', b'Goal: True'), Section('candidate', 'candidate', b'Conditional glue')),
+    sections = (Section('subject', 'goal', b'Goal: True'), Section('candidate', 'candidate', b'Conditional glue'))
+    if snapshot.stop_request:
+        refs += (snapshot.stop_request.source,)
+        sections += (Section('candidate', 'stop-request', snapshot.stop_request.rationale.encode()),)
+    display = Display(sections,
                       refs, owners)
     prepared = strategy.prepare_model(snapshot, Policy(Config()), work, display, Options('codex', 'model'))
     refs = (artifacts.save(prepared.wire.wire), artifacts.save(prepared.wire.setup))
@@ -360,7 +364,7 @@ class StateTests(unittest.TestCase):
                 actions = {a['properties']['mode']['enum'][0] for a in schema['properties']['action']['anyOf']}
                 self.assertEqual(actions & set(prover.HELPER_MODES), expected)
                 self.assertEqual(actions - set(prover.HELPER_MODES),
-                                 {'proof', 'decomposition', 'candidate'})
+                                 {'proof', 'decomposition', 'candidate', 'stop'})
                 capabilities = wire['input'][-1]['text']
                 self.assertTrue(capabilities.startswith('QUESTION next-action\nCAPABILITIES strategy-capabilities\n'))
                 self.assertTrue(capabilities.endswith('Return the action JSON now.'))
@@ -427,7 +431,7 @@ class StateTests(unittest.TestCase):
         snapshot = replace(snapshot, services=Services())
         dispatched, _, _ = dispatch(snapshot, artifacts)
         invalid = (
-            dict(mode='stop', objection=None, rationale='Unable to progress further.'),
+            dict(mode='stop', objection=None, rationale=''),
             dict(mode='recall', rationale='Read the source.', result_id='source-prefix'),
             dict(mode='recall', rationale='Read a result.', result_id=''),
             dict(mode='research', rationale='Find a reference.', question='Which theorem applies?', urls=[]),
@@ -443,6 +447,76 @@ class StateTests(unittest.TestCase):
             admitted(artifacts, dispatched, response(action)), artifacts)
         self.assertEqual(changes.helper.request.action.names, ('Nat.Prime',))
         self.assertTrue(changes.helper.request.action.inspect)
+
+    def test_stop_waits_for_review_and_only_approval_reports_objections(self):
+        artifacts, snapshot = fixture()
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        action = dict(mode='stop', rationale='The statement is missing a hypothesis.',
+            objection=dict(category='missing_assumption', evidence='A counterexample violates the goal.'))
+        output = admitted(artifacts, dispatched, response(action))
+        proposed = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
+        self.assertIsNone(proposed.stopped)
+        self.assertIsNone(proposed.objection)
+        self.assertIsNone(proposed.decision)
+        self.assertIsNone(proposed.graph)
+        self.assertEqual(proposed.work[0].operation, 'review_stop')
+        request = proposed.stop_request
+        self.assertEqual(StopRequest.load(request.payload), request)
+        snapshot = replace(snapshot, stop_request=request)
+        dispatched, prepared, _ = dispatch(snapshot, artifacts)
+        self.assertEqual(dispatched.turn.role, 'reviewer')
+        self.assertEqual(Turn.load(dispatched.turn.payload), dispatched.turn)
+        self.assertEqual(prepared.turn.stop_request_hash, request.id)
+        self.assertIsNone(prepared.turn.candidate_hash)
+        verdict = dict(verdict='accept', rationale='The missing hypothesis is necessary.', findings=[], question='', urls=[])
+        output = admitted(artifacts, dispatched, model_json(verdict))
+        result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
+        self.assertTrue(result.stopped)
+        self.assertFalse(result.work)
+        self.assertIsNone(result.decision)
+        self.assertEqual(result.objection, replace(request.objection, source=output.raw))
+        self.assertEqual(result.memory.observations[-1].status, 'stop_approved')
+        for changed in (replace(snapshot, stop_request=None),
+                        replace(snapshot, stop_request=replace(request, rationale='Different request.'))):
+            with self.subTest(changed=changed.stop_request), self.assertRaisesRegex(ValueError, 'stop request changed'):
+                dispatched.turn.validate_for(changed, continuation=True)
+
+    def test_stop_rejection_requires_and_retains_continuation_feedback(self):
+        artifacts, snapshot = fixture()
+        snapshot = replace(snapshot, stop_request=StopRequest(snapshot.version.owner, 'No route found.', artifact('stop')))
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        finding = dict(category='progress', location='goal', issue='A constructor is available.', suggested_revision='')
+        verdict = dict(verdict='reject', rationale='The goal is provable.', findings=[finding], question='', urls=[])
+        with self.assertRaisesRegex(ValueError, 'feedback on how to continue'):
+            self.strategy.on_model(snapshot, self.policy, dispatched,
+                admitted(artifacts, dispatched, model_json(verdict)), artifacts)
+        finding['suggested_revision'] = 'Apply the constructor, then prove its fields.'
+        result = self.strategy.on_model(snapshot, self.policy, dispatched,
+            admitted(artifacts, dispatched, model_json(verdict)), artifacts)
+        self.assertFalse(result.stopped)
+        self.assertEqual(result.work[0].operation, 'generate')
+        self.assertIsNone(result.objection)
+        self.assertIsNone(result.decision)
+        self.assertIn(finding['suggested_revision'], result.memory.observations[-1].messages)
+
+    def test_stop_review_research_preserves_the_exact_pending_request(self):
+        artifacts, snapshot = fixture()
+        request = StopRequest(snapshot.version.owner, 'No construction is possible.', artifact('stop'))
+        snapshot = replace(snapshot, stop_request=request)
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        raw = model_json(dict(verdict='research', rationale='Check the construction.', findings=[],
+                              question='Which construction applies?', urls=[]))
+        result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
+        stage = result.helper.stages[0]
+        evidence = StageEvidence(stage, receipt('research').request_ref.sha256, receipt('research'),
+                                 ResultStatus.SUCCEEDED, (artifact('research'),))
+        resumed = self.strategy.on_helper(snapshot, dispatched.turn, result.helper, (evidence,))
+        self.assertEqual(resumed.work[0].operation, 'review_stop')
+        self.assertIsNone(result.stopped)
+        self.assertIsNone(result.objection)
+        exhausted = replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct,
+                            decomposition=self.policy.config.mathematics.decomposition))
+        self.assertEqual(self.strategy.plan(exhausted, self.policy).work[0].operation, 'review_stop')
 
     def test_retrieve_accepts_morley_subscript_names(self):
         artifacts, snapshot = fixture()

@@ -11,10 +11,10 @@ from .protocol import Response, interpret
 from .repairs import Repair, consumers, reopen
 from .service import Strategy
 from .state import (ArtifactData, Attempt, AttemptDecision, Changes, Dispatch, Objection, PreparedModel,
-                    Snapshot, Turn, Version, Work)
+                    Snapshot, StopRequest, Turn, Version, Work)
 
 __all__ = ['ArtifactData', 'Attempt', 'AttemptDecision', 'Changes', 'Context', 'Dispatch', 'Draft',
     'Lesson', 'Memory', 'Observation', 'Objection', 'Prerequisite', 'PreparedModel', 'Reference',
-    'Repair', 'Response', 'Snapshot', 'Strategy', 'Subject', 'Turn', 'Update', 'Version', 'Work',
+    'Repair', 'Response', 'Snapshot', 'StopRequest', 'Strategy', 'Subject', 'Turn', 'Update', 'Version', 'Work',
     'candidate_material', 'child_context', 'consumers', 'expand', 'fragments', 'interpret', 'reopen',
     'revise', 'supplied', 'update_memory']

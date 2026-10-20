@@ -91,6 +91,7 @@ class Snapshot:
     forbidden_names: tuple[str, ...] = ()
     cursors: tuple[str, ...] = ()
     recallable: tuple[str, ...] = ()
+    stop_request: 'StopRequest | None' = None
 
     def __post_init__(self):
         instance(self.version, Version)
@@ -112,6 +113,10 @@ class Snapshot:
             raise ValueError('Expected snapshot state flags')
         if self.base is not None:
             instance(self.base, Draft)
+        if self.stop_request is not None:
+            instance(self.stop_request, StopRequest)
+            if self.stop_request.owner != self.version.owner or self.attempt is not None:
+                raise ValueError('Stop request differs from idle current owner')
         if self.attempt is not None:
             instance(self.attempt, Attempt)
             candidate = self.attempt.candidate
@@ -139,7 +144,7 @@ class Work:
     detail: bytes = b''
 
     def __post_init__(self):
-        if self.operation not in ('generate', 'revise', 'review', 'binding', 'proof', 'assemble',
+        if self.operation not in ('generate', 'revise', 'review', 'review_stop', 'binding', 'proof', 'assemble',
                                    'children', 'admit_candidate', 'recall', 'page', 'activate', 'joint'):
             raise ValueError('Unknown strategy work')
         instance(self.owner, OwnerVersion)
@@ -163,40 +168,43 @@ class Turn:
     candidate_hash: str | None
     environment_id: str
     graph_revision: int
+    stop_request_hash: str | None = None
     id: str = field(init=False)
 
     def __post_init__(self):
         instance(self.version, Version)
         identifier(self.environment_id, 'env_')
         natural(self.graph_revision, 'Dispatched graph revision')
-        if self.operation not in ('generate', 'revise', 'review'):
+        if self.operation not in ('generate', 'revise', 'review', 'review_stop'):
             raise ValueError('Invalid model operation')
         text(self.contract, 128)
         identifier(self.schema_hash, '')
         identifier(self.wire_hash, '')
-        for value in (self.setup_hash, self.base_id, self.candidate_hash):
+        for value in (self.setup_hash, self.base_id, self.candidate_hash, self.stop_request_hash):
             if value is not None:
                 identifier(value, '')
         if (self.operation == 'review') != (self.candidate_hash is not None):
             raise ValueError('Review requires exact candidate binding')
+        if (self.operation == 'review_stop') != (self.stop_request_hash is not None):
+            raise ValueError('Stop review requires exact request binding')
         if self.operation == 'revise' and self.base_id is None:
             raise ValueError('Revision requires an exact dispatched base')
         object.__setattr__(self, 'id', sha256(self.payload).hexdigest())
 
     @property
     def role(self):
-        return 'reviewer' if self.operation == 'review' else 'prover'
+        return 'reviewer' if self.operation in ('review', 'review_stop') else 'prover'
 
     @property
     def payload(self):
-        return pack(['midas-strategy-turn-v1', self.version.value(), self.operation, self.contract,
+        return pack(['midas-strategy-turn-v2', self.version.value(), self.operation, self.contract,
                      self.schema_hash, self.wire_hash, self.setup_hash, self.base_id, self.candidate_hash,
-                     self.environment_id, self.graph_revision])
+                     self.environment_id, self.graph_revision, self.stop_request_hash])
 
     @classmethod
     def load(cls, payload):
         v = load_record(payload, limit=65536)
-        if type(v) is not list or len(v) != 11 or v[0] != 'midas-strategy-turn-v1':
+        if type(v) is not list or len(v) != 12 or v[0] != 'midas-strategy-turn-v2':
             raise ValueError('Invalid saved model turn')
         return cls(Version.load(v[1]), *v[2:])
 
@@ -213,6 +221,9 @@ class Turn:
         current = candidate_hash(snapshot.attempt.candidate) if snapshot.attempt and self.operation == 'review' else None
         if current != self.candidate_hash:
             raise ValueError('Dispatched review candidate/interfaces changed')
+        pending = snapshot.stop_request.id if snapshot.stop_request else None
+        if pending != self.stop_request_hash:
+            raise ValueError('Dispatched stop request changed')
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +296,44 @@ class Objection:
 
 
 @dataclass(frozen=True, slots=True)
+class StopRequest:
+    owner: OwnerVersion
+    rationale: str
+    source: ArtifactRef
+    objection: Objection | None = None
+
+    def __post_init__(self):
+        instance(self.owner, OwnerVersion)
+        instance(self.source, ArtifactRef)
+        text(self.rationale)
+        if self.objection is not None:
+            instance(self.objection, Objection)
+            if self.objection.owner != self.owner or self.objection.source != self.source:
+                raise ValueError('Stop objection differs from request')
+
+    @property
+    def payload(self):
+        return pack(['midas-stop-request-v1', self.owner.obligation_id, self.owner.generation,
+            self.rationale, self.source.to_dict(),
+            [self.objection.category, self.objection.evidence] if self.objection else None])
+
+    @property
+    def id(self):
+        return sha256(self.payload).hexdigest()
+
+    @classmethod
+    def load(cls, payload):
+        v = load_record(payload, limit=65536)
+        if type(v) is not list or len(v) != 6 or v[0] != 'midas-stop-request-v1':
+            raise ValueError('Invalid stop request')
+        owner, source = OwnerVersion(*v[1:3]), ArtifactRef.from_dict(v[4])
+        if v[5] is not None and (type(v[5]) is not list or len(v[5]) != 2):
+            raise ValueError('Invalid stop objection')
+        objection = Objection(owner, *v[5], source) if v[5] is not None else None
+        return cls(owner, v[3], source, objection)
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactData:
     """Bytes proposed for controller publication, without filesystem side effects."""
     data: bytes
@@ -325,6 +374,7 @@ class Changes:
     revision_charge: str | None = None
     cancel_after_commit: tuple[OwnerVersion, ...] = ()
     stopped: bool | None = None
+    stop_request: StopRequest | None = None
 
     def __post_init__(self):
         instance(self.expected, Version)
@@ -333,6 +383,10 @@ class Changes:
         items(self.cancel_after_commit, OwnerVersion)
         if self.stopped is not None and type(self.stopped) is not bool:
             raise ValueError('Invalid stop change')
+        if self.stop_request is not None:
+            instance(self.stop_request, StopRequest)
+            if self.stop_request.owner != self.expected.owner or self.stopped is not None:
+                raise ValueError('Invalid pending stop change')
         if self.revision_charge not in (None, 'timeout', 'memory', 'elaboration', 'protocol'):
             raise ValueError('Invalid revision charge')
         if self.repair_allowance is not None:

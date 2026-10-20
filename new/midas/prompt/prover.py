@@ -122,6 +122,14 @@ Use page with an offered cursor to retrieve another page outside this prompt.
 Evidence pages remain advisory. Failed tools do not establish that a mathematical
 claim is false.
 
+Use stop to request independent review when you believe this exact node cannot
+be proved. Explain why in rationale. For a suspected false statement, missing
+assumption or context mismatch, include an objection with category and concrete
+evidence; otherwise use null objection. Difficulty or failed tools alone do not
+establish unprovability. The node continues unless the reviewer accepts stopping.
+A rejection supplies feedback for your next action. An accepted statement
+objection lets current parent decompositions reconsider their use of this node.
+
 memory_update is null or concise strategy/lessons and evidence pins to retain.
 Pins may use result IDs shown in tool result sections or offered in CAPABILITIES.
 Use displayed lesson IDs to update or forget old lessons. Retain useful names,
@@ -162,6 +170,8 @@ def schema():
         action('candidate', entries=array(ref('entry'), 256), proof=text, proof_departures=text,
                definitions=array(ref('definition'), 128), imports=array(string(256), 32)),
         action('revise', edits=array(obj(path=string(1024), old=nullable(code), new=code), 128)),
+        action('stop', objection=nullable(obj(category={'type': 'string', 'enum':
+            ['suspected_false', 'missing_assumption', 'context_mismatch']}, evidence=text))),
         action('search', query=string(2048), backend=ref('backend')),
         action('lookup', names=array(string(1024), 16), inspect={'type': 'boolean'}),
         action('retrieve', queries=array(string(2048), 3), names=array(string(1024), 12),
@@ -212,4 +222,4 @@ def render(snapshot):
         b'If lookup is enabled and you need definitions of named constants in this goal, return a lookup action with '
         b'those names and inspect=true. Use the enabled helpers to obtain missing context. '
         b'Return the action JSON now.'))),)
-    return Prompt('prover', 'prover-v3', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('prover', 'prover-v4', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)
