@@ -7,7 +7,7 @@ from ..domain import (AdmittedBinding, AdmittedCheck, AdmittedReview, CheckKind,
 from ..domain.records import instance
 from ..policy import Policy
 from ..prompt import Section, Snapshot as Display, build, prover, reviewer
-from ..tools import (Backend, HelperRequest, Lookup, Probe, Research, Retrieve, Scope, Search,
+from ..tools import (Backend, HelperRequest, Probe, Research, Retrieve, Scope,
                      expand_probe_bodies, finish_helper, plan_helper, recall)
 from .candidates import expand, revise, supplied
 from .memory import Observation, pack, update_memory
@@ -220,7 +220,7 @@ class Strategy:
                 if objection is not None else None)
             result = Changes(snapshot.version, (_work(snapshot, 'review_stop'),),
                              reason='stop_review_pending', stop_request=request)
-        elif mode in ('search', 'lookup', 'retrieve', 'probe', 'research'):
+        elif mode in ('retrieve', 'probe', 'research'):
             result = self._helper(snapshot, policy, dispatch.turn, mode, action)
         elif mode in ('recall', 'page'):
             decision = policy.helper(mode, snapshot.usage, snapshot.services)
@@ -230,7 +230,7 @@ class Strategy:
             if key not in (snapshot.recallable if mode == 'recall' else snapshot.cursors):
                 if mode == 'recall':
                     raise ValueError('recall requires an advertised saved result_id. '
-                        'To inspect Lean declarations, use lookup with names.')
+                        'To inspect Lean declarations, use retrieve with names and empty queries/backends.')
                 raise ValueError('page requires an advertised cursor for an undisplayed evidence page. '
                     'Use the evidence already shown or choose an enabled helper from CAPABILITIES.')
             result = Changes(snapshot.version, (_work(snapshot, mode, detail=pack([key, dispatch.turn.id])),))
@@ -267,13 +267,9 @@ class Strategy:
 
     def _helper(self, snapshot, policy, turn, mode, action):
         artifacts = ()
-        if mode == 'search':
-            helper = Search(action['query'], Backend(action['backend']['name'], tuple(action['backend']['prefixes'])))
-        elif mode == 'lookup':
-            helper = Lookup(tuple(action['names']))
-        elif mode == 'retrieve':
+        if mode == 'retrieve':
             helper = Retrieve(tuple(action['queries']), tuple(action['names']), tuple(
-                Backend(b['name'], tuple(b['prefixes'])) for b in action['backends']), action['offset'])
+                Backend(b['name'], tuple(b['prefixes'])) for b in action['backends']))
         elif mode == 'research':
             helper = Research(action['question'], tuple(action['urls']))
         elif mode == 'probe':

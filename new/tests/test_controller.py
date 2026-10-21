@@ -532,9 +532,9 @@ class ControllerTests(unittest.TestCase):
 
     def test_helper_allowance_is_shared_by_all_continuation_stages(self):
         from midas.controller import owner_usage, reserve_helper
-        from midas.tools import HelperRequest, Lookup, Scope, plan_helper
+        from midas.tools import HelperRequest, Retrieve, Scope, plan_helper
         c = self.build()
-        helper = HelperRequest(Scope(self.owner, ENV, self.ref), Lookup(('True',)), 'prover')
+        helper = HelperRequest(Scope(self.owner, ENV, self.ref), Retrieve(names=('True',)), 'prover')
         plan = plan_helper(helper, self.policy, owner_usage(self.writer, self.owner), c.services)
         c.publish('helper', reserve_helper(self.writer, self.policy, self.owner, plan, c.services))
         c.publish('duplicate-helper', reserve_helper(self.writer, self.policy, self.owner, plan, c.services))

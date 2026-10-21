@@ -13,7 +13,7 @@ from uuid import UUID, uuid5
 import sys
 
 from midas.domain import ArtifactRef, OwnerVersion
-from midas.tools import (Backend, HelperRequest, Scope, Search, SourceEntry, SourceIndex,
+from midas.tools import (Backend, Scope, Search, SourceEntry, SourceIndex,
                         Stage, execute_search, search_summary)
 from midas.tools import bm25
 from tests.test_tools import Artifacts
@@ -49,7 +49,7 @@ def main():
               f'{sum(p.stat().st_size for p in Path(cache).glob("*.sqlite"))/1024**2:.1f} MiB index', flush=True)
         for query in ('SimplicialNerve', 'simplicial nerve', 'SimplicialThickening', 'horn'):
             action = Search(query, Backend('frozen-source', prefixes))
-            stage = Stage(HelperRequest(scope, action, 'continue').id, 0, scope, action)
+            stage = Stage('3'*64, 0, scope, action)
             timings = []
             for _ in range(5):
                 start = perf_counter()

@@ -69,7 +69,7 @@ class ToolsTests(unittest.TestCase):
         return plan_helper(self.request(action, **kwargs), self.policy, OwnerUsage(), self.services)
 
     def stage(self, action):
-        return self.plan(action).stages[0]
+        return Stage('3'*64, 0, self.scope, action)
 
     def index(self, entries):
         return SourceIndex(self.scope.environment_id,
@@ -80,7 +80,7 @@ class ToolsTests(unittest.TestCase):
         return ReceiptBinding(str(uuid4()), self.a.save(raw), self.a.save(b'result'), self.a.save(b'seal'))
 
     def test_request_binary_roundtrips_and_binding(self):
-        for action in (Search('compact', Backend('leanexplore')), Lookup(('Nat.add',)),
+        for action in (Retrieve(names=('Nat.add',)),
                 Retrieve(('compact',), ('Nat.add',), (Backend('frozen-source', ('Mathlib',)),)),
                 Probe((self.a.save(pack({'id': 'p', 'code': 'simp'})),)), Research('Why?', ('https://example.test',))):
             request = self.request(action)
@@ -93,6 +93,23 @@ class ToolsTests(unittest.TestCase):
             self.assertNotIn(b'toolchain', request.payload)
         with self.assertRaises(ValueError):
             HelperRequest.load(pack(['midas-helper-v1', self.scope.value(), ['lookup', 'Nat.add'], 'c', []]))
+
+    def test_search_and_lookup_are_only_internal_stages(self):
+        from midas.tools.protocol import action_value
+        for action in (Search('compact', Backend('leanexplore')), Lookup(('Nat.add',))):
+            with self.subTest(action=action):
+                stage = self.stage(action)
+                self.assertEqual(Stage.load(stage.payload), stage)
+                with self.assertRaisesRegex(ValueError, 'internal stages'):
+                    self.request(action)
+                with self.assertRaisesRegex(ValueError, 'internal stages'):
+                    HelperRequest.load(pack(['midas-helper-v1', self.scope.value(), action_value(action), 'c', []]))
+
+    def test_retrieval_encoding_rejects_removed_offset(self):
+        value = self.request(Retrieve(names=('Nat.add',))).value()
+        value[2].append(0)
+        with self.assertRaisesRegex(ValueError, 'Unknown helper action or fields'):
+            HelperRequest.load(pack(value))
 
     def test_action_validation(self):
         invalid = (lambda: Lookup(('by exact True.intro',)), lambda: Lookup(('Nat.add', 'Nat.add')),
@@ -107,10 +124,10 @@ class ToolsTests(unittest.TestCase):
     def test_subscript_lookup_names_keep_forbidden_name_checks(self):
         name = 'EuclideanGeometry.ne₁₂_of_not_collinear'
         quoted = 'EuclideanGeometry.«ne₁₂_of_not_collinear»'
-        self.assertEqual(self.plan(Lookup((name,))).stages[0].action.names, (name,))
-        with self.assertRaisesRegex(ValueError, 'forbidden names'):
-            self.plan(Lookup((name,)), forbidden=(quoted,))
-        self.assertFalse(self.plan(Retrieve(names=(quoted,)), forbidden=(name,)).stages)
+        self.assertEqual(self.plan(Retrieve(names=(name,))).stages[0].action.names, (name,))
+        for names, forbidden in (((name,), (quoted,)), ((quoted,), (name,)), (('Midas.secret',), ())):
+            with self.subTest(names=names), self.assertRaisesRegex(ValueError, 'no allowed names'):
+                self.plan(Retrieve(names=names), forbidden=forbidden)
 
     def test_policy_is_used_for_case_units_and_research_bounds(self):
         request = self.request(Probe(tuple(self.a.save(pack({'id': str(n)})) for n in range(3))))
@@ -119,11 +136,13 @@ class ToolsTests(unittest.TestCase):
         research = plan_helper(self.request(Research('q')), self.policy, OwnerUsage(),
                                replace(self.services, research_web_calls=2))
         self.assertEqual(research.request.action.web_calls, 2)
-        for action in (Lookup(('Nat.add',)), Retrieve(names=('Nat.add',)), request.action):
+        for action in (Retrieve(names=('Nat.add',)),
+                       Retrieve(('q',), backends=(Backend('leanexplore'),)), request.action):
             with self.assertRaisesRegex(ValueError, 'compiler_not_configured'):
                 plan_helper(self.request(action), self.policy, OwnerUsage(), Services(compiler=False))
         with self.assertRaisesRegex(ValueError, 'retrieval_allowance'):
-            plan_helper(self.request(Search('q', Backend('leanexplore'))), self.policy, OwnerUsage(retrieval=10), self.services)
+            plan_helper(self.request(Retrieve(('q',), backends=(Backend('leanexplore'),))),
+                        self.policy, OwnerUsage(retrieval=10), self.services)
 
     def test_source_selector_resolution_and_ambiguity(self):
         index = self.index((('mathlib/Mathlib/Topology/Basic.lean', b''), ('lean/Init/Prelude.lean', b'')))
@@ -244,7 +263,18 @@ class ToolsTests(unittest.TestCase):
                 expected[name] = expected.get(name, Fraction())+Fraction(1,60+rank)
         fusion = fuse(request, tuple(reports))
         self.assertEqual(fusion.ranked, tuple(sorted(expected, key=lambda n: (-expected[n], n))))
-        self.assertEqual(fusion.next_offset, 12)
+        self.assertEqual(fusion.selected, tuple(sorted(expected, key=lambda n: (-expected[n], n)))[:12])
+
+    def test_retrieval_checks_top_twelve_and_explicit_names_then_allows_named_followup(self):
+        names = tuple(f'N.term{n:02}' for n in range(20))
+        plan = self.plan(Retrieve(('terms',), (names[-1], names[0]), (Backend('leanexplore'),)))
+        reports = (SearchResult(plan.stages[0].sha256, tuple(Match((name,)) for name in names)),)
+        following, fusion = continue_retrieval(plan, reports, self.scope)
+        self.assertEqual(fusion.ranked, names)
+        self.assertEqual(fusion.selected, (names[-1], *names[:12]))
+        self.assertEqual(tuple(name for s in following.stages for name in s.action.names), fusion.selected)
+        direct = self.plan(Retrieve(names=(names[12], names[18])))
+        self.assertEqual(tuple(s.action for s in direct.stages), (Lookup((names[12], names[18])),))
 
     def test_retrieval_partial_failure_preserves_explicit_names(self):
         plan = self.plan(Retrieve(('q',), ('Nat.add',), (Backend('leanexplore'),)))

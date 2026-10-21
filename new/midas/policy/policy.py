@@ -133,13 +133,13 @@ class AdmissionRequest:
                 skip=('job', 'bounds', 'candidate_mode', 'helper'))
         if self.candidate_mode not in (None, 'direct', 'decomposition'):
             raise DomainError('Unknown candidate mode')
-        if self.helper not in (None, 'research', 'search', 'lookup', 'retrieve', 'probe'):
+        if self.helper not in (None, 'research', 'retrieve', 'probe'):
             raise DomainError('Unknown helper mode')
         if self.helper_units == 0:
             raise DomainError('Helper units must be positive')
         if self.helper is not None:
-            kinds = {'research': (JobKind.MODEL,), 'search': (JobKind.SEARCH, JobKind.NETWORK_SEARCH),
-                     'lookup': (JobKind.LOOKUP,), 'retrieve': (JobKind.SEARCH, JobKind.NETWORK_SEARCH, JobKind.LOOKUP),
+            kinds = {'research': (JobKind.MODEL,),
+                     'retrieve': (JobKind.SEARCH, JobKind.NETWORK_SEARCH, JobKind.LOOKUP),
                      'probe': (JobKind.PROBE,)}
             if self.job.kind not in kinds[self.helper]:
                 raise DomainError('Helper differs from job kind')
@@ -380,20 +380,20 @@ class Policy:
         natural(units, 'helper units', positive=True)
         if mode in ('recall', 'page'):
             return Decision()
-        if mode not in ('research', 'search', 'lookup', 'retrieve', 'probe'):
+        if mode not in ('research', 'retrieve', 'probe'):
             raise DomainError('Unknown helper mode')
-        if mode in ('lookup', 'retrieve', 'probe') and not services.compiler:
+        if mode in ('retrieve', 'probe') and not services.compiler:
             return Decision('compiler_not_configured')
         if mode == 'research' and (not services.research or not min(
                 services.research_web_calls, self.config.helpers.web_calls)):
             return Decision('missing_research_configuration')
-        field = 'retrieval' if mode in ('search', 'lookup', 'retrieve') else mode
+        field = 'retrieval' if mode == 'retrieve' else mode
         if getattr(owner, field) + units > getattr(self.config.helpers, field):
             return Decision(field + '_allowance_exhausted')
         return Decision()
 
     def capabilities(self, owner: OwnerUsage, services: Services) -> Capabilities:
-        modes = tuple(mode for mode in ('research', 'search', 'lookup', 'retrieve', 'probe', 'recall', 'page')
+        modes = tuple(mode for mode in ('research', 'retrieve', 'probe', 'recall', 'page')
                       if self.helper(mode, owner, services).allowed)
         repair = owner.repair_remaining if owner.repair_open and not owner.repair_suspended else 0
         return Capabilities(modes,

@@ -163,9 +163,6 @@ def reduce(flow, reader, invocation, accepted, binding):
         provenance.extend(item.artifacts)
         for reference in item.artifacts:
             data = r.read(overlay, reference, 4*1024**2)
-            if isinstance(item.stage.action, Search):
-                rows.extend(search_summary(SearchResult.load(data), item.stage.action))
-                continue
             if isinstance(item.stage.action, Probe) and item.status == ResultStatus.SUCCEEDED:
                 remaining = 4*1024**2-len(data)
                 for case, raw in zip(item.stage.action.cases, codec.load_record(data, limit=65536)):
@@ -268,7 +265,7 @@ def review_evidence(reader, snapshot, review, sections, displayed):
             turn = Turn.load(r.read(reader, r.unref(saved['turn'])))
             if turn.candidate_hash != candidate_hash(snapshot.attempt.candidate):
                 continue
-        elif isinstance(request.action, (Lookup, Retrieve)):
+        elif isinstance(request.action, Retrieve):
             stages = tuple(Stage.load(r.read(reader, r.unref(s))) for s in saved['stages'])
             if not stages or any(not isinstance(s.action, Lookup) or
                     saved['results'][str(s.ordinal)][3] != ResultStatus.SUCCEEDED.value for s in stages):

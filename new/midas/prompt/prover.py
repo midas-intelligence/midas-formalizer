@@ -19,14 +19,14 @@ Background source and English plans do not add hypotheses. Preserve all binders,
 universe signatures, and checked dependency aliases. Do not emit top-level commands.
 
 Choose one action using the CAPABILITIES section before filling its fields.
-If you need the meaning of a named constant in the goal and lookup is enabled,
-your next action must be lookup with its Lean name. Missing
-definitions are a reason to call lookup. An import does not
-display the definitions it contains; lookup retrieves them. For example:
-{"action":{"mode":"lookup","rationale":"Inspect the definition used in the goal.","names":["Nat.Prime"]},"memory_update":null}
+If you need the meaning of a named constant in the goal and retrieve is enabled,
+your next action must be retrieve with its Lean name. Missing
+definitions are a reason to call retrieve. An import does not
+display the definitions it contains; retrieve obtains them. For example:
+{"action":{"mode":"retrieve","rationale":"Inspect the definition used in the goal.","queries":[],"names":["Nat.Prime"],"backends":[]},"memory_update":null}
 Use the actual names from your task in place of this example's name.
 
-lookup.names identifies Lean declarations. recall.result_id identifies an earlier
+retrieve.names identifies Lean declarations. recall.result_id identifies an earlier
 tool result listed in CAPABILITIES under saved evidence not included in this prompt.
 Tool result sections identify the result ID and pages already displayed; use their
 contents directly. SOURCE section labels such as source-prefix and search-roots
@@ -84,20 +84,24 @@ fragment names. Null old replaces a whole fragment; otherwise old must match
 exactly once. Structural changes require a complete new proof, decomposition or
 candidate.
 
-Helpers continue this task with advisory evidence. Use search to discover Lean
-declaration names. Use lookup with names to check declarations and obtain their
-types and available authored definition source. Theorems return checked signatures
-without proof bodies. For a named definition in the goal whose meaning you need,
-use lookup. Lookup takes Lean names and needs no prior evidence result ID.
-Use retrieve to combine searches and checked lookup with definition source.
+Helpers continue this task with advisory evidence. Use retrieve to discover and
+check Lean declarations in one action. Supply up to three queries and two backends
+for discovery, up to twelve known names for direct inspection, or both together.
+Discovery results are merged and ranked, then the top twelve names are checked
+alongside your explicit names. To inspect other results, choose names from the
+returned search results and make a names-only retrieve request, which skips
+search. Known names need no prior result ID.
+Retrieval returns checked types and available authored definition source.
+Theorems return checked signatures without proof bodies.
 Backend names are frozen-source and leanexplore; only frozen-source uses prefixes.
 Use the displayed frozen-source roots, including project when offered, or a file,
 directory or module within them. project searches the frozen project sources.
 Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
-preference within the selected scope. Use lookup on a later name for its type
+preference within the selected scope. Use retrieve with a later name for its type
 and available definition source. Large excerpts may continue on another page.
-Queries require backends, and names-only retrieval uses an empty backends array.
+Queries require backends. For names-only retrieval, use empty queries and backends
+arrays. Supply at least one query or name.
 Discovery alone does not certify availability.
 Probe cases run in the frozen checked target context, without proposed children or
 definitions. Supply one through three cases, each containing only id and code.
@@ -116,7 +120,7 @@ explicitly when needed. Diagnostics refer to generated code (body starts at line
 A successful probe is advisory: submit the complete proof for ordinary checking.
 Resource interruptions and missing names do not establish mathematical failure.
 Use research only when enabled in Helper modes, for a mathematical question and
-at most six public source URLs. Use lookup to inspect the local Lean context.
+at most six public source URLs. Use retrieve to inspect the local Lean context.
 Use recall to retrieve a saved result's first page when it is outside the current
 prompt: copy the offered result ID exactly into result_id.
 Use page with an offered cursor to retrieve another page outside this prompt.
@@ -137,8 +141,8 @@ Use displayed lesson IDs to update or forget old lessons. Retain useful names,
 approaches tried and why they failed, unresolved work, and conditions for revisiting
 a route. Consolidate lessons; exact candidate proofs and child guidance stay in
 the candidate. Omission and eviction notices mean some history is unavailable.
-For missing definitions or theorem interfaces, use an enabled lookup or search
-that can obtain them and read its result. Explain proof departures from any
+For missing definitions or theorem interfaces, use retrieve when enabled
+and read its result. Explain proof departures from any
 assigned English argument; never silently replace the task.
 """.encode() + CONTEXT_RULES
 
@@ -173,10 +177,8 @@ def schema():
         action('revise', edits=array(obj(path=string(1024), old=nullable(code), new=code), 128)),
         action('stop', objection=nullable(obj(category={'type': 'string', 'enum':
             ['suspected_false', 'missing_assumption', 'context_mismatch']}, evidence=text))),
-        action('search', query=string(2048), backend=ref('backend')),
-        action('lookup', names=array(string(1024), 16)),
         action('retrieve', queries=array(string(2048), 3), names=array(string(1024), 12),
-               backends=array(ref('backend'), 2), offset={'type': 'integer', 'minimum': 0, 'maximum': 200}),
+               backends=array(ref('backend'), 2)),
         action('probe', cases=dict(array(obj(id=string(48), code=dict(string(16000),
                description='Only the TacticM do-block body after run_tac do; omit the wrapper.')), 3), minItems=1)),
         action('research', question=string(8000), urls=array(string(8000), 6)),
@@ -186,7 +188,7 @@ def schema():
     return dict(obj(action={'anyOf': actions}, memory_update=nullable(ref('memory'))), **{'$defs': definitions})
 
 
-HELPER_MODES = ('search', 'lookup', 'retrieve', 'probe', 'research', 'recall', 'page')
+HELPER_MODES = ('retrieve', 'probe', 'research', 'recall', 'page')
 SCHEMA = schema_bytes(schema())
 
 
@@ -219,7 +221,7 @@ def render(snapshot):
     sections = tuple(s for s in sections if s.kind != 'capabilities')
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
         b'The application will execute a helper action and supply its result on the next turn. '
-        b'If lookup is enabled and you need definitions of named constants in this goal, return a lookup action with '
+        b'If retrieve is enabled and you need definitions of named constants in this goal, return a retrieve action with '
         b'those names. Use the enabled helpers to obtain missing context. '
         b'Return the action JSON now.'))),)
-    return Prompt('prover', 'prover-v4', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('prover', 'prover-v6', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)

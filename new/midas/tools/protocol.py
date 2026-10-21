@@ -131,16 +131,14 @@ class Retrieve:
     queries: tuple[str, ...] = ()
     names: tuple[str, ...] = ()
     backends: tuple[Backend, ...] = ()
-    offset: int = 0
 
     def __post_init__(self):
         strings(self.queries, 3, 2048, 'retrieval queries')
         strings(self.names, 12, 1024, 'retrieval names', names=True)
         items(self.backends, Backend)
         if (not self.queries and not self.names or bool(self.backends) != bool(self.queries)
-                or len(self.backends) > 2 or len({b.name for b in self.backends}) != len(self.backends)
-                or type(self.offset) is not int or not 0 <= self.offset <= 200):
-            raise ValueError('Invalid retrieval query/backends/offset')
+                or len(self.backends) > 2 or len({b.name for b in self.backends}) != len(self.backends)):
+            raise ValueError('Invalid retrieval query/backends')
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,8 +195,7 @@ def action_value(action):
     if isinstance(action, Lookup):
         return ['lookup', list(action.names)]
     if isinstance(action, Retrieve):
-        return ['retrieve', list(action.queries), list(action.names), [b.value() for b in action.backends],
-                action.offset]
+        return ['retrieve', list(action.queries), list(action.names), [b.value() for b in action.backends]]
     if isinstance(action, Probe):
         return ['probe', [c.to_dict() for c in action.cases]]
     if isinstance(action, Research):
@@ -222,8 +219,8 @@ def load_action(value):
         return Search(value[1], backend(value[2]), value[3])
     if kind == 'lookup' and len(value) == 2:
         return Lookup(array(value[1]))
-    if kind == 'retrieve' and len(value) == 5:
-        return Retrieve(array(value[1]), array(value[2]), tuple(backend(b) for b in array(value[3])), value[4])
+    if kind == 'retrieve' and len(value) == 4:
+        return Retrieve(array(value[1]), array(value[2]), tuple(backend(b) for b in array(value[3])))
     if kind == 'probe' and len(value) == 2:
         return Probe(tuple(ArtifactRef.from_dict(c) for c in array(value[1])))
     if kind == 'research' and len(value) == 4:
@@ -234,14 +231,15 @@ def load_action(value):
 @dataclass(frozen=True, slots=True)
 class HelperRequest:
     scope: Scope
-    action: Search | Lookup | Retrieve | Probe | Research
+    action: Retrieve | Probe | Research
     continuation: str
     forbidden: tuple[str, ...] = ()
     id: str = field(init=False)
 
     def __post_init__(self):
         instance(self.scope, Scope)
-        action_value(self.action)
+        if not isinstance(self.action, (Retrieve, Probe, Research)):
+            raise ValueError('Invalid helper action; search and lookup are internal stages')
         text(self.continuation, 'strategy continuation', 1024)
         strings(self.forbidden, 1024, 1024, 'forbidden names', names=True)
         digest = sha256()

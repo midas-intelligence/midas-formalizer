@@ -101,7 +101,7 @@ class PresentationTests(unittest.TestCase):
             ['theorem Nat.add_comm : a + b = b + a', 'theorem Nat.mul_comm : a * b = b * a',
              'Search (frozen-source): addition', 'Nat.add_comm\nUnrelated search excerpt'],
             lookup=Lookup(('Nat.add_comm', 'Nat.mul_comm')))
-        fragmented = add(Lookup(('Nat.add_assoc',)), ['def Nat.add_assoc\n' + 'exact supporting source\n'*1500],
+        fragmented = add(Retrieve(names=('Nat.add_assoc',)), ['def Nat.add_assoc\n' + 'exact supporting source\n'*1500],
                          lookup=Lookup(('Nat.add_assoc',)))
         add(Research('Earlier prover research', (), 1), [dict(answer='PROVER_RESEARCH')])
         add(Research('Old candidate research', (), 1), [dict(answer='STALE_RESEARCH')],

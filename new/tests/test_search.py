@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from midas.application.helpers import page_text
 from midas.domain import OwnerVersion
-from midas.tools import (Backend, HelperRequest, Lookup, Match, Scope, Search, SearchResult,
+from midas.tools import (Backend, Lookup, Match, Scope, Search, SearchResult,
     SourceEntry, SourceIndex, Stage, execute_search, prepare_archive, search_summary)
 from midas.tools import bm25
 from tests.test_tools import Artifacts
@@ -30,7 +30,7 @@ class SearchTests(unittest.TestCase):
 
     def search(self, index, query, prefixes=('Mathlib',), limit=50, *, prepared_path=None):
         action = Search(query, Backend('frozen-source', prefixes), limit)
-        stage = Stage(HelperRequest(self.scope, action, 'continue').id, 0, self.scope, action)
+        stage = Stage('3'*64, 0, self.scope, action)
         return execute_search(stage, self.artifacts, self.cancel, self.deadline,
                               index=index, cache_directory=self.cache, prepared_path=prepared_path)
 

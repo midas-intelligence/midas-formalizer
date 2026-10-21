@@ -424,7 +424,7 @@ class AdmissionTests(unittest.TestCase):
         services = Services(research=True, research_web_calls=8)
         for owner in (OwnerUsage(), OwnerUsage(research=7, retrieval=10, probe=6)):
             modes = self.policy.capabilities(owner, services).available_modes
-            for mode in ('research', 'search', 'lookup', 'retrieve', 'probe', 'recall', 'page'):
+            for mode in ('research', 'retrieve', 'probe', 'recall', 'page'):
                 self.assertEqual(mode in modes, self.policy.helper(mode, owner, services).allowed)
         self.assertEqual(self.policy.capabilities(OwnerUsage(), services).web_calls, 8)
         self.assertEqual(self.admit(request(helper='research'), services=services, owner=OwnerUsage(research=7)).reason,
@@ -432,8 +432,19 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.admit(request(JobKind.PROBE, helper='probe', helper_units=3),
                                    owner=OwnerUsage(probe=4)).reason, 'probe_allowance_exhausted')
         self.assertNotIn('research', self.policy.capabilities(OwnerUsage(), Services()).available_modes)
-        self.assertEqual(self.policy.helper('lookup', OwnerUsage(), Services(compiler=False)).reason,
+        self.assertEqual(self.policy.helper('retrieve', OwnerUsage(), Services(compiler=False)).reason,
                          'compiler_not_configured')
+
+    def test_retrieval_is_the_only_search_and_lookup_helper(self):
+        modes = self.policy.capabilities(OwnerUsage(), Services()).available_modes
+        for mode, kind in (('search', JobKind.SEARCH), ('lookup', JobKind.LOOKUP)):
+            self.assertNotIn(mode, modes)
+            with self.assertRaisesRegex(DomainError, 'Unknown helper mode'):
+                self.policy.helper(mode, OwnerUsage(), Services())
+            with self.assertRaisesRegex(DomainError, 'Unknown helper mode'):
+                request(kind, helper=mode)
+        for kind in (JobKind.SEARCH, JobKind.NETWORK_SEARCH, JobKind.LOOKUP):
+            self.assertTrue(self.admit(request(kind, helper='retrieve')).allowed)
 
     def test_configured_allowances_drive_capabilities_and_resource_admission(self):
         config = replace(Config(), helpers=HelperConfig(research=1, retrieval=0, probe=2, web_calls=3),

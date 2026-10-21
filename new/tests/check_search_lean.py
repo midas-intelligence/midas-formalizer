@@ -1,4 +1,4 @@
-"""Opt-in BM25 -> compact evidence -> checked tail lookup with real Lean.
+"""Opt-in query/named retrieval, checked source and compact evidence with real Lean.
 
 Requires permission under the root AGENTS.md. No network or live model calls.
 Usage: python -B -m tests.check_search_lean /absolute/path/to/bin/lean
@@ -13,6 +13,7 @@ from midas.application import Application, helpers, records
 from midas.domain import SelectionRequest
 from midas.environment import PackageConfig
 from midas.policy import Config, ModelRoute
+from midas.tools.search import source_search
 from tests.test_strategy import proof, response
 
 
@@ -35,17 +36,20 @@ def main():
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         config = replace(Config(), prover=route, reviewer=route)
         backend = dict(name='frozen-source', prefixes=['project/Main.lean'])
-        search = dict(mode='search', rationale='Find local declarations.', query='SearchFixture', backend=backend)
-        lookup = dict(mode='lookup', rationale='Expand the last visible name.', names=['SearchFixture.term49'])
-        retrieve = dict(mode='retrieve', rationale='Check the next group.', queries=['SearchFixture'],
-                        names=[], backends=[backend], offset=12)
+        discovery = dict(mode='retrieve', rationale='Find and inspect local declarations.',
+                         queries=['SearchFixture'], names=[], backends=[backend])
+        tail = dict(mode='retrieve', rationale='Expand the last visible name.', names=['SearchFixture.term49'],
+                    queries=[], backends=[])
+        followup = dict(mode='retrieve', rationale='Inspect selected names from the search results.', queries=[],
+                        names=['SearchFixture.term12', 'SearchFixture.term23'], backends=[])
         named = dict(mode='retrieve', rationale='Read an explicit definition.', queries=[],
-                     names=['SearchFixture.term69'], backends=[], offset=0)
+                     names=['SearchFixture.term69'], backends=[])
         action = proof()
         action['proof_body'] = 'by trivial'
         with patch('midas.tools.bm25._build', side_effect=AssertionError('unexpected runtime indexing')), \
+             patch('midas.tools.search.source_search', wraps=source_search) as searches, \
              app.start(root/'run', package=package, selection=selected, config=config, workflow='scripted',
-                script=tuple(('prover', response(a)) for a in (search, lookup, retrieve, named, action))) as run:
+                script=tuple(('prover', response(a)) for a in (discovery, tail, followup, named, action))) as run:
             result = run.run()
             assert result.exit_code == 0, result
             owner = run.workflow.graph(run.writer).nodes[0].owner
@@ -56,13 +60,17 @@ def main():
             assert pages[0].count('Source:') == 12, pages[0]
             assert '50. SearchFixture.term49' in pages[0], pages[0]
             assert 'SearchFixture.term50' not in pages[0], pages[0]
+            assert 'def term00 : Nat := 0' in pages[0], pages[0]
+            assert 'def term11 : Nat := 11' in pages[0], pages[0]
             assert 'def term49 : Nat := 49' in pages[1], pages[1]
             assert 'def term12 : Nat := 12' in pages[2], pages[2]
             assert 'def term23 : Nat := 23' in pages[2], pages[2]
             assert 'def term69 : Nat := 69' in pages[3], pages[3]
             assert run.writer.counter('owner:'+owner.obligation_id, 'retrieval') == 4
+            assert run.writer.status_snapshot().accounting.turns == 5
+            assert searches.call_count == 1, searches.call_count
             assert not (app.cache/'search').exists()
-            print('BM25 12/50 delivery, automatic lookup/retrieval source, offset and proof continuation passed', flush=True)
+            print('Query/named retrieval, BM25 12/50 delivery, selected-name followups and proof continuation passed', flush=True)
         with app.resume(root/'run') as run:
             assert run.run().exit_code == 0
         print('Prepared package index reused with a fresh cache; authenticated resume passed', flush=True)

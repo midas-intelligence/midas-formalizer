@@ -28,6 +28,10 @@ domain and executor.
 `midas/tools` implements advisory helper plans, frozen-source and hosted search,
 retrieval continuations, research validation, source excerpts, and indexed evidence
 paging. It imports only domain, policy, and source.
+`retrieve` is the sole model-facing retrieval action: known names go directly to
+checked lookup; queries run searches and automatically check the selected results.
+Search and lookup remain internal stages, with one helper charge for the whole
+retrieval request.
 
 `midas/prompt` implements independent, replaceable prover, reviewer and researcher
 renderers, bounded readable context, and exact frozen wire construction. It imports
@@ -1136,7 +1140,17 @@ publication, scheduling and model/compiler execution remain with their owning co
 Research prompt wording and response schemas belong to `prompt/researcher.py`.
 The original `midas_formalizer` files remain unchanged and are not imported.
 
-`HelperRequest` freezes the action, continuation, forbidden names and `Scope`.
+`HelperRequest` freezes a retrieve, probe or research action, continuation,
+forbidden names and `Scope`. Search and lookup are accepted only as internal
+stages; they are absent from the model schema, capabilities and action parser.
+For direct inspection, use `retrieve` with `names` and empty `queries` and
+`backends`. For discovery, supply up to three queries and two backends; retrieval
+merges and ranks the results, then checks the top twelve ranked names plus up to
+twelve explicit names. To inspect other search results, select their names in a
+names-only request, which skips search. Use `page` to read more content from an
+existing result. Both retrieval forms require the compiler and consume one
+retrieval allowance. A names-only request with no allowed names is rejected
+before scheduling, so it cannot leave the task waiting on zero jobs.
 The scope contains an owner/generation, an environment **hash**, and one artifact
 reference for the admitted selection/goal/alias context. No environment object,
 toolchain or package inventory is embedded in requests. Model probe bodies are
@@ -1162,7 +1176,7 @@ Names are checked before their availability is reported. Search-driven retrieval
 retains authored theorem statements and definition bodies. Lookup always requests
 original source for definitions and returns checked theorem signatures without proof
 bodies. This also applies to lookup stages in retrieval, including those following
-searches. Model lookup/retrieve responses have no `inspect` field.
+searches. Model retrieve responses have no `inspect` field.
 `finish_helper` validates the expected stages and current scope and returns
 advisory evidence with the original strategy continuation. Storage/controller must
 commit this result once against current owner versions and retain every search,
@@ -1247,7 +1261,7 @@ BM25 integration validation (2026-10-19): offline contracts cover exact-name
 protection, scope-before-candidate selection, file-only preference, raw score
 roundtrips, cache reuse/invalidation and concurrent builds, 12/50 delivery, paged
 overflow, and tail lookup. A real Lean 4.35.0-rc3 application check passed search,
-checked tail source lookup, retrieval offsets, proof continuation and resume.
+checked tail source lookup, proof continuation and resume.
 On the experimental Mathlib checkout (`aae61ae`), building 249,981 lexical
 declarations from 8,264 files took 22.6 seconds and produced a 63 MiB index. Warm
 simplicial-nerve search took about 8 ms versus 2.2 seconds for v2's scan of the

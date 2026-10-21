@@ -211,7 +211,7 @@ def search_summary(result, search):
     if compact:
         detail = f'; first {DETAILS} detailed' if search.backend.name == 'frozen-source' else ''
         rows.append(f'{len(result.records)} results{detail}. '
-                    'Use lookup with a name for its type and available definition source.')
+                    'Use retrieve with names for checked types and available definition source.')
     for rank, match in enumerate(result.records, 1):
         name = '\n'.join(match.names) or 'Source match (no declaration name)'
         label = f'{rank}. ' if compact else ''

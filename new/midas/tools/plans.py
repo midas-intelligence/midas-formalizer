@@ -86,14 +86,12 @@ def plan_helper(request, policy, usage, services):
     if isinstance(request.action, Research):
         bound = min(request.action.web_calls, policy.capabilities(usage, services).web_calls)
         request = replace(request, action=replace(request.action, web_calls=bound))
-    if isinstance(request.action, Lookup):
-        allowed = _allowed(request.forbidden)
-        if not all(allowed(n) for n in request.action.names):
-            raise ValueError('Lookup includes forbidden names')
     if isinstance(request.action, Retrieve):
         stages = search_stages(request)
         if not stages:
             stages = lookup_stages(request, fuse(request, ()))
+            if not stages:
+                raise ValueError('Retrieval contains no allowed names')
     else:
         stages = _stages(request, (request.action,))
     return Plan(request, stages, mode, units)
@@ -106,8 +104,6 @@ class Fusion:
     excluded: tuple[str, ...]
     provenance: tuple[tuple[str, tuple[tuple[int, int], ...]], ...]
     errors: tuple[tuple[int, str], ...]
-    offset: int
-    next_offset: int | None
 
 
 def fuse(request, reports):
@@ -131,16 +127,15 @@ def fuse(request, reports):
             provenance.setdefault(name, []).append((stage.ordinal, rank))
     ranked = tuple(sorted(scores, key=lambda n: (-scores[n], n)))
     action = request.action
-    names = dict.fromkeys((*action.names, *ranked[action.offset:action.offset+12]))
+    names = dict.fromkeys((*action.names, *ranked[:12]))
     selected = []
     for name in names:
         if allowed(name):
             selected.append(name)
         else:
             excluded[name] = None
-    next_offset = action.offset+12 if action.offset+12 <= 200 and action.offset+12 < len(ranked) else None
     return Fusion(ranked, tuple(selected), tuple(excluded),
-                  tuple((n, tuple(provenance[n])) for n in ranked), tuple(errors), action.offset, next_offset)
+                  tuple((n, tuple(provenance[n])) for n in ranked), tuple(errors))
 
 
 def lookup_stages(request, fusion):

@@ -98,12 +98,13 @@ def main():
         assert app.export(root/'partial', root/'partial-export', allow_sorry=True).exit_code == 0
         assert app.verify(root/'partial-export', package=package).verified
         print('explicit partial export and standalone recheck passed', flush=True)
-        lookup = dict(mode='lookup', rationale='Inspect a library declaration.', names=['Nat.add'])
+        retrieve = dict(mode='retrieve', rationale='Inspect a library declaration.', names=['Nat.add'],
+                        queries=[], backends=[])
         probe = dict(mode='probe', rationale='Try closing the current goal.', cases=[
             dict(id='inspect', code='let env ← Lean.getEnv\nLean.logInfo m!"Nat.add available: {(env.find? `Nat.add).isSome}"'),
             dict(id='close', code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))')])
         with app.start(root/'helpers', package=package, selection=selected, config=config, workflow='scripted',
-            script=(('prover', response(lookup)), ('prover', response(probe)), ('prover', response(action)))) as run:
+            script=(('prover', response(retrieve)), ('prover', response(probe)), ('prover', response(action)))) as run:
             def strict(reducer):
                 def apply(*args):
                     try:
@@ -128,7 +129,7 @@ def main():
             assert b'Probe close (tactic): closed_exploratory (advisory)' in text, text
             assert b'Goal 1:' in text, text
             assert b'0/' not in text, text
-        print('lookup, probe, advisory evidence and original continuations passed', flush=True)
+        print('named retrieval, probe, advisory evidence and original continuations passed', flush=True)
         for approved in (False, True):
             name = 'stop-approved' if approved else 'stop-rejected'
             plan = dict(decompose, children=[dict(decompose['children'][0], statement='False')]) if approved else decompose

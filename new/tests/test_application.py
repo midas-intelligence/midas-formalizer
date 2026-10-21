@@ -586,50 +586,67 @@ class Contracts(unittest.TestCase):
             self.assertEqual(self.finish(resumed).exit_code, 0)
             self.assertEqual(resumed.writer.status_snapshot().accounting.turns, 1)
 
-    def test_search_lookup_and_probe_deliver_readable_evidence_and_continue(self):
+    def test_retrieve_and_probe_deliver_readable_evidence_and_continue(self):
         from midas.application import helpers, records as r
         from midas.tools import Match, SearchService
         self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        search = dict(mode='search', rationale='Find addition.', query='addition', backend=dict(name='leanexplore', prefixes=[]))
-        lookup = dict(mode='lookup', rationale='Inspect addition.', names=['Nat.add'])
+        retrieve = dict(mode='retrieve', rationale='Find and inspect addition.', queries=['addition'], names=[],
+                        backends=[dict(name='leanexplore', prefixes=[])])
         probe = dict(mode='probe', rationale='Try the proof.', cases=[dict(id='try',
             code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))'),
             dict(id='second', code='Lean.Elab.Tactic.evalTactic (← `(tactic| exact True.intro))')])
         action = proof()
         action['proof_body'] = 'by trivial'
         with self.start(workflow='scripted', config=replace(Config(), prover=route, reviewer=route),
-            script=tuple(('prover', response(a)) for a in (search, lookup, probe, action))) as run:
+            script=tuple(('prover', response(a)) for a in (retrieve, probe, action))) as run:
             self.assertEqual(self.finish(run).exit_code, 0)
             scope = 'owner:'+self.selected.identities[0].id
-            self.assertEqual(run.writer.counter(scope, 'retrieval'), 2)
+            self.assertEqual(run.writer.counter(scope, 'retrieval'), 1)
             self.assertEqual(run.writer.counter(scope, 'probe'), 2)
-            self.assertEqual(run.writer.status_snapshot().accounting.turns, 4)
+            self.assertEqual(run.writer.status_snapshot().accounting.turns, 3)
+            self.assertEqual(Compiler.calls.count('lookup'), 1)
             owner = run.workflow.graph(run.writer).nodes[0].owner
             pages = [helpers.page_text(r.read(run.writer, a.pages[0], 16000)).decode()
                      for a in helpers.advertised(run.writer, owner)]
-            self.assertEqual(len(pages), 3)
+            self.assertEqual(len(pages), 2)
             self.assertIn('Search (leanexplore): addition\n', pages[0])
             self.assertIn('\nNat.add\n', pages[0])
-            self.assertIn('Probe try (tactic): closed_exploratory (advisory)', pages[2])
-            self.assertIn('Probe second (tactic): closed_exploratory (advisory)', pages[2])
-            self.assertIn('try.code (line 1 below):\nrun_tac do\n  '+probe['cases'][0]['code'], pages[2])
+            self.assertIn('Probe try (tactic): closed_exploratory (advisory)', pages[1])
+            self.assertIn('Probe second (tactic): closed_exploratory (advisory)', pages[1])
+            self.assertIn('try.code (line 1 below):\nrun_tac do\n  '+probe['cases'][0]['code'], pages[1])
             self.assertNotRegex('\n'.join(pages), r'(?m)^\d+(?:/[^:]+)?:')
 
-    def test_local_search_delivers_twelve_details_fifty_names_and_tail_lookup(self):
+    def test_named_retrieval_rejects_excluded_names_without_stalling(self):
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        invalid = dict(mode='retrieve', rationale='Inspect a name.', names=['Midas.secret'],
+                       queries=[], backends=[])
+        named = dict(invalid, names=['Nat.add'])
+        with self.start(workflow='scripted', config=replace(Config(), prover=route),
+                script=tuple(('prover', response(action)) for action in (invalid, named, proof()))) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            self.assertEqual(run.writer.counter('owner:'+owner.obligation_id, 'retrieval'), 1)
+            self.assertEqual(Compiler.calls.count('lookup'), 1)
+            self.assertEqual(run.writer.status_snapshot().accounting.turns, 3)
+
+    def test_local_retrieval_delivers_twelve_details_fifty_names_and_named_retrieval(self):
         from midas.application import helpers, records as r
         from midas.tools import SearchService, SourceEntry, SourceIndex
+        from midas.tools.search import source_search
         from tests.test_tools import Artifacts
         artifacts = Artifacts()
         source = 'namespace Fixture\n'+''.join(f'def term{i:02} : Nat := {i}\n' for i in range(70))+'end Fixture\n'
         index = SourceIndex(self.environment.id, (SourceEntry('project/Support.lean', artifacts.save(source.encode())),))
         self.app.search_factory = lambda: SearchService(index=index, source_reader=artifacts)
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        search = dict(mode='search', rationale='Find declarations.', query='Nat',
-                      backend=dict(name='frozen-source', prefixes=['project']))
-        lookup = dict(mode='lookup', rationale='Expand a tail name.', names=['Fixture.term49'])
-        with self.start(workflow='scripted', config=replace(Config(), prover=route),
-                script=tuple(('prover', response(action)) for action in (search, lookup, proof()))) as run:
+        retrieve = dict(mode='retrieve', rationale='Find declarations.', queries=['Nat'], names=[],
+                        backends=[dict(name='frozen-source', prefixes=['project'])])
+        named = dict(mode='retrieve', rationale='Expand a tail name.', names=['Fixture.term49'],
+                     queries=[], backends=[])
+        with patch('midas.tools.search.source_search', wraps=source_search) as searches, self.start(
+                workflow='scripted', config=replace(Config(), prover=route),
+                script=tuple(('prover', response(action)) for action in (retrieve, named, proof()))) as run:
             self.assertEqual(self.finish(run).exit_code, 0)
             self.assertEqual(run.workflow.search.cache_directory, self.app.cache/'search')
             owner = run.workflow.graph(run.writer).nodes[0].owner
@@ -643,6 +660,8 @@ class Contracts(unittest.TestCase):
             expanded = helpers.page_text(r.read(run.writer, archives[1].pages[0], 16000)).decode()
             self.assertIn('Fixture.term49', expanded)
             self.assertEqual(run.writer.counter('owner:'+owner.obligation_id, 'retrieval'), 2)
+            self.assertEqual(Compiler.calls.count('lookup'), 2)
+            self.assertEqual(searches.call_count, 1)
 
     def test_runs_and_resume_reuse_package_postings_with_fresh_application_caches(self):
         from threading import Event
@@ -660,10 +679,10 @@ class Contracts(unittest.TestCase):
         context = SimpleNamespace(check=lambda: None, cancellation=Event(), deadline=time.monotonic()+30)
         preparation.index_sources(self.environment, context)
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        search = dict(mode='search', rationale='Find a helper.', query='helper',
-                      backend=dict(name='frozen-source', prefixes=['project']))
+        retrieve = dict(mode='retrieve', rationale='Find a helper.', queries=['helper'], names=[],
+                        backends=[dict(name='frozen-source', prefixes=['project'])])
         options = dict(workflow='scripted', config=replace(Config(), prover=route),
-                       script=(('prover', response(search)), ('prover', response(proof()))))
+                       script=(('prover', response(retrieve)), ('prover', response(proof()))))
         with patch.object(bm25, '_build', side_effect=AssertionError('unexpected rebuild')):
             for number in range(2):
                 self.app.cache = self.root/f'cache-{number}'
@@ -769,7 +788,7 @@ class Contracts(unittest.TestCase):
         self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         retrieve = dict(mode='retrieve', rationale='Check a discovered name.', queries=['addition'], names=[],
-            backends=[dict(name='leanexplore', prefixes=[])], offset=0)
+            backends=[dict(name='leanexplore', prefixes=[])])
         research = dict(mode='research', rationale='Read supporting context.', question='What proves True?', urls=[])
         action = proof()
         action['proof_body'] = 'by trivial'
@@ -806,7 +825,8 @@ class Contracts(unittest.TestCase):
         from tests.test_strategy import decomposition
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         research_route = ModelRoute(provider='openai', model='fixture')
-        lookup = dict(mode='lookup', rationale='Inspect names.', names=['Nat.add', 'Nat.mul'])
+        retrieve = dict(mode='retrieve', rationale='Inspect names.', names=['Nat.add', 'Nat.mul'],
+                        queries=[], backends=[])
         probe = dict(mode='probe', rationale='Inspect internals.', cases=[dict(id='enumeration', code='pure ()')])
         action = decomposition()
         action['children'] = [dict(name='support', statement='True ∧ True', proof='Use Nat.add and the constructor.',
@@ -840,7 +860,7 @@ class Contracts(unittest.TestCase):
             return original(snapshot)
         with patch('midas.prompt.reviewer.render', side_effect=capture), self.start(
                 workflow='scripted', config=replace(Config(), prover=route, reviewer=route, research=research_route),
-                script=(('prover', response(invalid)), ('prover', response(lookup)), ('prover', response(probe)),
+                script=(('prover', response(invalid)), ('prover', response(retrieve)), ('prover', response(probe)),
                         ('prover', response(action)), ('reviewer', research), ('research', answer),
                         ('reviewer', accept), ('prover', response(child)))) as run:
             for _ in range(1000):
@@ -911,10 +931,10 @@ class Contracts(unittest.TestCase):
         from midas.tools import SearchService
         self.app.search_factory = lambda: SearchService(index=sources.index, source_reader=sources)
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        search = dict(mode='search', rationale='Find a project helper.', query='helper',
-                      backend=dict(name='frozen-source', prefixes=['project']))
+        retrieve = dict(mode='retrieve', rationale='Find a project helper.', queries=['helper'], names=[],
+                        backends=[dict(name='frozen-source', prefixes=['project'])])
         with self.start(workflow='scripted', config=replace(Config(), prover=route),
-                        script=(('prover', response(search)), ('prover', response(proof())))) as run:
+                        script=(('prover', response(retrieve)), ('prover', response(proof())))) as run:
             owner = run.workflow.graph(run.writer).nodes[0].owner
             display = run.workflow.display(run.writer, run.workflow.snapshot(run.writer, owner))
             roots = next(s.text for s in display.sections if s.name == 'search-roots')

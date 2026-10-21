@@ -157,17 +157,26 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], action['proof_body'])
             self.assertEqual(Draft.load(draft.payload), draft)
 
-    def test_lookup_and_retrieve_responses_have_no_inspection_flag(self):
-        actions = (dict(mode='lookup', rationale='Read the definition.', names=['Nat.add']),
+    def test_retrieve_responses_reject_removed_fields(self):
+        actions = (dict(mode='retrieve', rationale='Read the definition.', names=['Nat.add'],
+                        queries=[], backends=[]),
                    dict(mode='retrieve', rationale='Find supporting declarations.', queries=['addition'],
-                        names=[], backends=[dict(name='leanexplore', prefixes=[])], offset=0))
+                        names=[], backends=[dict(name='leanexplore', prefixes=[])]))
         for action in actions:
             with self.subTest(mode=action['mode']):
                 parsed = interpret(response(action), role='prover', contract='prover-action-v2')
                 self.assertEqual(parsed.value, action)
-                for flag in (False, True):
+                for extra in (dict(inspect=False), dict(inspect=True), dict(offset=0), dict(offset=12)):
                     with self.assertRaises(ValueError):
-                        interpret(response(dict(action, inspect=flag)), role='prover', contract='prover-action-v2')
+                        interpret(response(dict(action, **extra)), role='prover', contract='prover-action-v2')
+
+    def test_search_and_lookup_responses_are_rejected(self):
+        actions = (dict(mode='search', rationale='Find addition.', query='addition',
+                        backend=dict(name='leanexplore', prefixes=[])),
+                   dict(mode='lookup', rationale='Read the definition.', names=['Nat.add']))
+        for action in actions:
+            with self.subTest(mode=action['mode']), self.assertRaises(ValueError):
+                interpret(response(action), role='prover', contract='prover-action-v2')
 
     def test_review_findings_and_research_invariants(self):
         value = dict(verdict='accept', rationale='A valid plan.', findings=[], question='', urls=[])
@@ -357,13 +366,13 @@ class StateTests(unittest.TestCase):
 
     def test_prompt_schema_filters_helpers_but_always_includes_revise(self):
         cases = (
-            (Services(), OwnerUsage(), (), (), {'search', 'lookup', 'retrieve', 'probe'}),
-            (Services(), OwnerUsage(), ('result-1',), (), {'search', 'lookup', 'retrieve', 'probe', 'recall'}),
+            (Services(), OwnerUsage(), (), (), {'retrieve', 'probe'}),
+            (Services(), OwnerUsage(), ('result-1',), (), {'retrieve', 'probe', 'recall'}),
             (Services(research=True, research_web_calls=3), OwnerUsage(), ('result-1',), ('result-1:1',),
              set(prover.HELPER_MODES)),
             (Services(research=True, research_web_calls=3), OwnerUsage(research=7, retrieval=10, probe=6),
              (), (), set()),
-            (Services(compiler=False), OwnerUsage(), (), (), {'search'}),
+            (Services(compiler=False), OwnerUsage(), (), (), set()),
         )
         for services, usage, pins, cursors, expected in cases:
             with self.subTest(services=services, usage=usage, pins=pins):
@@ -462,7 +471,7 @@ class StateTests(unittest.TestCase):
                     self.assertNotIn(clutter, capabilities)
                 self.assertEqual('research_remaining:' in capabilities, 'research' in expected)
 
-    def test_lookup_can_progress_and_unavailable_actions_still_fail_admission(self):
+    def test_named_retrieval_can_progress_and_unavailable_actions_still_fail_admission(self):
         artifacts, snapshot = fixture()
         snapshot = replace(snapshot, services=Services())
         dispatched, _, _ = dispatch(snapshot, artifacts)
@@ -477,8 +486,8 @@ class StateTests(unittest.TestCase):
             with self.subTest(action=action), self.assertRaises(ValueError):
                 self.strategy.on_model(snapshot, self.policy, dispatched,
                     admitted(artifacts, dispatched, response(action)), artifacts)
-        action = dict(mode='lookup', rationale='Inspect the definition used in the goal.',
-                      names=['Nat.Prime'])
+        action = dict(mode='retrieve', rationale='Inspect the definition used in the goal.',
+                      names=['Nat.Prime'], queries=[], backends=[])
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action)), artifacts)
         self.assertEqual(changes.helper.request.action.names, ('Nat.Prime',))
@@ -560,7 +569,7 @@ class StateTests(unittest.TestCase):
             'law_cos', 'law_sin', 'angle_add_angle_add_angle_eq_pi',
             'ne₁₂_of_not_collinear', 'sin_pos_of_not_collinear')]
         action = dict(mode='retrieve', rationale='Check the geometric interfaces.', names=names,
-                      queries=['angle_add_angle_add_angle_eq_pi'], offset=0,
+                      queries=['angle_add_angle_add_angle_eq_pi'],
                       backends=[dict(name='frozen-source', prefixes=['mathlib/Mathlib/Geometry/Euclidean'])])
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action)), artifacts)
@@ -582,7 +591,8 @@ class StateTests(unittest.TestCase):
                 admitted(artifacts, dispatched, response(action)), artifacts)
         memory = dict(strategy='Use the displayed definition.', upsert=[], forget=[],
                       pin_evidence=['displayed-result'], unpin_evidence=[])
-        action = dict(mode='lookup', rationale='Inspect a related definition.', names=['Nat.add'])
+        action = dict(mode='retrieve', rationale='Inspect a related definition.', names=['Nat.add'],
+                      queries=[], backends=[])
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action, memory)), artifacts)
         self.assertEqual(changes.memory.pins, ('displayed-result',))
@@ -758,11 +768,12 @@ class StateTests(unittest.TestCase):
     def test_helpers_resume_same_turn_without_new_helper_charge(self):
         artifacts, snapshot = fixture()
         dispatched, _, _ = dispatch(snapshot, artifacts)
-        action = dict(mode='lookup', rationale='Check a lemma.', names=['Nat.add_comm'])
+        action = dict(mode='retrieve', rationale='Check a lemma.', names=['Nat.add_comm'],
+                      queries=[], backends=[])
         result = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action)), artifacts)
         plan = result.helper
-        self.assertEqual(plan.charge, 'lookup')
+        self.assertEqual(plan.charge, 'retrieve')
         stage = plan.stages[0]
         admitted_stage = StageEvidence(stage, receipt('lookup').request_ref.sha256, receipt('lookup'),
                                       ResultStatus.SUCCEEDED, (artifact('lookup'),), available=stage.action.names)
