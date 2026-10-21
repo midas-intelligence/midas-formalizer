@@ -19,19 +19,11 @@ Background source and English plans do not add hypotheses. Preserve all binders,
 universe signatures, and checked dependency aliases. Do not emit top-level commands.
 
 Choose one action using the CAPABILITIES section before filling its fields.
-If you need the meaning of a named constant in the goal and retrieve is enabled,
-your next action must be retrieve with its Lean name. Missing
-definitions are a reason to call retrieve. An import does not
-display the definitions it contains; retrieve obtains them. For example:
-{"action":{"mode":"retrieve","rationale":"Inspect the definition used in the goal.","queries":[],"names":["Nat.Prime"],"backends":[]},"memory_update":null}
-Use the actual names from your task in place of this example's name.
-
-retrieve.names identifies Lean declarations. Tool result sections identify the
-result ID and pages already displayed; use their contents directly. Delivered
-evidence is retained, subject to the configured input-token budget. Omission notices
-identify when older pages are outside this prompt. Use page only with an offered cursor
-to read an additional page. With no offered cursors, do not use page. If research is
-disabled, choose an enabled local helper or work on the proof directly.
+Tool result sections identify the result ID and pages already displayed; use their
+contents directly. Delivered evidence is retained, subject to the configured
+input-token budget. Omission notices identify when older pages are outside this
+prompt. If research is disabled, choose an enabled local helper or work on the
+proof directly.
 Every action needs a nonempty rationale explaining what it will accomplish.
 Give a concise actionable reason, not a reasoning transcript.
 
@@ -56,13 +48,13 @@ A new proof action replaces the proposed decomposition and drops its children.
 To keep them, return a corrected decomposition including its children and glue.
 
 Missing library foundations are a reason to investigate or expose the next useful
-mathematical layer. Do not invent children merely to spend attempts. Construction
-layers should connect primitive operations, invariants, assembly, correctness and
-cost bounds for the same objects, including composition overhead. Analytic claims
-need domains, constants and endpoint/equality cases. Finite certificates need
-existence or construction, sound verification and coverage of all required cases.
-Defining a property does not establish a witness with that property. Separate
-existence and properties of the same witness; instantiate it in the final glue.
+mathematical layer. Do not invent children merely to spend attempts. When required
+by the target, account for construction invariants, correctness and cost bounds
+(including composition overhead), analytic domains, constants and endpoint/equality
+cases, or finite-certificate existence, verification and coverage.
+Defining a property does not establish a witness with that property. When the target
+requires a witness, establish its existence and required properties for the same
+object; instantiate it in the final glue.
 Use direct proofs and suitable automation for localized arguments. For excessive
 unfolding during elaboration, consider local transparency control or intermediate
 equalities before repeating the same repair. A simplified probe may miss the issue.
@@ -83,31 +75,42 @@ fragment names. Null old replaces a whole fragment; otherwise old must match
 exactly once. Structural changes require a complete new proof, decomposition or
 candidate.
 
-Helpers continue this task with advisory evidence. Use retrieve to discover and
-check Lean declarations in one action. Supply up to three queries and two backends
-for discovery, up to twelve known names for direct inspection, or both together.
+Helper results, including successful probes and evidence pages, are advisory;
+submit the complete proof for ordinary checking. Difficulty, resource interruptions,
+missing names or failed tools alone do not establish falsity or unprovability.
+
+Use retrieve to discover and check Lean declarations in one action, then read its
+result. If retrieve is enabled and you need the meaning of a named constant in the
+goal, your next action is retrieve with its Lean name. Use it for missing
+definitions or theorem interfaces; imports do not display their definitions.
+Supply up to three queries and two backends for discovery, up to twelve known names
+for direct inspection, or both together.
 Discovery results are merged and ranked, then the top twelve names are checked
-alongside your explicit names. To inspect other results, choose names from the
-returned search results and make a names-only retrieve request, which skips
-search. Known names need no prior result ID.
+alongside your explicit names. To inspect other results, include their names in a
+later retrieve action, optionally with new queries. Known names need no prior
+result ID.
 Retrieval returns checked types and available authored definition source.
 Theorems return checked signatures without proof bodies.
-Backend names are frozen-source and leanexplore; only frozen-source uses prefixes.
-Use the displayed frozen-source roots, including project when offered, or a file,
-directory or module within them. project searches the frozen project sources.
+Backend names are frozen-source and leanexplore. frozen-source accepts optional
+prefixes; an empty array searches all frozen roots. leanexplore requires an empty
+prefixes array. For scoped search, use the displayed frozen-source roots, including
+project when offered, or a file, directory or module within them.
+project searches the frozen project sources.
 Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
-preference within the selected scope. Use retrieve with a later name for its type
-and available definition source. Large excerpts may continue on another page.
+preference within the selected scope. Large excerpts may continue on another page.
 Queries require backends. For names-only retrieval, use empty queries and backends
 arrays. Supply at least one query or name.
+For example (replace Nat.Prime with the actual name from your task):
+{"action":{"mode":"retrieve","rationale":"Inspect the definition used in the goal.","queries":[],"names":["Nat.Prime"],"backends":[]},"memory_update":null}
 Discovery alone does not certify availability.
+
 Probe cases run in the frozen checked target context, without proposed children or
 definitions. Supply one through three cases, each containing only id and code.
 Each id is distinct, begins with a letter, then letters/digits/underscore/hyphen,
 at most 48 characters. code is ONLY the Lean TacticM do-block body after run_tac do.
 The application adds run_tac do and indents your body automatically.
-Do not include by, run_tac, run_elab, or an outer do. Do not supply operation,
+Do not wrap the body in by, run_tac, run_elab, or do. Do not supply operation,
 setup or expected. Example code:
 let env ← Lean.getEnv
 Lean.logInfo m!"{(env.find? `Nat.add).isSome}"
@@ -116,20 +119,15 @@ tactic syntax, for example Lean.Elab.Tactic.evalTactic (← `(tactic| intro C)).
 The generated code, including wrapper and indentation, must fit 16000 UTF-8 bytes.
 Each case starts independently at the closed goal: introduce target binders
 explicitly when needed. Diagnostics refer to generated code (body starts at line 2).
-A successful probe is advisory: submit the complete proof for ordinary checking.
-Resource interruptions and missing names do not establish mathematical failure.
 Use research only when enabled in Helper modes, for a mathematical question and
-at most six public source URLs. Use retrieve to inspect the local Lean context.
-Use page with an offered cursor to retrieve another page outside this prompt.
-Evidence pages remain advisory. Failed tools do not establish that a mathematical
-claim is false.
+at most six public source URLs.
+Use page only with an offered cursor to read an additional page outside this prompt.
 
 Use stop to request independent review when you believe this exact node cannot
 be proved. Explain why in rationale. For a suspected false statement, missing
 assumption or context mismatch, include an objection with category and concrete
-evidence; otherwise use null objection. Difficulty or failed tools alone do not
-establish unprovability. The node continues unless the reviewer accepts stopping.
-A rejection supplies feedback for your next action. An accepted statement
+evidence; otherwise use null objection. The node continues unless the reviewer
+accepts stopping. A rejection supplies feedback for your next action. An accepted statement
 objection lets current parent decompositions reconsider their use of this node.
 
 memory_update is null or concise strategy/lessons and evidence pins to retain.
@@ -138,9 +136,8 @@ Use displayed lesson IDs to update or forget old lessons. Retain useful names,
 approaches tried and why they failed, unresolved work, and conditions for revisiting
 a route. Consolidate lessons; exact candidate proofs and child guidance stay in
 the candidate. Omission and eviction notices mean some history is unavailable.
-For missing definitions or theorem interfaces, use retrieve when enabled
-and read its result. Explain proof departures from any
-assigned English argument; never silently replace the task.
+Explain proof departures from any assigned English argument; never silently
+replace the task.
 """.encode() + CONTEXT_RULES
 
 
@@ -188,16 +185,16 @@ HELPER_MODES = ('retrieve', 'probe', 'research', 'page')
 SCHEMA = schema_bytes(schema())
 
 
-@lru_cache(maxsize=64)
-def action_schema(modes):
-    """Small cached schema variants; strategy supplies the available actions."""
+@lru_cache(maxsize=2)
+def action_schema(research):
+    """Research configuration selects the schema; turn allowances do not."""
+    if type(research) is not bool:
+        raise DomainError('Expected research configuration')
+    if research:
+        return SCHEMA
     value = schema()
-    actions = value['properties']['action']['anyOf']
-    known = {action['properties']['mode']['enum'][0] for action in actions}
-    if not modes or len(set(modes)) != len(modes) or not set(modes) <= known:
-        raise DomainError('Invalid available prover actions')
-    value['properties']['action']['anyOf'] = [action for action in actions
-        if action['properties']['mode']['enum'][0] in modes]
+    value['properties']['action']['anyOf'] = [action for action in value['properties']['action']['anyOf']
+        if action['properties']['mode']['enum'][0] != 'research']
     return schema_bytes(value)
 
 
@@ -216,8 +213,6 @@ def render(snapshot):
                          for s in sections if s.kind == 'capabilities')
     sections = tuple(s for s in sections if s.kind != 'capabilities')
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
-        b'The application will execute a helper action and supply its result on the next turn. '
-        b'If retrieve is enabled and you need definitions of named constants in this goal, return a retrieve action with '
-        b'those names. Use the enabled helpers to obtain missing context. '
+        b'Use the enabled helpers to obtain missing context. '
         b'Return the action JSON now.'))),)
     return Prompt('prover', 'prover-v6', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)

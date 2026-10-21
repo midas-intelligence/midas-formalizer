@@ -123,6 +123,15 @@ class SearchTests(unittest.TestCase):
         duplicate_scope = self.search(index, 'Nat', ('Mathlib', 'lib/Mathlib'))
         self.assertEqual(duplicate_scope.records, baseline.records)
 
+    def test_empty_prefixes_search_all_frozen_roots(self):
+        index = self.index(('lib/Mathlib/A.lean', 'def apple : Nat := 0\n'),
+                          ('project/Main.lean', 'def berry : Nat := 0\n'))
+        result = self.search(index, 'Nat', ())
+        self.assertEqual({r.names for r in result.records}, {('apple',), ('berry',)})
+        self.assertEqual(result.records, self.search(index, 'Nat', index.roots).records)
+        self.assertEqual([r.names for r in self.search(index, 'Nat', ('project',)).records],
+                         [('berry',)])
+
     def test_scope_filters_before_candidates_and_uses_global_idf(self):
         index = self.index(('lib/Mathlib/A.lean', ''.join(f'def needle{i} : Nat := 0\n' for i in range(150))),
                           ('lib/Mathlib/B.lean', 'def target : Nat := 0\n'))

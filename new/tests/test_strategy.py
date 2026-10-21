@@ -364,10 +364,11 @@ class StateTests(unittest.TestCase):
     def setUp(self):
         self.strategy, self.policy = Strategy(), Policy(Config())
 
-    def test_prompt_schema_filters_helpers_but_always_includes_revise(self):
+    def test_prover_schema_filters_disabled_research_and_capabilities_report_limits(self):
         cases = (
             (Services(), OwnerUsage(), (), (), {'retrieve', 'probe'}),
             (Services(), OwnerUsage(), ('result-1',), (), {'retrieve', 'probe'}),
+            (Services(research=True, research_web_calls=0), OwnerUsage(), (), (), {'retrieve', 'probe'}),
             (Services(research=True, research_web_calls=3), OwnerUsage(), ('result-1',), ('result-1:1',),
              set(prover.HELPER_MODES)),
             (Services(research=True, research_web_calls=3), OwnerUsage(research=7, retrieval=10, probe=6),
@@ -383,7 +384,9 @@ class StateTests(unittest.TestCase):
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
                 schema = wire['outputSchema']
                 actions = {a['properties']['mode']['enum'][0] for a in schema['properties']['action']['anyOf']}
-                self.assertEqual(actions & set(prover.HELPER_MODES), expected)
+                research_enabled = services.research and services.research_web_calls > 0
+                expected_helpers = set(prover.HELPER_MODES) - (set() if research_enabled else {'research'})
+                self.assertEqual(actions & set(prover.HELPER_MODES), expected_helpers)
                 self.assertEqual(actions - set(prover.HELPER_MODES),
                                  {'proof', 'decomposition', 'candidate', 'revise', 'stop'})
                 capabilities = wire['input'][-1]['text']
@@ -397,10 +400,49 @@ class StateTests(unittest.TestCase):
                     self.assertIn('page: unavailable (no additional pages outside this prompt)', capabilities)
                 if not services.research:
                     self.assertIn('research: disabled', capabilities)
-                    self.assertNotIn('research_remaining:', capabilities)
-                expected_schema = prover.action_schema(tuple(sorted(actions)))
+                for mode, counter, used in (('retrieve', 'retrieval', usage.retrieval),
+                        ('probe', 'probe', usage.probe), ('research', 'research', usage.research)):
+                    remaining = getattr(self.policy.config.helpers, counter) - used if mode in expected else 0
+                    self.assertIn(f'{counter}_remaining: {remaining}', capabilities)
+                expected_schema = prover.action_schema(research_enabled)
                 self.assertEqual(schema, decode(expected_schema, limit=16384))
                 self.assertEqual(prepared.turn.schema_hash, sha256(expected_schema).hexdigest())
+
+    def test_joint_targets_keep_schema_but_reject_single_subject_actions(self):
+        artifacts, snapshot = fixture()
+        joint = replace(snapshot.context, subjects=(Subject('target', 'first'), Subject('target', 'second')))
+        snapshot = replace(snapshot, context=joint,
+                           version=replace(snapshot.version, context=artifacts.save(joint.payload)))
+        dispatched, prepared, _ = dispatch(snapshot, artifacts)
+        wire = decode(prepared.wire.wire, limit=8*1024**2)
+        self.assertEqual(prepared.turn.schema_hash, sha256(prover.SCHEMA).hexdigest())
+        self.assertIn('proof/decomposition: unavailable (requires one subject); use candidate',
+                      wire['input'][-1]['text'])
+        for action in (proof(), decomposition()):
+            with self.subTest(mode=action['mode']), self.assertRaisesRegex(ValueError, 'requires one subject'):
+                self.strategy.on_model(snapshot, self.policy, dispatched,
+                    admitted(artifacts, dispatched, response(action)), artifacts, submission_id=uid('joint-invalid'))
+
+    def test_page_availability_preserves_schema_and_cache_key(self):
+        artifacts, snapshot = fixture()
+        display = Display((Section('subject', 'goal', b'Goal: True'),),
+                          (snapshot.version.context,), (snapshot.version.owner,))
+        for transport in ('azure_responses', 'bedrock_responses'):
+            with self.subTest(transport=transport):
+                options = Options(transport, 'model', prompt_cache='explicit', cache_scope='a'*64)
+                prepared = []
+                for cursors in ((), ('result-1:1',), ('result-1:2',)):
+                    current = replace(snapshot, cursors=cursors)
+                    work = self.strategy.plan(current, self.policy).work[0]
+                    prepared.append(self.strategy.prepare_model(current, self.policy, work, display, options))
+                first = decode(prepared[0].wire.wire, limit=8*1024**2)
+                self.assertIn('page: unavailable', first['input'][-1]['content'])
+                for changed, cursor in zip(prepared[1:], ('result-1:1', 'result-1:2')):
+                    wire = decode(changed.wire.wire, limit=8*1024**2)
+                    self.assertEqual(prepared[0].turn.schema_hash, changed.turn.schema_hash)
+                    self.assertEqual(first['text'], wire['text'])
+                    self.assertEqual(first['prompt_cache_key'], wire['prompt_cache_key'])
+                    self.assertIn('page cursor='+cursor, wire['input'][-1]['content'])
 
     def test_revision_availability_preserves_schema_and_cache_key(self):
         artifacts, snapshot = fixture()
@@ -426,17 +468,18 @@ class StateTests(unittest.TestCase):
                     self.assertEqual(prepared[0].wire.wire.partition(b'QUESTION next-action\\n')[0],
                                      changed.wire.wire.partition(b'QUESTION next-action\\n')[0])
 
-    def test_counters_preserve_cache_key_but_action_availability_changes_schema(self):
+    def test_action_availability_preserves_prover_schema_and_cache_key(self):
         artifacts, snapshot = fixture()
-        snapshot = replace(snapshot, services=Services())
         display = Display((Section('subject', 'goal', b'Goal: True'),
                            Section('evidence', 'saved-result', b'Immutable source')),
                           (snapshot.version.context,), (snapshot.version.owner,))
         options = Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)
         wires = []
         for changed in (snapshot, replace(snapshot, usage=OwnerUsage(retrieval=1, probe=1)),
-                        replace(snapshot, cursors=('result:1',)),
-                        replace(snapshot, usage=OwnerUsage(research=7, retrieval=10, probe=6))):
+                        replace(snapshot, usage=OwnerUsage(research=7, retrieval=10, probe=6)),
+                        replace(snapshot, services=replace(snapshot.services, compiler=False)),
+                        replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct)),
+                        replace(snapshot, usage=OwnerUsage(decomposition=self.policy.config.mathematics.decomposition))):
             work = self.strategy.plan(changed, self.policy).work[0]
             prepared = self.strategy.prepare_model(changed, self.policy, work, display, options)
             wires.append(prepared.wire.wire)
@@ -448,10 +491,20 @@ class StateTests(unittest.TestCase):
                          wires[1].partition(b'QUESTION next-action\\n')[0])
         for wire in wires[2:]:
             current = decode(wire, limit=8*1024**2)
-            self.assertNotEqual(first['prompt_cache_key'], current['prompt_cache_key'])
-            self.assertNotEqual(first['text'], current['text'])
+            self.assertEqual(first['prompt_cache_key'], current['prompt_cache_key'])
+            self.assertEqual(first['text'], current['text'])
             self.assertEqual(first['input'][:-1], current['input'][:-1])
             self.assertNotEqual(first['input'][-1], current['input'][-1])
+        disabled = replace(snapshot, services=Services())
+        no_web_policy = Policy(replace(self.policy.config,
+            helpers=replace(self.policy.config.helpers, web_calls=0)))
+        for current, policy in ((disabled, self.policy), (snapshot, no_web_policy)):
+            work = self.strategy.plan(current, policy).work[0]
+            prepared = self.strategy.prepare_model(current, policy, work, display, options)
+            wire = decode(prepared.wire.wire, limit=8*1024**2)
+            self.assertEqual(prepared.turn.schema_hash, sha256(prover.action_schema(False)).hexdigest())
+            self.assertNotEqual(first['prompt_cache_key'], wire['prompt_cache_key'])
+            self.assertIn('research: disabled', wire['input'][-1]['content'])
 
     def test_reviewer_schema_removes_unavailable_research(self):
         for services, expected in ((Services(), {'accept', 'reject'}),

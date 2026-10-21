@@ -94,8 +94,8 @@ class Backend:
         if self.name not in BACKENDS:
             raise ValueError('Unknown search backend')
         strings(self.prefixes, 16, 1024, 'source prefixes')
-        if bool(self.prefixes) != (self.name == 'frozen-source'):
-            raise ValueError('Only frozen-source search requires prefixes')
+        if self.prefixes and self.name != 'frozen-source':
+            raise ValueError('Only frozen-source search accepts prefixes')
         for prefix in self.prefixes:
             source_selector(prefix)
 

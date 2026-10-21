@@ -110,8 +110,12 @@ class Strategy:
                 details += '\nReview subject: stop request; accept stops this node; reject continues proof work.'
         else:
             allowances = [f'{name}: {getattr(capabilities, name)}' for name in (
-                'direct_remaining', 'decomposition_remaining', 'repair_remaining',
-                'retrieval_remaining', 'probe_remaining')]
+                'direct_remaining', 'decomposition_remaining', 'repair_remaining')]
+            allowances.extend(f'{name}: {getattr(capabilities, name) if mode in helpers else 0}'
+                for mode, name in (('retrieve', 'retrieval_remaining'), ('probe', 'probe_remaining'),
+                                   ('research', 'research_remaining')))
+            if len(snapshot.context.subjects) != 1:
+                allowances.append('proof/decomposition: unavailable (requires one subject); use candidate')
             if snapshot.base is None:
                 allowances.append('revise: unavailable (no existing candidate)')
             elif snapshot.base.mode not in modes:
@@ -119,8 +123,7 @@ class Strategy:
             else:
                 allowances.append('revise: available')
             if capabilities.web_calls:
-                allowances.extend((f'research_remaining: {capabilities.research_remaining}',
-                                   f'web_calls: {capabilities.web_calls}'))
+                allowances.append(f'web_calls: {capabilities.web_calls}')
             else:
                 allowances.append('research: disabled')
             if not snapshot.cursors:
@@ -144,18 +147,10 @@ class Strategy:
             if prompt.contract != CONTRACTS[role] or prompt.schema != default.SCHEMA:
                 raise ValueError('Replacement schema/contract requires its matching interpreter')
             if role == 'reviewer':
-                schema = reviewer.verdict_schema('research' in helpers)
+                prompt = replace(prompt, schema=reviewer.verdict_schema('research' in helpers))
             else:
-                actions = [*helpers, 'stop', 'revise']
-                if modes:
-                    actions.append('candidate')
-                if len(snapshot.context.subjects) == 1:
-                    actions.extend(action for mode, action in
-                        (('direct', 'proof'), ('decomposition', 'decomposition')) if mode in modes)
-                schema = prover.action_schema(tuple(sorted(actions)))
-            # Revision availability belongs in capabilities so gaining a base
-            # does not change the schema/cache key. Other actions remain filtered.
-            prompt = replace(prompt, schema=schema)
+                # Only research configuration changes the prover schema, not remaining allowances.
+                prompt = replace(prompt, schema=prover.action_schema(bool(capabilities.web_calls)))
         wire = build(display, options, renderer=lambda _: prompt,
                      input_token_budget=getattr(policy.config, role).input_token_budget, token_sample=token_sample)
         turn = Turn(snapshot.version, work.operation, prompt.contract, sha256(prompt.schema).hexdigest(),

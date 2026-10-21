@@ -1093,13 +1093,15 @@ so changing a draft or memory does not invalidate those evidence prefixes. Memor
 feedback, remaining allowances and the final action request follow the cache
 boundaries. Evicting or reordering retained content still invalidates prefixes
 from the first change.
-The action schema always includes `revise`; capabilities report whether a current
-candidate and its mathematical allowance permit it. Gaining a candidate alone
-preserves the schema and cache key. Other unavailable actions are excluded, including
-page without offered cursors and research without a configured service.
-Reviewer schemas likewise omit unavailable research. Small schema variants are
-cached by available actions: changing remaining counters alone preserves the
-schema, while enabling or exhausting a filtered action changes its hash and cache identity.
+The prover action schema has two cached variants: with research when its service
+and web calls are configured, and without research otherwise. Capabilities report
+available mathematical and helper modes, remaining allowances, revision availability
+and offered page cursors.
+Unavailable helpers have zero remaining allowance. Exhausting allowances (including
+research), gaining a candidate or changing page cursors preserves the prover schema
+and cache key. Single-subject `proof` and `decomposition` actions remain in the schema
+for joint targets, but capabilities direct the prover to use `candidate` instead.
+Reviewer schemas still omit unavailable research and cache their two schema variants.
 Strategy admission still checks every response and returns bounded rejection
 details in the next prompt so invalid replies can be corrected.
 Disabled caching emits no breakpoint annotations.

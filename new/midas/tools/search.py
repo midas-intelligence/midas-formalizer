@@ -174,7 +174,7 @@ def source_search(stage, index, reader, cancel, deadline, *, cache_directory=Non
     if index is None or index.environment_id != stage.scope.environment_id:
         raise ValueError('Source index differs from search environment')
     action = stage.action
-    prefixes = index.resolve(action.backend.prefixes)
+    prefixes = index.resolve(action.backend.prefixes) if action.backend.prefixes else index.roots
     with database(index, reader, cancel, deadline, cache_directory, prepared_path=prepared_path) as db:
         hits = ranked(db, action.query, prefixes, limit=action.limit)
     result, loaded = [], {}
