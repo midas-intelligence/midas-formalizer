@@ -579,6 +579,59 @@ class Contracts(unittest.TestCase):
             self.assertIn('try.code (line 1 below):\nrun_tac do\n  '+probe['cases'][0]['code'], pages[1])
             self.assertNotRegex('\n'.join(pages), r'(?m)^\d+(?:/[^:]+)?:')
 
+    def test_failed_helpers_show_summaries_without_worker_receipts(self):
+        from midas.application import helpers, records as r
+        from midas.checker import CompilerRequest
+        from midas.prompt import prover
+        from midas.tools import Match, SearchService
+
+        class FailedCompiler(Compiler):
+            def execute(self, frozen, context):
+                request = CompilerRequest(context.reader.read_artifact(frozen.operation_payload, max_bytes=64*1024**2))
+                if request.decode()['operation'] not in ('lookup', 'probe'):
+                    return super().execute(frozen, context)
+                diagnostic = context.staging.write_bounded(
+                    b'libc++abi: lean::memory_exception: excessive memory consumption', max_bytes=1024)
+                report = context.staging.write_bounded(r.pack(dict(
+                    request=frozen.operation_payload.to_dict(), outcome='crash', phases=[])), max_bytes=65536)
+                return WorkerResult(context.invocation_id, context.request_hash, ResultStatus.FAILED,
+                    (diagnostic, report), report, diagnostic, Usage(0, 0, 0, 0),
+                    DeliveryCertainty.DELIVERED, Termination.TERMINATED)
+
+        self.app.checker_factory = FailedCompiler
+        self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        retrieve = dict(mode='retrieve', rationale='Find addition.', queries=['addition'], names=[],
+                        backends=[dict(name='leanexplore', prefixes=[])])
+        probe = dict(mode='probe', rationale='Inspect the goal.', cases=[dict(id='try', code='pure ()')])
+        captured = []
+        original = prover.render
+        def capture(snapshot):
+            captured.append(snapshot)
+            return original(snapshot)
+        with patch('midas.prompt.prover.render', side_effect=capture), self.start(
+                workflow='scripted', config=replace(Config(), prover=route, reviewer=route,
+                    recovery=replace(Config().recovery, local_retries=0)),
+                script=tuple(('prover', response(a)) for a in (retrieve, probe, proof()))) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            archives = helpers.advertised(run.writer, owner)
+            pages = [helpers.page_text(r.read(run.writer, a.pages[0], 16000)).decode() for a in archives]
+            self.assertIn('Lookup failed: crash\nRequested names: Nat.add', pages[0])
+            self.assertIn('Search (leanexplore): addition', pages[0])
+            self.assertEqual(pages[1].strip(), 'Probe failed: crash')
+            evidence = b'\n'.join(s.text for snapshot in captured for s in snapshot.sections if s.kind == 'evidence')
+            self.assertIn(b'Lookup failed: crash', evidence)
+            self.assertIn(b'Probe failed: crash', evidence)
+            for noise in (b'/artifacts', b'/diagnostics', b'/sha256', b'/invocation', b'/usage', b'libc++abi'):
+                self.assertNotIn(noise, evidence)
+            self.assertNotRegex(evidence.decode(), r'(?m)^\d+(?:/[^:]+)?:')
+            # The original diagnostics remain accessible through the receipt.
+            saved = r.value(run.writer, 'application.helpers', archives[0].helper_id)
+            receipt = r.unreceipt(next(iter(saved['results'].values()))[2])
+            result = run.writer.result(receipt.original_execution_id)
+            self.assertIn(b'lean::memory_exception', r.read(run.writer, result.diagnostics, 1024))
+
     def test_named_retrieval_rejects_excluded_names_without_stalling(self):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         invalid = dict(mode='retrieve', rationale='Inspect a name.', names=['Midas.secret'],

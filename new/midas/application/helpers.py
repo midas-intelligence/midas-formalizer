@@ -164,9 +164,17 @@ def reduce(flow, reader, invocation, accepted, binding):
     rows, provenance = [], []
     for item in evidence:
         provenance.extend(item.artifacts)
+        if item.status != ResultStatus.SUCCEEDED:
+            # Failure artifacts are receipts or raw provider responses, not
+            # mathematical evidence. Keep them as provenance, never page them.
+            summary = type(item.stage.action).__name__+' failed: '+(item.error or item.status.value)
+            if isinstance(item.stage.action, Lookup):
+                summary += '\nRequested names: '+', '.join(item.stage.action.names)
+            rows.append(summary)
+            continue
         for reference in item.artifacts:
             data = r.read(overlay, reference, 4*1024**2)
-            if isinstance(item.stage.action, Probe) and item.status == ResultStatus.SUCCEEDED:
+            if isinstance(item.stage.action, Probe):
                 remaining = 4*1024**2-len(data)
                 for case, raw in zip(item.stage.action.cases, codec.load_record(data, limit=65536)):
                     ref = ArtifactRef.from_dict(raw)
@@ -176,7 +184,7 @@ def reduce(flow, reader, invocation, accepted, binding):
                                               codec.decode(payload)['row']))
                     provenance.extend((case, ref))
                 continue
-            if isinstance(item.stage.action, Lookup) and item.status == ResultStatus.SUCCEEDED:
+            if isinstance(item.stage.action, Lookup):
                 records = tuple(codec.decode(data)['records'])
                 from ..checker import CompilerRequest
                 executed = reader.invocation(item.receipt.original_execution_id)
@@ -185,9 +193,6 @@ def reduce(flow, reader, invocation, accepted, binding):
                 index = getattr(flow.search, 'index', None) or SourceIndex(request.scope.environment_id, ())
                 rows.extend(lookup_sources(records, environment_id=request.scope.environment_id,
                     index=index, prefix=SourceFile(packet['logical'], packet['source'].encode()), reader=source_reader))
-                continue
-            if isinstance(item.stage.action, Probe):
-                rows.append('Probe failed: '+(item.error or item.status.value))
                 continue
             try:
                 rows.append(codec.decode(data) if data.startswith(codec.MAGIC) else codec.load_record(data, limit=4*1024**2))
