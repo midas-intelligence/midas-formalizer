@@ -128,7 +128,11 @@ class Strategy:
                 allowances.append('research: disabled')
             if not snapshot.cursors:
                 allowances.append('page: unavailable (no additional pages outside this prompt)')
-            details = ('Candidate modes: ' + ', '.join(modes) + '\nStop mode: request reviewer approval' + '\nHelper modes: ' +
+            remaining_stops = max(0, policy.config.mathematics.stop_requests - snapshot.usage.stop_requests)
+            stop_mode = (f'request reviewer approval ({remaining_stops} reviewed requests remaining; '
+                         'a further request stops this node immediately)' if remaining_stops else
+                         'stops this node immediately (reviewed request limit reached)')
+            details = ('Candidate modes: ' + ', '.join(modes) + '\nStop mode: ' + stop_mode + '\nHelper modes: ' +
                 ', '.join(helpers) + '\n' + '\n'.join(allowances))
             if snapshot.cursors:
                 details += '\nSaved evidence not included in this prompt:\n'+'\n'.join(
@@ -207,12 +211,16 @@ class Strategy:
         elif mode == 'stop':
             if snapshot.attempt is not None or snapshot.stop_request is not None:
                 raise ValueError('Stop requires an idle node')
-            objection = action['objection']
-            request = StopRequest(snapshot.version.owner, action['rationale'], admitted.raw,
-                Objection(snapshot.version.owner, objection['category'], objection['evidence'], admitted.raw)
-                if objection is not None else None)
-            result = Changes(snapshot.version, (_work(snapshot, 'review_stop'),),
-                             reason='stop_review_pending', stop_request=request)
+            decision = policy.stop_review(snapshot.usage)
+            if not decision.allowed:
+                result = Changes(snapshot.version, reason=decision.reason, stopped=True, stop_charge=True)
+            else:
+                objection = action['objection']
+                request = StopRequest(snapshot.version.owner, action['rationale'], admitted.raw,
+                    Objection(snapshot.version.owner, objection['category'], objection['evidence'], admitted.raw)
+                    if objection is not None else None)
+                result = Changes(snapshot.version, (_work(snapshot, 'review_stop'),),
+                                 reason='stop_review_pending', stop_request=request, stop_charge=True)
         elif mode in ('retrieve', 'probe', 'research'):
             result = self._helper(snapshot, policy, dispatch.turn, mode, action)
         elif mode == 'page':

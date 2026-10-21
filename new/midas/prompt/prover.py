@@ -126,8 +126,11 @@ Use page only with an offered cursor to read an additional page outside this pro
 Use stop to request independent review when you believe this exact node cannot
 be proved. Explain why in rationale. For a suspected false statement, missing
 assumption or context mismatch, include an objection with category and concrete
-evidence; otherwise use null objection. The node continues unless the reviewer
-accepts stopping. A rejection supplies feedback for your next action. An accepted statement
+evidence; otherwise use null objection. CAPABILITIES shows the remaining reviewed
+requests. Within that allowance, the node continues unless the reviewer accepts
+stopping. Once it is exhausted, another stop request stops this node immediately
+without review; its statement objection is not treated as accepted.
+A rejection supplies feedback for your next action. An accepted statement
 objection lets current parent decompositions reconsider their use of this node.
 
 memory_update is null or concise strategy/lessons and evidence pins to retain.

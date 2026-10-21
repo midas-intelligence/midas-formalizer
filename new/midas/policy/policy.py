@@ -37,6 +37,7 @@ class OwnerUsage:
     """
     direct: int = 0
     decomposition: int = 0
+    stop_requests: int = 0
     research: int = 0
     retrieval: int = 0
     probe: int = 0
@@ -375,6 +376,11 @@ class Policy:
         if owner.repair_open and not owner.repair_suspended and owner.repair_remaining:
             return Decision()
         return Decision(mode + '_allowance_exhausted')
+
+    def stop_review(self, owner: OwnerUsage) -> Decision:
+        if owner.stop_requests >= self.config.mathematics.stop_requests:
+            return Decision('stop_request_limit_exceeded')
+        return Decision()
 
     def helper(self, mode: str, owner: OwnerUsage, services: Services, *, units=1) -> Decision:
         natural(units, 'helper units', positive=True)

@@ -150,6 +150,34 @@ class Contracts(unittest.TestCase):
             self.assertEqual(run.writer.status_snapshot().accounting.turns, 1)
             self.assertEqual(Compiler.calls, ['binding', 'proof', 'integrate', 'audit'])
 
+    def test_import_display_distinguishes_active_source_and_additional_imports(self):
+        from midas.controller import artifact
+        from midas.domain import ByteSpan, SelectionInputs, SelectionRequest, SourceBinding, freeze_selection
+        prefix = b'import ChallengeDeps\nimport Submission.Helpers\n\n'
+        source = prefix + self.selected.source
+        declaration = self.selected.declarations[0]
+        declaration = replace(declaration,
+            declaration=ByteSpan(declaration.declaration.start + len(prefix), declaration.declaration.end + len(prefix)),
+            replacement=ByteSpan(declaration.replacement.start + len(prefix), declaration.replacement.end + len(prefix)))
+        inputs = SelectionInputs(self.environment.id,
+            (SourceBinding('Main.lean', sha256(source).hexdigest(), len(source)),))
+        self.selected = freeze_selection(SelectionRequest('Main.lean', all_unfinished=True), source,
+            (declaration,), frozenset(self.selected.imported_constants),
+            {declaration.constant: self.selected.signatures[0]}, inputs)
+        with self.start() as run:
+            snapshot = run.workflow.snapshot(run.writer, OwnerVersion(self.selected.identities[0].id, 0))
+            for inherited in ((), ('Extra.Geometry',)):
+                context = replace(snapshot.context, imports=('Extra.Geometry',), inherited_imports=inherited)
+                version = replace(snapshot.version, context=artifact(context.payload).reference)
+                display = run.workflow.display(run.writer, replace(snapshot, context=context, version=version))
+                sections = {s.name: s.text for s in display.sections}
+                self.assertEqual(sections['source-prefix'], prefix)
+                self.assertIn(b'imports in SOURCE source-prefix are already active', sections['imports'])
+                self.assertIn(b'Additional prepared modules available for import: Extra.Geometry', sections['imports'])
+                self.assertNotIn(b'Inherited imports: none', sections['imports'])
+                self.assertEqual(b'Additional active imports inherited from parent: Extra.Geometry' in
+                                 sections['imports'], bool(inherited))
+
     def test_stop_approval_and_rejection_use_review_and_feedback(self):
         from midas.application import records as r
         from midas.prompt import prover, reviewer
@@ -178,6 +206,7 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(completion.exit_code, 1 if verdict == 'accept' else 0)
                     self.assertEqual(run.writer.status_snapshot().accounting.turns, 2 if verdict == 'accept' else 3)
                     self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'protocol'), 0)
+                    self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'stop_requests'), 1)
                     observation = Memory.load(r.read(run.writer, state.memory)).observations[-1]
                     self.assertEqual(observation.status, 'stop_approved' if verdict == 'accept' else 'stop_rejected')
                     if verdict == 'reject':
@@ -233,6 +262,59 @@ class Contracts(unittest.TestCase):
             self.assertIsNone(state.stop_request)
             self.assertEqual(resumed.writer.status_snapshot().accounting.turns, 2)
 
+    def test_fourth_stop_request_ends_node_after_resume(self):
+        from midas.application import records as r
+        from midas.controller import owner_usage
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        action = response(dict(mode='stop', rationale='Definitions are not shown.',
+            objection=dict(category='context_mismatch', evidence='The source prefix has no declaration.')))
+        review = model_json(dict(verdict='reject', rationale='Inspect the imported definitions.',
+            findings=[dict(category='context_mismatch', location='goal', issue='Definitions are uninspected.',
+                           suggested_revision='Use retrieve to inspect the definitions.')], question='', urls=[]))
+        script = tuple(('prover', action) for _ in range(4)) + tuple(('reviewer', review) for _ in range(3))
+        run = self.start(workflow='scripted', config=replace(Config(), prover=route, reviewer=route), script=script)
+        owner = self.selected.identities[0].id
+        try:
+            for _ in range(1000):
+                run.step()
+                _, state = r.owner_state(run.writer, owner)
+                if state.stop_request:
+                    break
+                time.sleep(.001)
+            self.assertIsNotNone(state.stop_request)
+            self.assertEqual(owner_usage(run.writer, OwnerVersion(owner, 0)).stop_requests, 1)
+            # Persist an unapplied review receipt before closing; resume must not
+            # charge the already committed stop request a second time.
+            with patch.object(run.controller, '_accept', return_value=0):
+                for _ in range(1000):
+                    run.step()
+                    if run.writer.pending_receipts():
+                        break
+                    time.sleep(.001)
+                self.assertTrue(run.writer.pending_receipts())
+                run.close()
+        finally:
+            if not run.closed:
+                run.close()
+        with self.app.resume(self.root/'run') as resumed:
+            self.assertEqual(self.finish(resumed).exit_code, 1)
+            _, state = r.owner_state(resumed.writer, owner)
+            self.assertTrue(state.stopped)
+            self.assertEqual(state.reason, 'stop_request_limit_exceeded')
+            self.assertIsNone(state.stop_request)
+            self.assertIsNone(r.value(resumed.writer, 'application.objections', owner))
+            self.assertEqual(resumed.writer.status_snapshot().accounting.turns, 7)
+            self.assertEqual(resumed.writer.counter('application.script', 'prover'), 4)
+            self.assertEqual(resumed.writer.counter('application.script', 'reviewer'), 3)
+            for generation in (0, 1):
+                self.assertEqual(owner_usage(resumed.writer, OwnerVersion(owner, generation)).stop_requests, 4)
+            self.assertEqual(owner_usage(resumed.writer, OwnerVersion('obl_'+'f'*64, 0)).stop_requests, 0)
+            self.assertFalse(Compiler.calls)
+        with self.app.resume(self.root/'run') as resumed:
+            self.assertEqual(self.finish(resumed).exit_code, 1)
+            self.assertEqual(resumed.writer.status_snapshot().accounting.turns, 7)
+            self.assertEqual(owner_usage(resumed.writer, OwnerVersion(owner, 0)).stop_requests, 4)
+
     def test_stop_review_research_and_invalid_verdict_keep_request_pending(self):
         from midas.application import records as r
         from midas.prompt import reviewer
@@ -268,6 +350,7 @@ class Contracts(unittest.TestCase):
             self.assertIsNone(state.stop_request)
             self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'protocol'), 1)
             self.assertEqual(run.writer.status_snapshot().accounting.turns, 6)
+            self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'stop_requests'), 1)
             self.assertIn('Apply True.intro.', Memory.load(r.read(run.writer, state.memory)).observations[-1].messages)
 
     def test_protocol_rejection_reaches_next_model_prompt(self):

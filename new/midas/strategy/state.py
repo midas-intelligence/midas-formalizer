@@ -372,6 +372,7 @@ class Changes:
     cancel_after_commit: tuple[OwnerVersion, ...] = ()
     stopped: bool | None = None
     stop_request: StopRequest | None = None
+    stop_charge: bool = False
 
     def __post_init__(self):
         instance(self.expected, Version)
@@ -380,6 +381,8 @@ class Changes:
         items(self.cancel_after_commit, OwnerVersion)
         if self.stopped is not None and type(self.stopped) is not bool:
             raise ValueError('Invalid stop change')
+        if type(self.stop_charge) is not bool:
+            raise ValueError('Invalid stop charge')
         if self.stop_request is not None:
             instance(self.stop_request, StopRequest)
             if self.stop_request.owner != self.expected.owner or self.stopped is not None:

@@ -71,6 +71,7 @@ class SchedulingConfig:
 class MathematicsConfig:
     direct: int = 7
     decomposition: int = 7
+    stop_requests: int = 3
     backtracks: int = 12
     owner_backtracks: int = 3
     repair: int = 2

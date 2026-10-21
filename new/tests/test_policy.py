@@ -87,6 +87,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.export.limits(comparator=True).max_heartbeat, 54321)
         self.assertEqual(Policy(config).export_limits(ExportUsage(elapsed_ms=100)).max_heartbeat, 54321)
 
+    def test_stop_request_allowance_and_config(self):
+        config = Config()
+        self.assertEqual(config.mathematics.stop_requests, 3)
+        self.assertEqual(load_config(config.encode()), config)
+        for limit in (0, 1, 3):
+            policy = Policy(replace(config, mathematics=replace(config.mathematics, stop_requests=limit)))
+            for used in range(5):
+                decision = policy.stop_review(OwnerUsage(stop_requests=used))
+                self.assertEqual(decision.allowed, used < limit)
+                if not decision.allowed:
+                    self.assertEqual(decision.reason, 'stop_request_limit_exceeded')
+        with self.assertRaises(DomainError):
+            replace(config.mathematics, stop_requests=-1)
+        self.assertEqual(config.increase({'mathematics': {'stop_requests': 4}}).mathematics.stop_requests, 4)
+
     def test_codex_retry_limits_round_trip_and_remain_frozen(self):
         config = load_config(b'''{
             "format": "midas-config-v1",

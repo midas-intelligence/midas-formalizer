@@ -137,9 +137,13 @@ class Workflow:
             owners.append(reader.node(peer.id).node.owner)
         sections.append(Section('subject', 'required-subjects', '\n'.join(
             f'{s.kind}: {s.name}' for s in snapshot.context.subjects).encode()))
-        sections.append(Section('interfaces', 'imports', (
-            'Prepared import modules: ' + (', '.join(snapshot.context.imports) or 'none') +
-            '\nInherited imports: ' + (', '.join(snapshot.context.inherited_imports) or 'none')).encode()))
+        import_lines = ['The imports in SOURCE source-prefix are already active in this node.']
+        if snapshot.context.inherited_imports:
+            import_lines.append('Additional active imports inherited from parent: ' +
+                                ', '.join(snapshot.context.inherited_imports))
+        import_lines.append('Additional prepared modules available for import: ' +
+                            (', '.join(snapshot.context.imports) or 'none'))
+        sections.append(Section('interfaces', 'imports', '\n'.join(import_lines).encode()))
         if formal_only:
             return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)))
         if review is None:
@@ -549,9 +553,9 @@ class Workflow:
                 state, extra = page_effect(self, reader, snapshot, turn, proposal.work[0], state)
                 effects.append(extra)
             effects.append(r.save_owner(reader, owner.obligation_id, state))
-            if proposal.revision_charge:
+            if proposal.revision_charge or proposal.stop_charge:
                 from ..storage import CounterChange
-                scope, name = 'owner:'+owner.obligation_id, proposal.revision_charge
+                scope, name = 'owner:'+owner.obligation_id, proposal.revision_charge or 'stop_requests'
                 before = reader.counter(scope, name)
                 effects.append(Effect(Changes(counters=(CounterChange(scope, name, before, before+1),))))
         return r.merge(*effects)

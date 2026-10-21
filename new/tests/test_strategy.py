@@ -577,6 +577,31 @@ class StateTests(unittest.TestCase):
             with self.subTest(changed=changed.stop_request), self.assertRaisesRegex(ValueError, 'stop request changed'):
                 dispatched.turn.validate_for(changed, continuation=True)
 
+    def test_stop_request_limit_stops_without_review_or_statement_approval(self):
+        action = dict(mode='stop', rationale='No proof route is available.',
+                      objection=dict(category='context_mismatch', evidence='Definitions are not shown.'))
+        for used in (2, 3, 4):
+            with self.subTest(used=used):
+                artifacts, snapshot = fixture()
+                snapshot = replace(snapshot, usage=replace(snapshot.usage, stop_requests=used))
+                dispatched, prepared, _ = dispatch(snapshot, artifacts)
+                result = self.strategy.on_model(snapshot, self.policy, dispatched,
+                    admitted(artifacts, dispatched, response(action)), artifacts)
+                self.assertTrue(result.stop_charge)
+                self.assertIsNone(result.objection)
+                self.assertIsNone(result.graph)
+                if used < 3:
+                    self.assertIsNone(result.stopped)
+                    self.assertEqual(result.work[0].operation, 'review_stop')
+                    self.assertIsNotNone(result.stop_request)
+                else:
+                    self.assertTrue(result.stopped)
+                    self.assertEqual(result.reason, 'stop_request_limit_exceeded')
+                    self.assertFalse(result.work)
+                    self.assertIsNone(result.stop_request)
+                    self.assertIn(b'stops this node immediately (reviewed request limit reached)', prepared.wire.wire)
+                    self.assertFalse(self.strategy.plan(replace(snapshot, stopped=True), self.policy).work)
+
     def test_stop_rejection_requires_and_retains_continuation_feedback(self):
         artifacts, snapshot = fixture()
         snapshot = replace(snapshot, stop_request=StopRequest(snapshot.version.owner, 'No route found.', artifact('stop')))
