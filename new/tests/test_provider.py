@@ -26,8 +26,7 @@ from midas.provider.wire import decode, extend_object, validate_wire
 LIMITS = Limits(2000, 500, 500, 500, 500, 1000, 200, 131072, 1048576, 4194304)
 ROUTE = Route('azure', 'model', 'azure_responses', 'test', 'https://example.test/responses')
 SCHEMA = b'{"type":"object","properties":{"proof":{"type":"string"}},"required":["proof"],"additionalProperties":false}'
-WIRE = (b'{ "model":"model", "input":[{"role":"user","content":"prove"}], "stream":true,"store":false,'
-        b'"text":{"format":{"type":"json_schema","name":"proof","strict":true,"schema":' + SCHEMA + b'}} }')
+WIRE = b'{ "model":"model", "input":[{"role":"user","content":"prove"}], "stream":true,"store":false }'
 
 
 class Artifacts:
@@ -154,10 +153,11 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(data=data[:40]), self.assertRaises(ValueError):
                 decode(data, limit=100000)
 
-    def test_structured_json_wire_is_preserved_without_trimming(self):
+    def test_prompt_schema_wire_is_preserved_without_trimming(self):
         schema = {'type':'json_schema','name':'proof','strict':True,'schema':{'type':'object',
                   'properties':{'proof':{'type':'string'}},'required':['proof'],'additionalProperties':False}}
-        raw = json.dumps({**json.loads(WIRE), 'text':{'format':schema}}, indent=2).encode()
+        raw = json.dumps({**json.loads(WIRE), 'input': [{'role': 'developer', 'content':
+            'Return JSON matching this schema:\n' + SCHEMA.decode()}]}, indent=2).encode()
         req = replace(self.request, wire=self.a.save(raw))
         validate_wire(req, raw)
         calls = []
@@ -173,11 +173,11 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_wire(req, json.dumps({**json.loads(raw),'text':text}).encode())
 
-    def test_schema_rejection_does_not_retry_with_unstructured_output(self):
+    def test_request_rejection_does_not_retry_with_rewritten_output(self):
         calls = []
         def handler(request):
             calls.append(request.content)
-            return httpx.Response(400, json={'error': {'code': 'invalid_json_schema'}})
+            return httpx.Response(400, json={'error': {'code': 'invalid_request_error'}})
         out = self.http(handler)
         self.assertEqual(out.error, 'configuration')
         self.assertEqual(calls, [WIRE])
@@ -414,8 +414,7 @@ class CodexTests(unittest.TestCase):
                provider='openai', limits=LIMITS, prepared=None):
         a = Artifacts()
         route = Route(provider,'model','codex')
-        raw = prepared.wire if prepared else (b'{"input":[{"type":"text","text":"JSON proof"}],'
-                                              b'"outputSchema":' + SCHEMA + b'}')
+        raw = prepared.wire if prepared else b'{"input":[{"type":"text","text":"JSON proof"}]}'
         setup = prepared.setup if prepared else b'{"baseInstructions":"Return a proof."}'
         role = prepared.provider_role if prepared else 'research' if web_calls else 'prover'
         req = ModelRequest(route, role, replace(limits,web_calls=web_calls), a.save(raw), a.save(setup))
@@ -430,7 +429,7 @@ class CodexTests(unittest.TestCase):
             out = transport(req,a.data[req.wire.id],a.data[req.setup.id],threading.Event(),time.monotonic()+deadline)
             turn_log = log.with_suffix('.turn')
             if turn_log.exists():
-                # Includes the exact schema bytes, with only threadId appended.
+                # Preserve the exact turn bytes, with only threadId appended.
                 self.assertTrue(turn_log.read_bytes().endswith(
                     b',"params":' + extend_object(raw, {'threadId': 'thread-1'}) + b'}\n'))
             if mode == 'child':
@@ -447,7 +446,7 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(calls.count('turn/start'),1)
         self.assertEqual(out.termination,Termination.TERMINATED)
 
-    def test_role_schemas_reach_native_turn_unchanged(self):
+    def test_role_schemas_in_instructions_allow_native_text_turn(self):
         from midas.prompt import Options, Section, Snapshot, build, prover, reviewer, researcher
         snapshot = Snapshot((Section('subject', 'goal', b'True'),
                              Section('candidate', 'proof', b'by trivial'),
@@ -460,8 +459,8 @@ class CodexTests(unittest.TestCase):
                 self.assertIsNone(out.error)
                 self.assertEqual(calls.count('turn/start'), 1)
 
-    def test_native_schema_rejection_is_reported_without_retry(self):
-        out, calls = self.invoke('schema-rejected')
+    def test_native_request_rejection_is_reported_without_retry(self):
+        out, calls = self.invoke('request-rejected')
         self.assertEqual(out.error, 'configuration')
         self.assertEqual(calls.count('turn/start'), 1)
         self.assertEqual(out.termination, Termination.TERMINATED)

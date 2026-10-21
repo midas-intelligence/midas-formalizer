@@ -975,7 +975,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording plus one native provider output schema; renderer versions are `prover-v4`, `reviewer-v3`, and `researcher-v2`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v4`, `reviewer-v3`, and `researcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat, complete retained observation sections in saved order. No nested reference dictionary or prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
@@ -1062,9 +1062,12 @@ renderer/contract, exact bytes, artifact references and owner generations. The
 provider request separately binds the saved route and invocation limits. Retry
 the saved bytes; do not rebuild prompts from current state during retries.
 
-Responses uses a named strict JSON schema in `text.format`; Codex receives the
-schema natively in `turn/start.outputSchema`. Instructions contain the role wording
-without a second copy of the schema. Wire strings are escaped in bounded byte chunks,
+The response schema follows the role wording in the instructions, with a request
+for one matching JSON object without Markdown fences. Responses omits `text.format`;
+Codex omits `turn/start.outputSchema` and includes the schema in `baseInstructions`.
+Strategy still validates responses before accepting actions. The schema and its
+instruction header count toward the input budget and cache identity.
+Wire strings are escaped in bounded byte chunks,
 without passing large content through a JSON library. Only small schemas and
 transport controls use JSON serialization. Bounded caches reuse exact schemas
 and fixed wire prefixes. Explicit Responses caching requires
@@ -1090,14 +1093,19 @@ retries keep their frozen wire bytes.
 
 In prover requests, retained evidence precedes history and the current candidate,
 so changing a draft or memory does not invalidate those evidence prefixes. Memory,
-feedback, remaining allowances and the final action request follow the cache
+feedback, action availability and the final action request follow the cache
 boundaries. Evicting or reordering retained content still invalidates prefixes
 from the first change.
 The prover action schema has two cached variants: with research when its service
 and web calls are configured, and without research otherwise. Capabilities report
-available mathematical and helper modes, remaining allowances, revision availability
-and offered page cursors.
-Unavailable helpers have zero remaining allowance. Exhausting allowances (including
+available mathematical and helper modes, revision availability and offered page
+cursors, without attempt counts or stop-review mechanics. Prover stop instructions
+require identifying the best next decomposition and its concrete obstacle before
+stopping; missing library support alone is insufficient. Import descriptions
+distinguish advertised additions from the source imports and their active transitive
+dependencies. Review and stop-request limits
+remain enforced internally. Unavailable helpers are omitted from the advertised
+modes. Exhausting allowances (including
 research), gaining a candidate or changing page cursors preserves the prover schema
 and cache key. Single-subject `proof` and `decomposition` actions remain in the schema
 for joint targets, but capabilities direct the prover to use `candidate` instead.
@@ -2360,21 +2368,21 @@ cover `limits.event_bytes + 16 KiB`. An environment is never passed to provider.
 The surrounding shared job retains only the environment hash required by domain.
 
 For Responses, `wire` is the complete HTTP body, sent unchanged. It must select
-the saved model with `stream=true`, `store=false`, text messages and an explicit
-`text.format` of `json_schema` (named, with `strict=true`).
-**Prompt owns the role-specific schema and renders it into this field.** Provider
+the saved model with `stream=true`, `store=false` and text messages, without an API
+output-format field. Prompt appends the role-specific schema to the developer
+instructions. Provider
 validates the transport envelope, sends it without rewriting, and returns the
 model's response text without whitespace trimming, fence stripping or extracting
 JSON from prose. It does not interpret a mathematical candidate. Unsupported
-backend settings remain a reported error; provider never removes the schema or
-retries with plain text. Refusals have a distinct outcome, and incomplete streams
-retain their partial text and available usage. See the
-[official Responses Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses).
+backend settings remain a reported error; provider never rewrites the request to
+retry a rejected configuration. Schema adherence is checked by strategy after
+generation. Refusals have a distinct outcome, and incomplete streams retain their
+partial text and available usage.
 
-For Codex, `wire` contains the frozen `turn/start` `input` text blocks and native
-`outputSchema`; `setup` contains the complete frozen `baseInstructions` wording.
-The schema is required on every turn and is not duplicated in the instructions.
-Provider adds only thread/model/protocol controls, preserving the schema bytes.
+For Codex, `wire` contains the frozen `turn/start` `input` text blocks without
+`outputSchema`; `setup` contains the complete frozen `baseInstructions`, including
+the response schema. Provider adds only thread/model/protocol controls, preserving
+the saved prompt bytes.
 See the [official app-server turn contract](https://learn.chatgpt.com/docs/app-server#start-a-turn).
 Policy's `model` and
 `research_model` sections define `request_max_retries` and `stream_max_retries`,

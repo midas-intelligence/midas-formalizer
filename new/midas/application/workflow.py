@@ -141,8 +141,14 @@ class Workflow:
         if snapshot.context.inherited_imports:
             import_lines.append('Additional active imports inherited from parent: ' +
                                 ', '.join(snapshot.context.inherited_imports))
-        import_lines.append('Additional prepared modules available for import: ' +
-                            (', '.join(snapshot.context.imports) or 'none'))
+        if snapshot.context.imports:
+            import_lines.append('Additional prepared modules available for import: ' +
+                                ', '.join(snapshot.context.imports))
+        else:
+            import_lines.append('No additional import entries are advertised for this node; '
+                                'the source imports and their transitive dependencies remain active.')
+        import_lines.append('Use retrieval or probes to inspect declarations in the active context. '
+                            'Develop missing intermediate lemmas as proof obligations.')
         sections.append(Section('interfaces', 'imports', '\n'.join(import_lines).encode()))
         if formal_only:
             return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)))

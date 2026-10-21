@@ -14,6 +14,7 @@ from midas.domain.encoding import load_record
 from midas.domain.wire import decode
 from midas.policy import Config, OwnerUsage, Policy, Services
 from midas.prompt import Options, Section, Snapshot as Display, prover
+from midas.prompt.protocol import SCHEMA_INSTRUCTIONS
 from midas.prompt.wire import _Writer
 from midas.strategy import (Attempt, Context, Dispatch, Draft, Lesson, Memory, Observation, Objection,
     Prerequisite, Reference, Snapshot, StopRequest, Strategy, Subject, Turn, Update, Version,
@@ -21,6 +22,11 @@ from midas.strategy import (Attempt, Context, Dispatch, Draft, Lesson, Memory, O
 from midas.strategy.memory import pack
 from midas.tools import Scope, StageEvidence, prepare_archive
 from tests.test_domain import artifact, candidate, check, node, receipt, review, select, uid
+
+
+def response_schema(prepared):
+    instructions = decode(prepared.wire.setup, limit=65536)['baseInstructions']
+    return decode(instructions.rsplit(SCHEMA_INSTRUCTIONS.decode(), 1)[1].encode(), limit=16384)
 
 
 class Artifacts:
@@ -364,7 +370,7 @@ class StateTests(unittest.TestCase):
     def setUp(self):
         self.strategy, self.policy = Strategy(), Policy(Config())
 
-    def test_prover_schema_filters_disabled_research_and_capabilities_report_limits(self):
+    def test_prover_schema_filters_disabled_research_and_capabilities_report_availability(self):
         cases = (
             (Services(), OwnerUsage(), (), (), {'retrieve', 'probe'}),
             (Services(), OwnerUsage(), ('result-1',), (), {'retrieve', 'probe'}),
@@ -382,7 +388,7 @@ class StateTests(unittest.TestCase):
                                    cursors=cursors)
                 _, prepared, _ = dispatch(snapshot, artifacts)
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
-                schema = wire['outputSchema']
+                schema = response_schema(prepared)
                 actions = {a['properties']['mode']['enum'][0] for a in schema['properties']['action']['anyOf']}
                 research_enabled = services.research and services.research_web_calls > 0
                 expected_helpers = set(prover.HELPER_MODES) - (set() if research_enabled else {'research'})
@@ -400,10 +406,8 @@ class StateTests(unittest.TestCase):
                     self.assertIn('page: unavailable (no additional pages outside this prompt)', capabilities)
                 if not services.research:
                     self.assertIn('research: disabled', capabilities)
-                for mode, counter, used in (('retrieve', 'retrieval', usage.retrieval),
-                        ('probe', 'probe', usage.probe), ('research', 'research', usage.research)):
-                    remaining = getattr(self.policy.config.helpers, counter) - used if mode in expected else 0
-                    self.assertIn(f'{counter}_remaining: {remaining}', capabilities)
+                for removed in ('_remaining:', 'web_calls:', 'Stop mode:', 'reviewed requests'):
+                    self.assertNotIn(removed, capabilities)
                 expected_schema = prover.action_schema(research_enabled)
                 self.assertEqual(schema, decode(expected_schema, limit=16384))
                 self.assertEqual(prepared.turn.schema_hash, sha256(expected_schema).hexdigest())
@@ -440,7 +444,7 @@ class StateTests(unittest.TestCase):
                 for changed, cursor in zip(prepared[1:], ('result-1:1', 'result-1:2')):
                     wire = decode(changed.wire.wire, limit=8*1024**2)
                     self.assertEqual(prepared[0].turn.schema_hash, changed.turn.schema_hash)
-                    self.assertEqual(first['text'], wire['text'])
+                    self.assertEqual(first['input'][0], wire['input'][0])
                     self.assertEqual(first['prompt_cache_key'], wire['prompt_cache_key'])
                     self.assertIn('page cursor='+cursor, wire['input'][-1]['content'])
 
@@ -462,7 +466,7 @@ class StateTests(unittest.TestCase):
                 for changed in prepared[1:]:
                     wire = decode(changed.wire.wire, limit=8*1024**2)
                     self.assertEqual(prepared[0].turn.schema_hash, changed.turn.schema_hash)
-                    self.assertEqual(first['text'], wire['text'])
+                    self.assertEqual(first['input'][0], wire['input'][0])
                     self.assertEqual(first['prompt_cache_key'], wire['prompt_cache_key'])
                     self.assertIn('revise: available', wire['input'][-1]['content'])
                     self.assertEqual(prepared[0].wire.wire.partition(b'QUESTION next-action\\n')[0],
@@ -486,13 +490,14 @@ class StateTests(unittest.TestCase):
         first = decode(wires[0], limit=8*1024**2)
         current = decode(wires[1], limit=8*1024**2)
         self.assertEqual(first['prompt_cache_key'], current['prompt_cache_key'])
-        self.assertEqual(first['text'], current['text'])
+        self.assertEqual(first['input'][0], current['input'][0])
+        self.assertEqual(first['input'], current['input'])
         self.assertEqual(wires[0].partition(b'QUESTION next-action\\n')[0],
                          wires[1].partition(b'QUESTION next-action\\n')[0])
         for wire in wires[2:]:
             current = decode(wire, limit=8*1024**2)
             self.assertEqual(first['prompt_cache_key'], current['prompt_cache_key'])
-            self.assertEqual(first['text'], current['text'])
+            self.assertEqual(first['input'][0], current['input'][0])
             self.assertEqual(first['input'][:-1], current['input'][:-1])
             self.assertNotEqual(first['input'][-1], current['input'][-1])
         disabled = replace(snapshot, services=Services())
@@ -515,13 +520,14 @@ class StateTests(unittest.TestCase):
                                    allowed_pins=('unused-result',))
                 _, prepared, _ = dispatch(snapshot, artifacts)
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
-                self.assertEqual(set(wire['outputSchema']['properties']['verdict']['enum']), expected)
+                self.assertEqual(set(response_schema(prepared)['properties']['verdict']['enum']), expected)
                 capabilities = next(m['text'] for m in wire['input'] if m['text'].startswith('CAPABILITIES '))
                 self.assertIn('Verdicts: accept, reject', capabilities)
                 for clutter in ('Helper modes', 'Candidate modes', 'direct_remaining', 'decomposition_remaining',
                                 'repair_remaining', 'retrieval_remaining', 'probe_remaining', 'unused-'):
                     self.assertNotIn(clutter, capabilities)
-                self.assertEqual('research_remaining:' in capabilities, 'research' in expected)
+                self.assertNotIn('_remaining:', capabilities)
+                self.assertNotIn('web_calls:', capabilities)
 
     def test_named_retrieval_can_progress_and_unavailable_actions_still_fail_admission(self):
         artifacts, snapshot = fixture()
@@ -585,6 +591,9 @@ class StateTests(unittest.TestCase):
                 artifacts, snapshot = fixture()
                 snapshot = replace(snapshot, usage=replace(snapshot.usage, stop_requests=used))
                 dispatched, prepared, _ = dispatch(snapshot, artifacts)
+                for removed in (b'Stop mode:', b'request independent review', b'reviewed requests',
+                                b'reviewer approval', b'reviewed request limit'):
+                    self.assertNotIn(removed, prepared.wire.wire)
                 result = self.strategy.on_model(snapshot, self.policy, dispatched,
                     admitted(artifacts, dispatched, response(action)), artifacts)
                 self.assertTrue(result.stop_charge)
@@ -599,7 +608,6 @@ class StateTests(unittest.TestCase):
                     self.assertEqual(result.reason, 'stop_request_limit_exceeded')
                     self.assertFalse(result.work)
                     self.assertIsNone(result.stop_request)
-                    self.assertIn(b'stops this node immediately (reviewed request limit reached)', prepared.wire.wire)
                     self.assertFalse(self.strategy.plan(replace(snapshot, stopped=True), self.policy).work)
 
     def test_stop_rejection_requires_and_retains_continuation_feedback(self):
@@ -802,9 +810,9 @@ class StateTests(unittest.TestCase):
         exhausted_dispatch, prepared, _ = dispatch(exhausted, artifacts)
         wire = decode(prepared.wire.wire, limit=8*1024**2)
         actions = {a['properties']['mode']['enum'][0]
-                   for a in wire['outputSchema']['properties']['action']['anyOf']}
+                   for a in response_schema(prepared)['properties']['action']['anyOf']}
         self.assertIn('revise', actions)
-        self.assertIn('revise: unavailable (direct allowance exhausted)', wire['input'][-1]['text'])
+        self.assertIn('revise: unavailable (direct mode unavailable)', wire['input'][-1]['text'])
         with self.assertRaisesRegex(ValueError, 'direct_allowance_exhausted'):
             self.strategy.on_model(exhausted, self.policy, exhausted_dispatch,
                 admitted(artifacts, exhausted_dispatch, response(action)), artifacts, submission_id=uid('new'))

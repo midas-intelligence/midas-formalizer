@@ -4,7 +4,6 @@ The prompt owner produces exact wire bytes. This parser validates their protocol
 shape and incoming frames. Strings are scanned in C and unescaped in bounded
 pieces; large plain text never passes through a JSON library.
 """
-import re
 from ..domain import DomainError
 from ..domain.wire import decode
 
@@ -33,10 +32,8 @@ def validate_wire(request, raw, setup=None):
         raise DomainError('Expected wire object')
     route = request.route
     if route.transport == 'codex':
-        if set(w) != {'input', 'outputSchema'} or type(w['input']) is not list or not w['input']:
-            raise DomainError('Expected frozen turn input and native output schema')
-        if type(w['outputSchema']) is not dict or w['outputSchema'].get('type') != 'object':
-            raise DomainError('Expected an object output schema from prompt')
+        if set(w) != {'input'} or type(w['input']) is not list or not w['input']:
+            raise DomainError('Expected frozen text turn input')
         for block in w['input']:
             if type(block) is not dict or set(block) != {'type', 'text'} or block['type'] != 'text' or type(block['text']) is not str:
                 raise DomainError('Only text turn inputs are supported')
@@ -44,24 +41,11 @@ def validate_wire(request, raw, setup=None):
         if type(config) is not dict or set(config) != {'baseInstructions'} or type(config['baseInstructions']) is not str:
             raise DomainError('Expected complete frozen base instructions')
     else:
-        allowed = {'model', 'input', 'stream', 'store', 'reasoning', 'max_output_tokens', 'text',
+        allowed = {'model', 'input', 'stream', 'store', 'reasoning', 'max_output_tokens',
                    'prompt_cache_key', 'prompt_cache_options'}
         if (set(w) - allowed or w.get('model') != route.model or w.get('stream') is not True
                 or w.get('store') is not False or type(w.get('input')) is not list or not w['input']):
             raise DomainError('Expected stateless streaming Responses request for saved model')
-        text_config = w.get('text')
-        if type(text_config) is not dict or set(text_config) != {'format'}:
-            raise DomainError('Responses requires an explicit JSON output format')
-        output_format = text_config['format']
-        if (type(output_format) is not dict or output_format.get('type') != 'json_schema'
-                or set(output_format) - {'type', 'name', 'schema', 'strict', 'description'}
-                or output_format.get('strict') is not True
-                or type(output_format.get('schema')) is not dict
-                or output_format['schema'].get('type') != 'object'
-                or type(output_format.get('name')) is not str
-                or re.fullmatch(r'[A-Za-z0-9_-]{1,64}', output_format['name']) is None
-                or 'description' in output_format and type(output_format['description']) is not str):
-            raise DomainError('Expected a named strict JSON schema from prompt')
         for message in w['input']:
             if (type(message) is not dict or set(message) != {'role', 'content'}
                     or message['role'] not in ('system', 'developer', 'user', 'assistant')):

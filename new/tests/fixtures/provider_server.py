@@ -54,10 +54,9 @@ for line in sys.stdin:
         result = {'thread':{'id':'thread-1'},'modelProvider':provider}
     elif method == 'turn/start':
         log.with_suffix('.turn').write_bytes(line.encode())
-        assert isinstance(params['outputSchema'], dict)
-        assert params['outputSchema']['type'] == 'object'
-        if mode == 'schema-rejected':
-            send({'id': message['id'], 'error': {'code': -32602, 'message': 'Unsupported outputSchema'}})
+        assert 'outputSchema' not in params
+        if mode == 'request-rejected':
+            send({'id': message['id'], 'error': {'code': -32602, 'message': 'Unsupported request'}})
             continue
         if mode == 'stderr':
             sys.stderr.write('x' * (4 * 1048576 + 1))

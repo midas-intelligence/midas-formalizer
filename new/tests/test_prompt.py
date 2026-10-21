@@ -10,7 +10,7 @@ from unittest.mock import patch
 from midas.domain import OwnerVersion
 from midas.domain.wire import decode
 from midas.prompt import Options, Prompt, Section, Snapshot, build, prover, researcher, reviewer, subject
-from midas.prompt.protocol import MAX_BYTES, obj, schema_bytes
+from midas.prompt.protocol import MAX_BYTES, SCHEMA_INSTRUCTIONS, obj, schema_bytes
 from midas.prompt.wire import _prefix
 from midas.provider import ModelRequest, Route
 from midas.provider.wire import validate_wire
@@ -130,7 +130,8 @@ class PromptTests(unittest.TestCase):
                 self.assertEqual(cache_prefixes(before), cache_prefixes(after))
                 for snapshot_, result in ((turn, before), (changed, after)):
                     wire = decode(result.wire, limit=MAX_BYTES)
-                    self.assertEqual(wire['input'][0]['content'][0]['text'].encode(), reviewer.INSTRUCTIONS)
+                    self.assertEqual(wire['input'][0]['content'][0]['text'].encode(),
+                                     reviewer.INSTRUCTIONS + SCHEMA_INSTRUCTIONS + reviewer.SCHEMA)
                     # Every review section remains intact after the final marker,
                     # including large interfaces and evidence before the candidate.
                     expected = [s.kind.upper() + ' ' + s.name + '\n' + s.text.decode()
@@ -202,28 +203,28 @@ class PromptTests(unittest.TestCase):
                     wire = decode(output.wire, limit=MAX_BYTES)
                     if route.transport == 'codex':
                         setup = decode(output.setup, limit=MAX_BYTES)['baseInstructions']
-                        self.assertEqual(setup, role.INSTRUCTIONS.decode())
-                        self.assertEqual(wire['outputSchema'], decode(role.SCHEMA, limit=16384))
-                        self.assertIn(b'"outputSchema":' + role.SCHEMA, output.wire)
+                        self.assertEqual(setup.encode(), role.INSTRUCTIONS + SCHEMA_INSTRUCTIONS + role.SCHEMA)
+                        self.assertNotIn('outputSchema', wire)
                     else:
-                        self.assertEqual(wire['text']['format']['schema'], decode(role.SCHEMA, limit=16384))
-                        self.assertEqual(wire['input'][0]['content'], role.INSTRUCTIONS.decode())
-                        self.assertTrue(wire['text']['format']['strict'])
+                        self.assertNotIn('text', wire)
+                        self.assertEqual(wire['input'][0]['content'].encode(),
+                                         role.INSTRUCTIONS + SCHEMA_INSTRUCTIONS + role.SCHEMA)
                         self.assertFalse(wire['store'])
                         self.assertTrue(wire['stream'])
 
-    def test_codex_requires_native_schema_in_turn_not_instructions(self):
+    def test_codex_accepts_text_input_and_rejects_native_schema(self):
         output = build(snapshot(), Options('codex', 'model'), renderer=prover.render)
         artifacts = Artifacts()
         request = ModelRequest(Route('openai', 'model', 'codex'), 'prover', LIMITS,
                                artifacts.save(output.wire), artifacts.save(output.setup))
         base = b'{"input":[{"type":"text","text":"Return JSON matching the schema in instructions"}]'
-        for suffix in (b'}', b',"outputSchema":null}', b',"outputSchema":{}}',
+        validate_wire(request, base + b'}', output.setup)
+        for suffix in (b',"outputSchema":null}', b',"outputSchema":{}}',
                        b',"outputSchema":{"type":"array"}}'):
             with self.subTest(suffix=suffix), self.assertRaises(ValueError):
                 validate_wire(request, base + suffix, output.setup)
 
-    def test_replacing_schema_changes_native_wire_and_cache_identity(self):
+    def test_replacing_schema_changes_instructions_and_cache_identity(self):
         turn = snapshot()
         def alternative(turn):
             return replace(prover.render(turn), schema=schema_bytes(obj(proof={'type': 'string'})))
@@ -232,24 +233,24 @@ class PromptTests(unittest.TestCase):
                 transport, 'model', prompt_cache='explicit', cache_scope='a'*64)
             first = build(turn, options, renderer=prover.render)
             second = build(turn, options, renderer=alternative)
-            self.assertNotEqual(first.wire, second.wire)
             self.assertNotEqual(first.id, second.id)
             a, b = (decode(p.wire, limit=MAX_BYTES) for p in (first, second))
             if transport == 'codex':
-                self.assertEqual(first.setup, second.setup)
-                self.assertNotEqual(a['outputSchema'], b['outputSchema'])
+                self.assertNotEqual(first.setup, second.setup)
+                self.assertEqual(first.wire, second.wire)
             else:
-                self.assertEqual(a['input'], b['input'])
+                self.assertNotEqual(a['input'][0], b['input'][0])
+                self.assertEqual(a['input'][1:], b['input'][1:])
                 self.assertNotEqual(a['prompt_cache_key'], b['prompt_cache_key'])
 
-    def test_native_schema_counts_toward_turn_wire_limit(self):
+    def test_prompt_schema_counts_toward_setup_wire_limit(self):
         def render(turn):
             schema = schema_bytes(dict(obj(proof={'type': 'string'}), description='x'*3000))
             return Prompt('prover', 'bounded', 'bounded', b'Return a proof.', schema, turn.sections)
         turn = Snapshot((Section('subject', 'goal', b'True'),))
         output = build(turn, Options('codex', 'model'), renderer=render)
-        self.assertLess(len(output.setup), 1000)
-        self.assertGreater(len(output.wire), 3000)
+        self.assertGreater(len(output.setup), 3000)
+        self.assertLess(len(output.wire), 1000)
         with self.assertRaises(ValueError):
             build(turn, Options('codex', 'model', max_bytes=1000), renderer=render)
 
@@ -263,7 +264,8 @@ class PromptTests(unittest.TestCase):
         wire = decode(alternate.wire, limit=MAX_BYTES)
         self.assertEqual(wire['input'][1]['content'].splitlines()[0], 'QUESTION research-question')
         self.assertIn('Give only a proof.', wire['input'][0]['content'])
-        self.assertEqual(wire['text']['format']['name'], 'direct-proof-v1')
+        self.assertNotIn('text', wire)
+        self.assertTrue(wire['input'][0]['content'].endswith(alternative(frozen).schema.decode()))
         self.assertNotEqual(default.id, alternate.id)
         # A later renderer change cannot alter already frozen requests.
         self.assertEqual(default, build(frozen, options, renderer=prover.render))

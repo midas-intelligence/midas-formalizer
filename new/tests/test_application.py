@@ -166,14 +166,20 @@ class Contracts(unittest.TestCase):
             {declaration.constant: self.selected.signatures[0]}, inputs)
         with self.start() as run:
             snapshot = run.workflow.snapshot(run.writer, OwnerVersion(self.selected.identities[0].id, 0))
-            for inherited in ((), ('Extra.Geometry',)):
-                context = replace(snapshot.context, imports=('Extra.Geometry',), inherited_imports=inherited)
+            for imports, inherited in (((), ()), (('Extra.Geometry',), ()),
+                                       (('Extra.Geometry',), ('Extra.Geometry',))):
+                context = replace(snapshot.context, imports=imports, inherited_imports=inherited)
                 version = replace(snapshot.version, context=artifact(context.payload).reference)
                 display = run.workflow.display(run.writer, replace(snapshot, context=context, version=version))
                 sections = {s.name: s.text for s in display.sections}
                 self.assertEqual(sections['source-prefix'], prefix)
                 self.assertIn(b'imports in SOURCE source-prefix are already active', sections['imports'])
-                self.assertIn(b'Additional prepared modules available for import: Extra.Geometry', sections['imports'])
+                self.assertEqual(b'Additional prepared modules available for import: Extra.Geometry' in
+                                 sections['imports'], bool(imports))
+                self.assertEqual(b'the source imports and their transitive dependencies remain active' in
+                                 sections['imports'], not imports)
+                self.assertNotIn(b'available for import: none', sections['imports'])
+                self.assertIn(b'Develop missing intermediate lemmas as proof obligations.', sections['imports'])
                 self.assertNotIn(b'Inherited imports: none', sections['imports'])
                 self.assertEqual(b'Additional active imports inherited from parent: Extra.Geometry' in
                                  sections['imports'], bool(inherited))

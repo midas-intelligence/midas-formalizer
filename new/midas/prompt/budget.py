@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from ..domain import DomainError
 from ..domain.records import natural
-from .protocol import Section
+from .protocol import SCHEMA_INSTRUCTIONS, Section
 
 
 def section_bytes(section):
@@ -13,7 +13,7 @@ def section_bytes(section):
 
 
 def input_bytes(prompt):
-    return len(prompt.instructions) + len(prompt.schema) + sum(map(section_bytes, prompt.sections))
+    return len(prompt.instructions) + len(SCHEMA_INSTRUCTIONS) + len(prompt.schema) + sum(map(section_bytes, prompt.sections))
 
 
 def byte_budget(tokens, sample=None):

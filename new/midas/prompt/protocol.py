@@ -11,6 +11,7 @@ from ..source import present_subject
 
 MAX_BYTES = 8 * 1024**2
 CONTROL_BYTES = 16 * 1024
+SCHEMA_INSTRUCTIONS = b'\n\nRESPONSE SCHEMA\nReturn one JSON object matching this schema, without Markdown fences:\n'
 KINDS = ('source', 'definitions', 'subject', 'interfaces', 'candidate', 'history',
          'memory', 'capabilities', 'evidence', 'feedback', 'question')
 
@@ -186,6 +187,6 @@ the exact checked source version; compare old excerpts with current text first.
 Candidate fragment paths identify exact editable strings. In a fenced fragment,
 the opening fence and following newline, and the one newline before the closing
 fence, are framing. Preserve everything between, including extra trailing newlines.
-Capabilities and remaining allowances are supplied in this snapshot. A schema
-describes syntax, not permission to use unavailable tools or exhausted budgets.
+Available capabilities are supplied in this snapshot. A schema describes syntax,
+not permission to use unavailable actions or tools.
 """

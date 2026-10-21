@@ -6,7 +6,7 @@ import re
 
 from ..domain import DomainError
 from ..domain.encoding import canonical, hash_field, record_parts
-from .protocol import MAX_BYTES, Prompt, Renderer, Snapshot
+from .protocol import MAX_BYTES, SCHEMA_INSTRUCTIONS, Prompt, Renderer, Snapshot
 
 _SPECIAL = re.compile(rb'[\x00-\x08\x0b\x0c\x0e-\x1f]')
 _ESCAPES = {i: ('\\u%04x' % i).encode() for i in range(32)}
@@ -146,7 +146,7 @@ def _breakpoints(prompt):
 def _cache_key(role, renderer, contract, instructions, schema, options):
     digest = sha256(canonical([options.cache_scope, options.model, options.reasoning,
                               options.max_output_tokens, role, renderer, contract]))
-    for part in (instructions, schema):
+    for part in (instructions, SCHEMA_INSTRUCTIONS, schema):
         hash_field(digest, part)
     return 'midas-prefix-' + digest.hexdigest()[:40]
 
@@ -157,7 +157,7 @@ def _prefix(role, renderer, contract, instructions, schema, options):
     writer = _Writer(options.max_bytes)
     if options.transport == 'codex':
         writer.add(b'{"baseInstructions":')
-        writer.string((instructions,))
+        writer.string((instructions, SCHEMA_INSTRUCTIONS, schema))
         writer.add(b'}')
     else:
         controls = dict(model=options.model, stream=True, store=False)
@@ -169,14 +169,9 @@ def _prefix(role, renderer, contract, instructions, schema, options):
             controls.update(prompt_cache_key=_cache_key(role, renderer, contract, instructions, schema, options),
                             prompt_cache_options=dict(mode='explicit', ttl='30m'))
         writer.add(canonical(controls)[:-1])
-        writer.add(b',"text":{"format":{"type":"json_schema","name":')
-        if re.fullmatch('[A-Za-z0-9_-]{1,64}', contract) is None:
-            raise DomainError('Invalid Responses schema name')
-        writer.string((contract.encode(),))
-        writer.add(b',"strict":true,"schema":')
-        writer.add(schema)
-        writer.add(b'}},"input":[{"role":"developer","content":')
-        _content(writer, (instructions,), breakpoint=options.prompt_cache == 'explicit')
+        writer.add(b',"input":[{"role":"developer","content":')
+        _content(writer, (instructions, SCHEMA_INSTRUCTIONS, schema),
+                 breakpoint=options.prompt_cache == 'explicit')
         writer.add(b'}')
     return writer.finish()
 
@@ -201,9 +196,7 @@ def build(snapshot: Snapshot, options: Options, *, renderer: Renderer,
     prefix = _prefix(prompt.role, prompt.renderer, prompt.contract, prompt.instructions, prompt.schema, options)
     if options.transport == 'codex':
         setup = prefix
-        writer.add(b'{"outputSchema":')
-        writer.add(prompt.schema)
-        writer.add(b',"input":[')
+        writer.add(b'{"input":[')
         for index, section in enumerate(prompt.sections):
             writer.add(b',' if index else b'')
             writer.add(b'{"type":"text","text":')

@@ -47,8 +47,11 @@ proof; make remaining gaps explicit. These plans accompany the child in later wo
 A new proof action replaces the proposed decomposition and drops its children.
 To keep them, return a corrected decomposition including its children and glue.
 
-Missing library foundations are a reason to investigate or expose the next useful
-mathematical layer. Do not invent children merely to spend attempts. When required
+Missing library support, an end-to-end implementation, or completed descendant
+proofs is not by itself a reason to stop. Assess a substantive next decomposition
+layer with precise claims, complete conditional glue, and a concrete mathematical
+advance. Difficult children can decompose again. Do not invent children merely
+to spend attempts. When required
 by the target, account for construction invariants, correctness and cost bounds
 (including composition overhead), analytic domains, constants and endpoint/equality
 cases, or finite-certificate existence, verification and coverage.
@@ -123,15 +126,14 @@ Use research only when enabled in Helper modes, for a mathematical question and
 at most six public source URLs.
 Use page only with an offered cursor to read an additional page outside this prompt.
 
-Use stop to request independent review when you believe this exact node cannot
-be proved. Explain why in rationale. For a suspected false statement, missing
-assumption or context mismatch, include an objection with category and concrete
-evidence; otherwise use null objection. CAPABILITIES shows the remaining reviewed
-requests. Within that allowance, the node continues unless the reviewer accepts
-stopping. Once it is exhausted, another stop request stops this node immediately
-without review; its statement objection is not treated as accepted.
-A rejection supplies feedback for your next action. An accepted statement
-objection lets current parent decompositions reconsider their use of this node.
+Use stop when you believe this exact node cannot be proved. Explain why in
+rationale. Before stopping, identify the best next decomposition layer considered
+and its actual obstacle or exhausted resource. Missing library lemmas or an
+unfinished implementation alone do not establish such an obstacle.
+For a suspected false statement, missing assumption or context mismatch, include
+an objection with category and concrete mathematical evidence about the exact
+statement; otherwise use null objection. Exhaustion, resource failures and lack
+of progress are not statement objections.
 
 memory_update is null or concise strategy/lessons and evidence pins to retain.
 Pins may use result IDs shown in tool result sections or offered in CAPABILITIES.

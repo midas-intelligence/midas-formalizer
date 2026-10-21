@@ -102,38 +102,27 @@ class Strategy:
         if work.operation in ('review', 'review_stop'):
             details = 'Verdicts: accept, reject'
             if 'research' in helpers:
-                details += (', research' + '\nresearch_remaining: ' +
-                            str(capabilities.research_remaining) + '\nweb_calls: ' + str(capabilities.web_calls))
+                details += ', research'
             else:
                 details += '\nresearch: disabled'
             if work.operation == 'review_stop':
                 details += '\nReview subject: stop request; accept stops this node; reject continues proof work.'
         else:
-            allowances = [f'{name}: {getattr(capabilities, name)}' for name in (
-                'direct_remaining', 'decomposition_remaining', 'repair_remaining')]
-            allowances.extend(f'{name}: {getattr(capabilities, name) if mode in helpers else 0}'
-                for mode, name in (('retrieve', 'retrieval_remaining'), ('probe', 'probe_remaining'),
-                                   ('research', 'research_remaining')))
+            availability = []
             if len(snapshot.context.subjects) != 1:
-                allowances.append('proof/decomposition: unavailable (requires one subject); use candidate')
+                availability.append('proof/decomposition: unavailable (requires one subject); use candidate')
             if snapshot.base is None:
-                allowances.append('revise: unavailable (no existing candidate)')
+                availability.append('revise: unavailable (no existing candidate)')
             elif snapshot.base.mode not in modes:
-                allowances.append(f'revise: unavailable ({snapshot.base.mode} allowance exhausted)')
+                availability.append(f'revise: unavailable ({snapshot.base.mode} mode unavailable)')
             else:
-                allowances.append('revise: available')
-            if capabilities.web_calls:
-                allowances.append(f'web_calls: {capabilities.web_calls}')
-            else:
-                allowances.append('research: disabled')
+                availability.append('revise: available')
+            if not capabilities.web_calls:
+                availability.append('research: disabled')
             if not snapshot.cursors:
-                allowances.append('page: unavailable (no additional pages outside this prompt)')
-            remaining_stops = max(0, policy.config.mathematics.stop_requests - snapshot.usage.stop_requests)
-            stop_mode = (f'request reviewer approval ({remaining_stops} reviewed requests remaining; '
-                         'a further request stops this node immediately)' if remaining_stops else
-                         'stops this node immediately (reviewed request limit reached)')
-            details = ('Candidate modes: ' + ', '.join(modes) + '\nStop mode: ' + stop_mode + '\nHelper modes: ' +
-                ', '.join(helpers) + '\n' + '\n'.join(allowances))
+                availability.append('page: unavailable (no additional pages outside this prompt)')
+            details = ('Candidate modes: ' + ', '.join(modes) + '\nHelper modes: ' +
+                ', '.join(helpers) + '\n' + '\n'.join(availability))
             if snapshot.cursors:
                 details += '\nSaved evidence not included in this prompt:\n'+'\n'.join(
                     f'page cursor={cursor}' for cursor in snapshot.cursors)
