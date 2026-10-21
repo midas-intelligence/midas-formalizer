@@ -278,7 +278,7 @@ class Contracts(unittest.TestCase):
                            prompt_cache='explicit')
         invalid = (
             ('recall', dict(mode='recall', rationale='Inspect the definition.', result_id='Nat.add'),
-             b'recall requires an advertised saved result_id'),
+             b'Unknown strategy action'),
             ('research', dict(mode='research', rationale='Find the definition.', question='What is Nat.add?', urls=[]),
              b'missing_research_configuration'),
             ('page', dict(mode='page', rationale='Read the next page.', cursor='missing:1'),
@@ -336,6 +336,7 @@ class Contracts(unittest.TestCase):
             self.assertGreater(len(payload), 100000)
 
     def test_live_transport_uses_the_same_controller_and_candidate_workflow(self):
+        from midas.application import token_usage
         from midas.provider import ModelOutput, Route
         from midas.status import record, terminal
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses',
@@ -351,6 +352,12 @@ class Contracts(unittest.TestCase):
             self.assertEqual(self.finish(run).exit_code, 0)
             self.assertEqual(len(calls), 1)
             self.assertEqual(run.writer.status_snapshot().accounting.actual, Usage(100, 20, 10, 240))
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            sample = token_usage.sample(run.writer, owner, 'prover', Route.from_config(route))
+            self.assertGreater(sample[0], 0)
+            self.assertEqual(sample[1], 100)
+            self.assertIsNone(token_usage.sample(run.writer, owner, 'reviewer', Route.from_config(route)))
+            self.assertIsNone(token_usage.sample(run.writer, owner, 'prover', Route.from_config(replace(route, model='other'))))
             run.writer.validate(force_artifacts=True)
         view = self.app.inspect(self.root/'run')
         self.assertEqual(record(view)['usage']['cost_microusd'], 240)
@@ -358,7 +365,52 @@ class Contracts(unittest.TestCase):
         with self.app.resume(self.root/'run') as run:
             self.assertEqual(self.finish(run).exit_code, 0)
             self.assertEqual(run.writer.status_snapshot().accounting.actual.cost_microusd, 240)
+            self.assertEqual(token_usage.sample(run.writer, owner, 'prover', Route.from_config(route)), sample)
         self.assertEqual(len(calls), 1)
+
+    def test_calibrated_token_window_reaches_provider_without_deleting_saved_pages(self):
+        from midas.application import records as r, token_usage
+        from midas.application.service import commit
+        from midas.application.workflow import Buffer
+        from midas.controller import Effect, artifact
+        from midas.provider import ModelOutput, Route
+        from midas.tools import Scope, prepare_archive
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses',
+                           input_token_budget=30000)
+        provider_route = Route.from_config(route)
+        calls = []
+        def transport(request, raw, *args):
+            calls.append(raw)
+            # Unknown usage must leave the previous usable sample intact.
+            return ModelOutput(raw=response(proof()))
+        self.app.transports = {provider_route.scope: transport}
+        with self.start(workflow='live', config=replace(Config(), prover=route)) as run:
+            reader, flow = run.writer, run.workflow
+            owner = flow.graph(reader).nodes[0].owner
+            _, state = r.owner_state(reader, owner.obligation_id)
+            buffer = Buffer()
+            archives = tuple(prepare_archive(Scope(owner, flow.selection.environment_id, state.context),
+                f'{i:064x}', (f'Evidence {i}\n'+'x'*4000,), (state.context,), buffer) for i in range(12))
+            indexes = tuple(artifact(a.payload) for a in archives)
+            evidence = tuple(a.pages[0] for a in archives)
+            commit(reader, 'evidence-and-usage', r.merge(
+                Effect(artifacts=(*buffer.artifacts, *indexes)),
+                r.record(reader, 'application.archives', owner.obligation_id, [r.ref(a.reference) for a in indexes]),
+                r.save_owner(reader, owner.obligation_id, replace(state, evidence=evidence)),
+                r.record(reader, 'application.prompt_usage', owner.obligation_id+':prover',
+                         [provider_route.scope, 1000, 500])))
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn(archives[0].id.encode(), calls[0])
+            self.assertIn(archives[-1].id.encode(), calls[0])
+            self.assertGreater(calls[0].count(b'Result ID:'), 2)
+            self.assertLess(calls[0].count(b'Result ID:'), 12)
+            self.assertIn(b'older evidence page(s) omitted', calls[0])
+            self.assertEqual(r.owner_state(reader, owner.obligation_id)[1].evidence, evidence)
+            self.assertEqual(token_usage.sample(reader, owner, 'prover', provider_route), (1000, 500))
+        with self.app.resume(self.root/'run') as run:
+            self.assertEqual(token_usage.sample(run.writer, owner, 'prover', provider_route), (1000, 500))
+            self.assertEqual(r.owner_state(run.writer, owner.obligation_id)[1].evidence, evidence)
 
     def test_finite_budget_with_unknown_projection_returns_blocked(self):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
@@ -720,7 +772,7 @@ class Contracts(unittest.TestCase):
 
     def test_displayed_tool_pages_and_retrieval_choices_do_not_overlap(self):
         from midas.application import records as r
-        from midas.application.helpers import recall_effect
+        from midas.application.helpers import page_effect
         from midas.application.service import commit
         from midas.application.workflow import Buffer
         from midas.controller import Effect, artifact
@@ -735,7 +787,7 @@ class Contracts(unittest.TestCase):
                 buffer = Buffer()
                 declaration = 'def useful : Nat := 1'
                 archive = prepare_archive(Scope(owner, flow.selection.environment_id, state.context),
-                    'a'*64, (declaration, 'x'*30000) if large else (declaration,), (state.context,), buffer)
+                    'a'*64, (declaration, 'x'*300000) if large else (declaration,), (state.context,), buffer)
                 saved = artifact(archive.payload)
                 state = replace(state, evidence=(archive.pages[0], archive.pages[0]))
                 commit(reader, 'tool-result', r.merge(Effect(artifacts=(*buffer.artifacts, saved)),
@@ -749,7 +801,6 @@ class Contracts(unittest.TestCase):
                 self.assertIn(f'Result ID: {archive.id}\nPage 1 of {len(archive.pages)}.'.encode(), results[0].text)
                 self.assertEqual(results[0].text.count(declaration.encode()), 1)
                 self.assertEqual(snapshot.allowed_pins, (archive.id,))
-                self.assertEqual(snapshot.recallable, ())
                 self.assertEqual(snapshot.cursors, tuple(f'{archive.id}:{i}' for i in range(1, len(archive.pages))))
                 work = flow.strategy.plan(snapshot, flow.policy).work[0]
                 prepared = flow.strategy.prepare_model(snapshot, flow.policy, work, display, Options('codex', 'fixture'))
@@ -761,25 +812,52 @@ class Contracts(unittest.TestCase):
                     self.assertIn(b'Complete result included below.', results[0].text)
                     self.assertNotIn(b'Saved evidence not included', capabilities)
 
-                # A replayed delivery must not append the page again.
-                recall = Work('recall', owner, detail=r.pack([archive.id, prepared.turn.id]))
-                unchanged, _ = recall_effect(flow, reader, snapshot, prepared.turn, recall, state)
-                self.assertEqual(unchanged, state)
                 if large:
-                    cursor = snapshot.cursors[0]
-                    page = Work('page', owner, detail=r.pack([cursor, prepared.turn.id]))
-                    updated, _ = recall_effect(flow, reader, snapshot, prepared.turn, page, state)
-                    self.assertEqual(updated.evidence, archive.pages[:2])
-                    commit(reader, 'next-page', r.save_owner(reader, owner.obligation_id, updated))
-                    self.assertNotIn(cursor, flow.snapshot(reader, owner).cursors)
+                    self.assertGreater(len(archive.pages), 8)
+                    for ordinal in range(1, len(archive.pages)):
+                        cursor = f'{archive.id}:{ordinal}'
+                        self.assertIn(cursor, snapshot.cursors)
+                        page = Work('page', owner, detail=r.pack([cursor, prepared.turn.id]))
+                        state, _ = page_effect(flow, reader, snapshot, prepared.turn, page, state)
+                        self.assertEqual(state.evidence, archive.pages[:ordinal+1])
+                        # A replayed delivery must not append the page again.
+                        unchanged, _ = page_effect(flow, reader, snapshot, prepared.turn, page, state)
+                        self.assertEqual(unchanged, state)
+                        commit(reader, f'page-{ordinal}', r.save_owner(reader, owner.obligation_id, state))
+                        snapshot = replace(flow.snapshot(reader, owner), workflow='live')
+                        self.assertNotIn(cursor, snapshot.cursors)
+                    self.assertEqual(snapshot.cursors, ())
+                    display = flow.display(reader, snapshot)
+                    results = [s for s in prover.render(display).sections if s.kind == 'evidence']
+                    self.assertEqual(len(results), len(archive.pages))
+                    self.assertIn(declaration.encode(), results[0].text)
+                    self.assertNotIn(b'omitted', b''.join(s.text for s in results))
 
-                # Once a first page leaves the prompt, it is available for recall.
-                offscreen = replace(state, evidence=())
-                commit(reader, 'offscreen', r.save_owner(reader, owner.obligation_id, offscreen))
-                snapshot = replace(flow.snapshot(reader, owner), workflow='live')
-                self.assertEqual(snapshot.recallable, (archive.id,))
-                restored, _ = recall_effect(flow, reader, snapshot, prepared.turn, recall, offscreen)
-                self.assertEqual(restored.evidence, (archive.pages[0],))
+    def test_delivered_results_and_archive_labels_survive_growth_and_resume(self):
+        from midas.application import helpers, records as r
+        from midas.prompt import prover
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        config = replace(Config(), prover=route, helpers=replace(Config().helpers, retrieval=25))
+        retrieve = dict(mode='retrieve', rationale='Inspect the declaration.', names=['Nat.add'],
+                        queries=[], backends=[])
+        script = (('prover', response(retrieve)),)*25 + (('prover', response(proof())),)
+        with self.start(workflow='scripted', config=config, script=script) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            archives = helpers.advertised(run.writer, owner)
+            self.assertEqual(len(archives), 25)
+            _, state = r.owner_state(run.writer, owner.obligation_id)
+            expected = tuple(a.pages[0] for a in archives)
+            self.assertEqual(state.evidence, expected)
+        with self.app.resume(self.root/'run') as run:
+            _, state = r.owner_state(run.writer, owner.obligation_id)
+            self.assertEqual(state.evidence, expected)
+            snapshot = run.workflow.snapshot(run.writer, owner)
+            sections = prover.render(run.workflow.display(run.writer, snapshot)).sections
+            evidence = [s for s in sections if s.kind == 'evidence']
+            self.assertEqual(len(evidence), 25)
+            for section, archive in zip(evidence, archives):
+                self.assertIn(f'Result ID: {archive.id}'.encode(), section.text)
 
     def test_retrieval_search_lookup_and_research_resume_the_prover(self):
         from midas.application import helpers, records as r

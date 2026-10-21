@@ -13,7 +13,7 @@ from ..strategy import Context
 from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retrieve, Search,
     SearchResult, SourceIndex, Stage, StageEvidence, admit_checked, admit_research, continue_retrieval,
     lookup_sources, prepare_archive, probe_summary, search_stages, search_summary)
-from . import records as r
+from . import records as r, token_usage
 
 
 def begin(flow, reader, turn, plan, artifacts=(), parent=None):
@@ -57,7 +57,9 @@ def lower(flow, reader, stage, inputs=None):
             Section('capabilities', 'web-allowance', f'At most {action.web_calls} web calls.'.encode())))
         renderer = (lambda snapshot: replace(researcher.render(snapshot),
             instructions=flow.instructions['researcher'])) if 'researcher' in flow.instructions else researcher.render
-        rendered = build(display, options, renderer=renderer)
+        rendered = build(display, options, renderer=renderer,
+            input_token_budget=flow.policy.config.research.input_token_budget,
+            token_sample=token_usage.sample(reader, owner, 'research', route))
         wire = r.wire_artifact(rendered.wire, stage.key)
         setup = artifact(rendered.setup) if rendered.setup else None
         request = ModelRequest(route, 'research', limits, wire.reference, setup.reference if setup else None)
@@ -65,6 +67,7 @@ def lower(flow, reader, stage, inputs=None):
             request.payload, request.inputs, display.owners,
             ResourceLimits(limits.invocation_ms, flow.policy.config.local.memory_mib,
                            limits.output_bytes, limits.event_bytes+16384), binding, helper='research'),
+            token_usage.prepare(reader, stage.key, owner, 'research', route, rendered),
             Effect(artifacts=tuple(a for a in (wire, setup) if a)))
         return r.merge(result, flow.script.bind(reader, request)) if flow.script else result
     context = Context.load(r.read(reader, state.context, 8*1024**2))
@@ -201,11 +204,11 @@ def reduce(flow, reader, invocation, accepted, binding):
     archive_data = artifact(archive.payload)
     _, state = r.owner_state(reader, request.scope.owner.obligation_id)
     archives = r.value(reader, 'application.archives', request.scope.owner.obligation_id) or []
-    archives = (archives + [r.ref(archive_data.reference)])[-24:]
+    archives = archives + [r.ref(archive_data.reference)]
     effects = [*extra, Effect(artifacts=(*buffer.artifacts, archive_data)),
         r.record(reader, 'application.archives', request.scope.owner.obligation_id, archives),
         r.save_owner(reader, request.scope.owner.obligation_id, replace(state,
-            evidence=tuple(dict.fromkeys((*state.evidence, archive.pages[0])))[-8:])),
+            evidence=tuple(dict.fromkeys((*state.evidence, archive.pages[0]))))),
         r.record(reader, 'application.pending', request.scope.owner.obligation_id, None),
         r.record(reader, 'application.helpers', key, dict(saved, completed=True))]
     if saved['parent']:
@@ -221,16 +224,16 @@ def advertised(reader, owner):
     return tuple(Archive.load(r.read(reader, r.unref(ref))) for ref in refs)
 
 
-def recall_effect(flow, reader, snapshot, turn, work, state):
+def page_effect(flow, reader, snapshot, turn, work, state):
     key = codec.load_record(work.detail, limit=65536)[0]
     archive = next(a for a in advertised(reader, snapshot.version.owner) if key.split(':')[0] == a.id)
-    displayed = set(state.evidence[-8:])
-    result = flow.strategy.on_recall(snapshot, turn, work, archive, reader,
+    displayed = set(state.evidence)
+    result = flow.strategy.on_page(snapshot, turn, work, archive, reader,
         delivered=lambda cursor: archive.pages[int(cursor.rsplit(':', 1)[1])] in displayed)
     if result.page is None:
         return state, Effect()
     page = result.page
-    return replace(state, evidence=tuple(dict.fromkeys((*state.evidence, archive.pages[page.ordinal])))[-8:]), Effect()
+    return replace(state, evidence=tuple(dict.fromkeys((*state.evidence, archive.pages[page.ordinal])))), Effect()
 
 
 _REVIEW_NAME = re.compile(r"[^\W\d][\w'?!]*(?:\.[^\W\d][\w'?!]*)*")

@@ -8,7 +8,7 @@ from ..domain.records import instance
 from ..policy import Policy
 from ..prompt import Section, Snapshot as Display, build, prover, reviewer
 from ..tools import (Backend, HelperRequest, Probe, Research, Retrieve, Scope,
-                     expand_probe_bodies, finish_helper, plan_helper, recall)
+                     expand_probe_bodies, finish_helper, plan_helper, read_page)
 from .candidates import expand, revise, supplied
 from .memory import Observation, pack, update_memory
 from .protocol import CONTRACTS, RESPONSE_BYTES, interpret
@@ -78,7 +78,7 @@ class Strategy:
             return result('mathematical_allowance_exhausted')
         return result(work=(_work(snapshot, 'revise' if snapshot.base else 'generate'),))
 
-    def prepare_model(self, snapshot, policy, work, display, options, *, renderer=None):
+    def prepare_model(self, snapshot, policy, work, display, options, *, renderer=None, token_sample=None):
         """Render once and bind its exact schema/wire to the dispatched snapshot."""
         if work not in self.plan(snapshot, policy).work or work.operation not in ('generate', 'revise', 'review', 'review_stop'):
             raise ValueError('Model work is not ready in this snapshot')
@@ -98,7 +98,7 @@ class Strategy:
         capabilities = policy.capabilities(snapshot.usage, snapshot.services)
         modes = [mode for mode in ('direct', 'decomposition') if policy.candidate(mode, snapshot.usage).allowed]
         helpers = tuple(mode for mode in capabilities.available_modes
-            if (mode != 'recall' or snapshot.recallable) and (mode != 'page' or snapshot.cursors))
+            if mode != 'page' or snapshot.cursors)
         if work.operation in ('review', 'review_stop'):
             details = 'Verdicts: accept, reject'
             if 'research' in helpers:
@@ -123,16 +123,13 @@ class Strategy:
                                    f'web_calls: {capabilities.web_calls}'))
             else:
                 allowances.append('research: disabled')
-            if not snapshot.recallable:
-                allowances.append('recall: unavailable (no saved first pages outside this prompt)')
             if not snapshot.cursors:
                 allowances.append('page: unavailable (no additional pages outside this prompt)')
             details = ('Candidate modes: ' + ', '.join(modes) + '\nStop mode: request reviewer approval' + '\nHelper modes: ' +
                 ', '.join(helpers) + '\n' + '\n'.join(allowances))
-            if snapshot.recallable or snapshot.cursors:
-                details += '\nSaved evidence not included in this prompt:\n'+'\n'.join((
-                    *(f'recall result_id={key} (first page)' for key in snapshot.recallable),
-                    *(f'page cursor={cursor}' for cursor in snapshot.cursors)))
+            if snapshot.cursors:
+                details += '\nSaved evidence not included in this prompt:\n'+'\n'.join(
+                    f'page cursor={cursor}' for cursor in snapshot.cursors)
         sections = tuple(s for s in display.sections if s.kind != 'capabilities')
         name = 'strategy-capabilities'
         while name in {s.name for s in sections}:
@@ -159,7 +156,8 @@ class Strategy:
             # Revision availability belongs in capabilities so gaining a base
             # does not change the schema/cache key. Other actions remain filtered.
             prompt = replace(prompt, schema=schema)
-        wire = build(display, options, renderer=lambda _: prompt)
+        wire = build(display, options, renderer=lambda _: prompt,
+                     input_token_budget=getattr(policy.config, role).input_token_budget, token_sample=token_sample)
         turn = Turn(snapshot.version, work.operation, prompt.contract, sha256(prompt.schema).hexdigest(),
             sha256(wire.wire).hexdigest(), sha256(wire.setup).hexdigest() if wire.setup is not None else None,
             snapshot.base.id if snapshot.base else None,
@@ -222,15 +220,12 @@ class Strategy:
                              reason='stop_review_pending', stop_request=request)
         elif mode in ('retrieve', 'probe', 'research'):
             result = self._helper(snapshot, policy, dispatch.turn, mode, action)
-        elif mode in ('recall', 'page'):
+        elif mode == 'page':
             decision = policy.helper(mode, snapshot.usage, snapshot.services)
             if not decision.allowed:
                 raise ValueError(decision.reason)
-            key = action['result_id'] if mode == 'recall' else action['cursor']
-            if key not in (snapshot.recallable if mode == 'recall' else snapshot.cursors):
-                if mode == 'recall':
-                    raise ValueError('recall requires an advertised saved result_id. '
-                        'To inspect Lean declarations, use retrieve with names and empty queries/backends.')
+            key = action['cursor']
+            if key not in snapshot.cursors:
                 raise ValueError('page requires an advertised cursor for an undisplayed evidence page. '
                     'Use the evidence already shown or choose an enabled helper from CAPABILITIES.')
             result = Changes(snapshot.version, (_work(snapshot, mode, detail=pack([key, dispatch.turn.id])),))
@@ -291,21 +286,20 @@ class Strategy:
         change = finish_helper(plan, evidence, scope, searches=searches)
         return Changes(snapshot.version, _resume(snapshot, turn), evidence=change)
 
-    def on_recall(self, snapshot, turn, work, archive, reader, *, delivered=lambda key: False):
+    def on_page(self, snapshot, turn, work, archive, reader, *, delivered=lambda key: False):
         """Read one tools-validated page and propose its delivery with continuation."""
         from ..domain.encoding import load_record
         turn.validate_for(snapshot, continuation=True)
-        if work.operation not in ('recall', 'page') or work.owner != turn.version.owner:
+        if work.operation != 'page' or work.owner != turn.version.owner:
             raise ValueError('Unexpected evidence continuation')
         value = load_record(work.detail, limit=65536)
         if type(value) is not list or len(value) != 2 or value[1] != turn.id:
             raise ValueError('Evidence continuation belongs to another turn')
         key = value[0]
-        if (work.operation == 'recall' and key != archive.id
-                or work.operation == 'page' and not key.startswith(archive.id + ':')):
+        if not key.startswith(archive.id + ':'):
             raise ValueError('Evidence archive differs from requested result')
-        page = recall(archive, Scope(snapshot.version.owner, snapshot.environment_id, snapshot.version.context), reader,
-                      cursor=key if work.operation == 'page' else None, delivered=delivered)
+        page = read_page(archive, Scope(snapshot.version.owner, snapshot.environment_id, snapshot.version.context), reader,
+                         cursor=key, delivered=delivered)
         return Changes(snapshot.version, _resume(snapshot, turn), page=page,
                        reason='already_delivered' if page is None else None)
 

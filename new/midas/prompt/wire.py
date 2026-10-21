@@ -88,6 +88,7 @@ class WireRequest:
     wire: bytes
     setup: bytes | None
     snapshot: Snapshot = field(repr=False, compare=False)
+    input_bytes: int
     id: str = field(init=False)
 
     def __post_init__(self):
@@ -180,7 +181,8 @@ def _prefix(role, renderer, contract, instructions, schema, options):
     return writer.finish()
 
 
-def build(snapshot: Snapshot, options: Options, *, renderer: Renderer) -> WireRequest:
+def build(snapshot: Snapshot, options: Options, *, renderer: Renderer,
+          input_token_budget=None, token_sample=None) -> WireRequest:
     """No registry, model-name heuristics, ambient instructions, or runtime I/O.
 
     A caller can bind any pure renderer to each model. Freeze the returned bytes
@@ -191,6 +193,8 @@ def build(snapshot: Snapshot, options: Options, *, renderer: Renderer) -> WireRe
     prompt = renderer(snapshot)
     if not isinstance(prompt, Prompt) or not prompt.sections:
         raise DomainError('Renderer must return a nonempty Prompt')
+    from .budget import input_bytes, window
+    prompt = window(prompt, input_token_budget, token_sample)
     if prompt.role == 'researcher' and options.transport != 'codex':
         raise DomainError('Research requires the app-server transport')
     writer, setup = _Writer(options.max_bytes), None
@@ -214,4 +218,4 @@ def build(snapshot: Snapshot, options: Options, *, renderer: Renderer) -> WireRe
             _content(writer, _section(section), breakpoint=index in points)
             writer.add(b'}')
         writer.add(b']}')
-    return WireRequest(prompt.role, prompt.renderer, prompt.contract, writer.finish(), setup, snapshot)
+    return WireRequest(prompt.role, prompt.renderer, prompt.contract, writer.finish(), setup, snapshot, input_bytes(prompt))

@@ -378,7 +378,7 @@ class Policy:
 
     def helper(self, mode: str, owner: OwnerUsage, services: Services, *, units=1) -> Decision:
         natural(units, 'helper units', positive=True)
-        if mode in ('recall', 'page'):
+        if mode == 'page':
             return Decision()
         if mode not in ('research', 'retrieve', 'probe'):
             raise DomainError('Unknown helper mode')
@@ -393,7 +393,7 @@ class Policy:
         return Decision()
 
     def capabilities(self, owner: OwnerUsage, services: Services) -> Capabilities:
-        modes = tuple(mode for mode in ('research', 'retrieve', 'probe', 'recall', 'page')
+        modes = tuple(mode for mode in ('research', 'retrieve', 'probe', 'page')
                       if self.helper(mode, owner, services).allowed)
         repair = owner.repair_remaining if owner.repair_open and not owner.repair_suspended else 0
         return Capabilities(modes,

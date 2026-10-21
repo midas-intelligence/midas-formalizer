@@ -367,7 +367,7 @@ class StateTests(unittest.TestCase):
     def test_prompt_schema_filters_helpers_but_always_includes_revise(self):
         cases = (
             (Services(), OwnerUsage(), (), (), {'retrieve', 'probe'}),
-            (Services(), OwnerUsage(), ('result-1',), (), {'retrieve', 'probe', 'recall'}),
+            (Services(), OwnerUsage(), ('result-1',), (), {'retrieve', 'probe'}),
             (Services(research=True, research_web_calls=3), OwnerUsage(), ('result-1',), ('result-1:1',),
              set(prover.HELPER_MODES)),
             (Services(research=True, research_web_calls=3), OwnerUsage(research=7, retrieval=10, probe=6),
@@ -378,7 +378,7 @@ class StateTests(unittest.TestCase):
             with self.subTest(services=services, usage=usage, pins=pins):
                 artifacts, snapshot = fixture()
                 snapshot = replace(snapshot, services=services, usage=usage, allowed_pins=pins,
-                                   recallable=pins, cursors=cursors)
+                                   cursors=cursors)
                 _, prepared, _ = dispatch(snapshot, artifacts)
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
                 schema = wire['outputSchema']
@@ -392,8 +392,7 @@ class StateTests(unittest.TestCase):
                 advertised = next(line.removeprefix('Helper modes: ') for line in capabilities.splitlines()
                                   if line.startswith('Helper modes: '))
                 self.assertEqual(set(advertised.split(', ')) if advertised else set(), expected)
-                if not pins:
-                    self.assertIn('recall: unavailable (no saved first pages outside this prompt)', capabilities)
+                self.assertNotIn('recall', capabilities)
                 if not cursors:
                     self.assertIn('page: unavailable (no additional pages outside this prompt)', capabilities)
                 if not services.research:
@@ -460,7 +459,7 @@ class StateTests(unittest.TestCase):
             with self.subTest(services=services):
                 artifacts, snapshot = fixture(conditional=True)
                 snapshot = replace(snapshot, services=services, cursors=('unused-cursor',),
-                                   recallable=('unused-result',), allowed_pins=('unused-result',))
+                                   allowed_pins=('unused-result',))
                 _, prepared, _ = dispatch(snapshot, artifacts)
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
                 self.assertEqual(set(wire['outputSchema']['properties']['verdict']['enum']), expected)
@@ -586,7 +585,7 @@ class StateTests(unittest.TestCase):
         self.assertNotIn('recall', helpers)
         self.assertNotIn('Saved evidence not included', wire['input'][-1]['text'])
         action = dict(mode='recall', rationale='Read the displayed result again.', result_id='displayed-result')
-        with self.assertRaisesRegex(ValueError, 'advertised saved result_id'):
+        with self.assertRaisesRegex(ValueError, 'Unknown strategy action'):
             self.strategy.on_model(snapshot, self.policy, dispatched,
                 admitted(artifacts, dispatched, response(action)), artifacts)
         memory = dict(strategy='Use the displayed definition.', upsert=[], forget=[],
@@ -677,18 +676,18 @@ class StateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.strategy.on_check(snapshot, self.policy, check(value))
 
-    def test_recall_uses_advertised_pages_and_duplicate_delivery_resumes(self):
+    def test_page_uses_advertised_cursor_and_duplicate_delivery_resumes(self):
         artifacts, snapshot = fixture()
         scope = Scope(snapshot.version.owner, snapshot.environment_id, snapshot.version.context)
-        archive = prepare_archive(scope, 'a'*64, [{'answer': 'x'*20000}], (artifact('provenance'),), artifacts)
-        snapshot = replace(snapshot, allowed_pins=(archive.id,), recallable=(archive.id,))
+        archive = prepare_archive(scope, 'a'*64, [{'answer': 'x'*40000}], (artifact('provenance'),), artifacts)
+        snapshot = replace(snapshot, allowed_pins=(archive.id,), cursors=(archive.id+':1',))
         dispatched, _, _ = dispatch(snapshot, artifacts)
-        action = dict(mode='recall', rationale='Read the saved result.', result_id=archive.id)
+        action = dict(mode='page', rationale='Read the next page.', cursor=archive.id+':1')
         changes = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, response(action)), artifacts)
-        result = self.strategy.on_recall(snapshot, dispatched.turn, changes.work[0], archive, artifacts)
-        self.assertEqual(result.page.ordinal, 0)
+        result = self.strategy.on_page(snapshot, dispatched.turn, changes.work[0], archive, artifacts)
+        self.assertEqual(result.page.ordinal, 1)
         self.assertIsNotNone(result.page.next_cursor)
-        duplicate = self.strategy.on_recall(snapshot, dispatched.turn, changes.work[0], archive, artifacts, delivered=lambda key: True)
+        duplicate = self.strategy.on_page(snapshot, dispatched.turn, changes.work[0], archive, artifacts, delivered=lambda key: True)
         self.assertEqual(duplicate.reason, 'already_delivered')
         self.assertIsNone(duplicate.page)
         self.assertEqual(duplicate.work[0].operation, 'generate')

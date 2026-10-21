@@ -90,7 +90,6 @@ class Snapshot:
     allowed_pins: tuple[str, ...] = ()
     forbidden_names: tuple[str, ...] = ()
     cursors: tuple[str, ...] = ()
-    recallable: tuple[str, ...] = ()
     stop_request: 'StopRequest | None' = None
 
     def __post_init__(self):
@@ -126,14 +125,12 @@ class Snapshot:
                 child = self.graph.node(dependency.owner)
                 if child.environment_id != self.environment_id or child.interface != dependency.interface:
                     raise ValueError('Pending dependency differs from graph')
-        for values in (self.allowed_pins, self.forbidden_names, self.cursors, self.recallable):
+        for values in (self.allowed_pins, self.forbidden_names, self.cursors):
             items(values, str)
             if len(values) > 4096 or len(set(values)) != len(values):
                 raise ValueError('Invalid snapshot names')
             for value in values:
                 text(value, 1024)
-        if not set(self.recallable) <= set(self.allowed_pins):
-            raise ValueError('Recall result is not a saved evidence pin')
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +142,7 @@ class Work:
 
     def __post_init__(self):
         if self.operation not in ('generate', 'revise', 'review', 'review_stop', 'binding', 'proof', 'assemble',
-                                   'children', 'admit_candidate', 'recall', 'page', 'activate', 'joint'):
+                                   'children', 'admit_candidate', 'page', 'activate', 'joint'):
             raise ValueError('Unknown strategy work')
         instance(self.owner, OwnerVersion)
         if self.candidate_id is not None:

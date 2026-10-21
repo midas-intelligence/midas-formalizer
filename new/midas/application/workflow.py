@@ -16,7 +16,7 @@ from ..provider import Limits, ModelRequest, Route
 from ..storage import Changes
 from ..status import progress as committed_progress
 from ..strategy import Attempt, Context, Dispatch, Draft, Memory, Snapshot, StopRequest, Strategy, Turn, Version
-from . import candidates, records as r
+from . import candidates, records as r, token_usage
 
 
 class Buffer:
@@ -60,7 +60,8 @@ class Workflow:
         compiler = checker_operation(checker, self.reduce, candidate=self.candidate)
         exporting = export_operation(export, self.reduce, self.export_inputs)
         exporting = replace(exporting, observe=self.export_usage, retry_allowed=self.export_retry)
-        self.operations = Operations(model=model_operation(provider, self.reduce) if provider else None,
+        model = replace(model_operation(provider, self.reduce), observe=token_usage.observe) if provider else None
+        self.operations = Operations(model=model,
             binding=compiler, proof=compiler, lookup=compiler, probe=compiler,
             search=search_operation(search, self.reduce) if search else None,
             assemble=exporting, integrate=exporting, export_verify=exporting)
@@ -87,7 +88,7 @@ class Workflow:
         pending = r.value(reader, 'application.pending', owner.obligation_id)
         from .helpers import advertised
         archives = advertised(reader, owner)
-        displayed = set(state.evidence[-8:])
+        displayed = set(state.evidence)
         return Snapshot(Version(owner, saved.revision, state.context, memory.version, len(state.evidence)),
             context, self.selection.environment_id, self.graph(reader), memory,
             owner_usage(reader, owner), RunUsage(turns=a.turns, backtracks=reader.counter(r.SCOPE, 'backtracks'),
@@ -98,10 +99,9 @@ class Workflow:
             allowed_pins=tuple(a.id for a in archives),
             cursors=tuple(f'{a.id}:{i}' for a in archives for i in range(1, min(len(a.pages), 128))
                           if a.pages[i] not in displayed),
-            recallable=tuple(a.id for a in archives if a.pages[0] not in displayed),
             stop_request=StopRequest.load(r.read(reader, state.stop_request, 65536)) if state.stop_request else None)
 
-    def display(self, reader, snapshot, *, formal_only=False, review=None):
+    def display(self, reader, snapshot, *, formal_only=False, review=None, bounded_evidence=False):
         from . import presentation
         _, state = r.owner_state(reader, snapshot.version.owner.obligation_id)
         ident = candidates.identity(reader, state, self.selection.environment_id)
@@ -176,7 +176,25 @@ class Workflow:
                 refs.append(dep.interface)
                 owners.append(dep.owner)
         from .helpers import advertised, page_text, review_evidence
-        displayed = tuple(dict.fromkeys(state.evidence[-8:]))
+        displayed = tuple(dict.fromkeys(state.evidence))
+        if bounded_evidence and review is None:
+            # Keep preparation itself within the prompt's hard byte/section
+            # bounds before the calibrated token window selects its final pages.
+            # Use artifact sizes, without loading pages that cannot be displayed.
+            from ..prompt.protocol import MAX_BYTES
+            size = sum(len(s.text) for s in sections)
+            retained = []
+            for reference in reversed(displayed):
+                if retained and (size + reference.byte_count + 1024 > MAX_BYTES - 65536
+                                 or len(sections) + len(retained) >= 1000):
+                    break
+                retained.append(reference)
+                size += reference.byte_count + 1024
+            omitted = len(displayed) - len(retained)
+            displayed = tuple(reversed(retained))
+            if omitted:
+                sections.append(Section('feedback', 'evidence-preparation-limit',
+                    f'{omitted} older evidence page(s) omitted by the prompt preparation byte/section limit.'.encode()))
         if review is not None:
             for ordinal, (reference, text) in enumerate(review_evidence(reader, snapshot, review, sections, displayed)):
                 sections.append(Section('evidence', f'review-result-{ordinal+1}', text))
@@ -199,8 +217,8 @@ class Workflow:
         if review is None and self.search and self.search.index:
             sections.append(Section('source', 'search-roots',
                 ('Frozen-source roots: '+', '.join(self.search.index.roots)).encode()))
-        # All retained pages must reach the prompt: recall availability is based
-        # on this exact bounded set, not on pages a renderer might later omit.
+        # The renderer's byte allowance covers all selected pages. Any configured
+        # token window is applied after rendering, including instructions/schema.
         return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)),
                        evidence_bytes=sum(len(s.text) for s in sections if s.kind == 'evidence'))
 
@@ -224,8 +242,10 @@ class Workflow:
             base = reviewer.render if role == 'reviewer' else prover.render
             renderer = lambda display: replace(base(display), instructions=self.instructions[role])
         prepared = self.strategy.prepare_model(snapshot, self.policy, work,
-                                                self.display(reader, snapshot, review=binding if role == 'reviewer' else None),
-                                                options, renderer=renderer)
+                                                self.display(reader, snapshot, review=binding if role == 'reviewer' else None,
+                                                    bounded_evidence=getattr(self.policy.config, role).input_token_budget is not None),
+                                                options, renderer=renderer,
+                                                token_sample=token_usage.sample(reader, snapshot.version.owner, role, route))
         wire = r.wire_artifact(prepared.wire.wire, prepared.turn.id)
         setup = artifact(prepared.wire.setup) if prepared.wire.setup is not None else None
         turn = artifact(prepared.turn.payload)
@@ -237,6 +257,7 @@ class Workflow:
             ResourceLimits(limits.invocation_ms, self.policy.config.local.memory_mib,
                            limits.output_bytes, limits.event_bytes+16384),
             ['model', r.ref(turn.reference), binding], downstream=1),
+            token_usage.prepare(reader, key, snapshot.version.owner, role, route, prepared.wire),
             r.record(reader, 'application.pending', snapshot.version.owner.obligation_id, key),
             Effect(artifacts=tuple(a for a in (wire, setup, turn) if a))]
         if self.script:
@@ -523,9 +544,9 @@ class Workflow:
             else:
                 raise ValueError('Review supplied no decision')
         else:
-            if proposal.work and proposal.work[0].operation in ('recall', 'page'):
-                from .helpers import recall_effect
-                state, extra = recall_effect(self, reader, snapshot, turn, proposal.work[0], state)
+            if proposal.work and proposal.work[0].operation == 'page':
+                from .helpers import page_effect
+                state, extra = page_effect(self, reader, snapshot, turn, proposal.work[0], state)
                 effects.append(extra)
             effects.append(r.save_owner(reader, owner.obligation_id, state))
             if proposal.revision_charge:

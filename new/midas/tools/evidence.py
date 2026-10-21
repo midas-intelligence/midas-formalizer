@@ -138,14 +138,14 @@ class Page:
         return f'{self.archive_id}:{self.ordinal}'
 
 
-def recall(archive, scope, reader, *, cursor=None, delivered=lambda key: False):
+def read_page(archive, scope, reader, *, cursor=None, delivered=lambda key: False):
     """Read one indexed page. Storage supplies one indexed duplicate-delivery test.
 
     The controller rechecks this delivery key and scope in its commit transaction.
     No complete historical result or previous pages are read or deserialized.
     """
     if archive.scope != scope:
-        raise ValueError('Evidence recall scope differs')
+        raise ValueError('Evidence page scope differs')
     ordinal = 0
     if cursor is not None:
         text(cursor, 'evidence cursor', 80)

@@ -9,7 +9,7 @@ from midas_formalizer.combined_retrieval import fuse as old_fuse
 from midas_formalizer.evidence_archive import EvidenceArchive as OldArchive
 from midas_formalizer.probe_runtime import expand_bodies as old_probe_bodies
 from midas.tools import (Backend, HelperRequest, Match, Retrieve, Scope, SearchResult,
-                        expand_probe_bodies, fuse, prepare_archive, recall, search_stages)
+                        expand_probe_bodies, fuse, prepare_archive, read_page, search_stages)
 from midas.tools.plans import _canonical
 from midas.domain import OwnerVersion
 from tests.test_tools import Artifacts
@@ -57,9 +57,9 @@ def main():
     def old_first():
         return old.page('result', obligation='owner')
     def new_first():
-        return recall(archive, scope, artifacts)
+        return read_page(archive, scope, artifacts)
     # The old archive read is deliberately free, isolating its repeated fragment
-    # projection. New recall includes verification and one real artifact read.
+    # projection. New page reading includes verification and one real artifact read.
     compare('evidence_first_page_110KB', old_first, new_first, 1)
 
 

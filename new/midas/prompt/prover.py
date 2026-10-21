@@ -26,12 +26,11 @@ display the definitions it contains; retrieve obtains them. For example:
 {"action":{"mode":"retrieve","rationale":"Inspect the definition used in the goal.","queries":[],"names":["Nat.Prime"],"backends":[]},"memory_update":null}
 Use the actual names from your task in place of this example's name.
 
-retrieve.names identifies Lean declarations. recall.result_id identifies an earlier
-tool result listed in CAPABILITIES under saved evidence not included in this prompt.
-Tool result sections identify the result ID and pages already displayed; use their
-contents directly. SOURCE section labels such as source-prefix and search-roots
-are not result IDs. With no offered recall results, do not use recall.
-With no offered cursors, do not use page. If research is
+retrieve.names identifies Lean declarations. Tool result sections identify the
+result ID and pages already displayed; use their contents directly. Delivered
+evidence is retained, subject to the configured input-token budget. Omission notices
+identify when older pages are outside this prompt. Use page only with an offered cursor
+to read an additional page. With no offered cursors, do not use page. If research is
 disabled, choose an enabled local helper or work on the proof directly.
 Every action needs a nonempty rationale explaining what it will accomplish.
 Give a concise actionable reason, not a reasoning transcript.
@@ -121,8 +120,6 @@ A successful probe is advisory: submit the complete proof for ordinary checking.
 Resource interruptions and missing names do not establish mathematical failure.
 Use research only when enabled in Helper modes, for a mathematical question and
 at most six public source URLs. Use retrieve to inspect the local Lean context.
-Use recall to retrieve a saved result's first page when it is outside the current
-prompt: copy the offered result ID exactly into result_id.
 Use page with an offered cursor to retrieve another page outside this prompt.
 Evidence pages remain advisory. Failed tools do not establish that a mathematical
 claim is false.
@@ -182,13 +179,12 @@ def schema():
         action('probe', cases=dict(array(obj(id=string(48), code=dict(string(16000),
                description='Only the TacticM do-block body after run_tac do; omit the wrapper.')), 3), minItems=1)),
         action('research', question=string(8000), urls=array(string(8000), 6)),
-        action('recall', result_id=string(256)),
         action('page', cursor=string(4096)),
     ]
     return dict(obj(action={'anyOf': actions}, memory_update=nullable(ref('memory'))), **{'$defs': definitions})
 
 
-HELPER_MODES = ('retrieve', 'probe', 'research', 'recall', 'page')
+HELPER_MODES = ('retrieve', 'probe', 'research', 'page')
 SCHEMA = schema_bytes(schema())
 
 

@@ -1096,7 +1096,7 @@ from the first change.
 The action schema always includes `revise`; capabilities report whether a current
 candidate and its mathematical allowance permit it. Gaining a candidate alone
 preserves the schema and cache key. Other unavailable actions are excluded, including
-recall/page without offered results and research without a configured service.
+page without offered cursors and research without a configured service.
 Reviewer schemas likewise omit unavailable research. Small schema variants are
 cached by available actions: changing remaining counters alone preserves the
 schema, while enabling or exhausting a filtered action changes its hash and cache identity.
@@ -1251,10 +1251,32 @@ the search excerpts and failures alongside checked lookup results. Original
 artifacts remain archive provenance. Container descriptors preserve object/array
 shape for other structured evidence. Text fragments carry
 field paths, UTF-8 byte offsets and total byte lengths;
-they require reassembly before use as complete source. Each `recall` reads and
+they require reassembly before use as complete source. Each `read_page` call reads and
 verifies one indexed page, with no archive-wide decoding or earlier-page scan.
 The controller supplies an indexed duplicate-delivery check and rechecks the returned
-delivery key and scope when committing. Scope changes invalidate recall/cursors.
+delivery key and scope when committing. Scope changes invalidate cursors.
+Delivered evidence pages and result archives remain saved. The `page` action fetches
+additional undelivered pages using advertised cursors. There is no `recall` action.
+The 16,000-byte storage page bound still applies.
+
+`prover.input_token_budget` in `config.json` controls the prompt's rolling evidence
+window. Its default `null` includes all delivered pages; a positive integer such
+as `100000` targets that many input tokens per request, including instructions,
+schema, source, candidate, and evidence. This is separate from the cumulative
+`run.max_input_tokens` budget. The equivalent setting is available on reviewer
+and research routes. Set the input budget below the model's context limit to leave
+room for output.
+
+The latest known input-token usage calibrates a prompt-text byte estimate for the
+same owner, role, and provider route. Cached tokens are already included in input
+usage. The small sample survives resume; missing/zero usage leaves it unchanged.
+Before any sample, the estimate starts at one token per UTF-8 byte. Selection
+leaves 10% of the configured budget unused for estimation error, drops the oldest
+whole evidence pages, and reports omissions in the prompt. Required material and
+the newest evidence page are preserved; if these alone exceed the estimate, prompt
+preparation fails. No historical prompts or complete tool results are decoded to
+estimate tokens. Existing prompt byte/section bounds still apply, and provider
+context limits can still be exceeded because token density is only estimated.
 Artifact publication and orphaned staging recovery remain storage responsibilities.
 
 BM25 integration validation (2026-10-19): offline contracts cover exact-name

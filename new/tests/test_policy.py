@@ -166,7 +166,7 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(getattr(defaults, name).configured)
             self.assertEqual(set(config.record()[name]),
                              {'provider', 'model', 'transport', 'account', 'endpoint', 'credential_env',
-                              'prompt_cache', 'prices'})
+                              'prompt_cache', 'prices', 'input_token_budget'})
 
     def test_nested_prices_preserve_unknown_free_and_frozen_rates(self):
         config = Config(prover=ModelRoute(provider='provider', model='model'))
@@ -424,7 +424,7 @@ class AdmissionTests(unittest.TestCase):
         services = Services(research=True, research_web_calls=8)
         for owner in (OwnerUsage(), OwnerUsage(research=7, retrieval=10, probe=6)):
             modes = self.policy.capabilities(owner, services).available_modes
-            for mode in ('research', 'retrieve', 'probe', 'recall', 'page'):
+            for mode in ('research', 'retrieve', 'probe', 'page'):
                 self.assertEqual(mode in modes, self.policy.helper(mode, owner, services).allowed)
         self.assertEqual(self.policy.capabilities(OwnerUsage(), services).web_calls, 8)
         self.assertEqual(self.admit(request(helper='research'), services=services, owner=OwnerUsage(research=7)).reason,
@@ -437,7 +437,7 @@ class AdmissionTests(unittest.TestCase):
 
     def test_retrieval_is_the_only_search_and_lookup_helper(self):
         modes = self.policy.capabilities(OwnerUsage(), Services()).available_modes
-        for mode, kind in (('search', JobKind.SEARCH), ('lookup', JobKind.LOOKUP)):
+        for mode, kind in (('search', JobKind.SEARCH), ('lookup', JobKind.LOOKUP), ('recall', JobKind.LOOKUP)):
             self.assertNotIn(mode, modes)
             with self.assertRaisesRegex(DomainError, 'Unknown helper mode'):
                 self.policy.helper(mode, OwnerUsage(), Services())
@@ -452,7 +452,7 @@ class AdmissionTests(unittest.TestCase):
         self.policy = Policy(config)
         services = Services(research=True, research_web_calls=8)
         caps = self.policy.capabilities(OwnerUsage(), services)
-        self.assertEqual(caps.available_modes, ('research', 'probe', 'recall', 'page'))
+        self.assertEqual(caps.available_modes, ('research', 'probe', 'page'))
         self.assertEqual((caps.direct_remaining, caps.web_calls), (0, 3))
         self.assertFalse(self.admit(request(candidate_mode='direct')).allowed)
         req = request()

@@ -20,7 +20,7 @@ from midas.source import SourceFile
 from midas.tools import (Archive, Backend, HelperRequest, Lookup, Match, Probe, Research, Retrieve,
     Scope, Search, SearchResult, SearchService, SourceEntry, SourceIndex, Stage, StageEvidence,
     admit_checked, continue_retrieval, execute_search, finish_helper, fuse, lookup_sources, plan_helper,
-    prepare_archive, probe_summary, recall, research_evidence, search_stages, search_summary, source_excerpt, web_actions)
+    prepare_archive, probe_summary, read_page, research_evidence, search_stages, search_summary, source_excerpt, web_actions)
 from midas.tools.protocol import pack
 from midas.tools.search import hosted, worker_payload
 
@@ -397,7 +397,7 @@ class ToolsTests(unittest.TestCase):
             archive = prepare_archive(self.scope, 'a'*64, (text,), (self.a.save(b'receipt'),), self.a)
             fragments, displays, cursor = [], [], None
             while True:
-                page = recall(archive, self.scope, self.a, cursor=cursor)
+                page = read_page(archive, self.scope, self.a, cursor=cursor)
                 fragments.extend(row[4] for row in codec.load_record(page.payload, limit=16000)[4])
                 displays.append(page_text(page.payload).decode())
                 cursor = page.next_cursor
@@ -492,7 +492,7 @@ class ToolsTests(unittest.TestCase):
             cursor, reconstructed, expected_offset = None, [], 0
             while True:
                 self.a.reads.clear()
-                page = recall(archive, self.scope, self.a, cursor=cursor)
+                page = read_page(archive, self.scope, self.a, cursor=cursor)
                 self.assertEqual(self.a.reads, [archive.pages[page.ordinal]])
                 self.assertLessEqual(len(page.payload), 16000)
                 for row in codec.load_record(page.payload, limit=16000)[4]:
@@ -507,13 +507,13 @@ class ToolsTests(unittest.TestCase):
                     break
             self.assertEqual(''.join(reconstructed), value)
             self.a.reads.clear()
-            self.assertIsNone(recall(archive, self.scope, self.a, delivered=lambda key: True))
+            self.assertIsNone(read_page(archive, self.scope, self.a, delivered=lambda key: True))
             self.assertFalse(self.a.reads)
 
     def test_archive_fragments_preserve_object_and_array_shapes(self):
         record = {'0':['value', {'0':True, '':None}], 'empty':{}, 'array':[]}
         archive = prepare_archive(self.scope, 'a'*64, [record], (self.a.save(b'receipt'),), self.a)
-        page = recall(archive, self.scope, self.a)
+        page = read_page(archive, self.scope, self.a)
         fragments = codec.load_record(page.payload, limit=16000)[4]
         values = {}
         for row in reversed(fragments):
@@ -533,12 +533,12 @@ class ToolsTests(unittest.TestCase):
         archive = prepare_archive(self.scope, 'a'*64, [{'answer':'text'}], (self.a.save(b'receipt'),), self.a)
         for cursor in ('b'*64+':0', archive.id+':01', archive.id+':99', archive.id+':-1'):
             with self.assertRaises(ValueError):
-                recall(archive, self.scope, self.a, cursor=cursor)
+                read_page(archive, self.scope, self.a, cursor=cursor)
         with self.assertRaises(ValueError):
-            recall(archive, replace(self.scope, context=self.a.save(b'other')), self.a)
+            read_page(archive, replace(self.scope, context=self.a.save(b'other')), self.a)
         self.a.data[archive.pages[0].id] = b'changed'
         with self.assertRaises(ValueError):
-            recall(archive, self.scope, self.a)
+            read_page(archive, self.scope, self.a)
         value = 'x'
         for _ in range(10):
             value = [value]

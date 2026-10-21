@@ -215,10 +215,11 @@ class ModelRoute:
     credential_env: str | None = None
     prompt_cache: str | None = None
     prices: Prices | None = None
+    input_token_budget: int | None = None
 
     def __post_init__(self):
         for field in fields(self):
-            if field.name == 'prices':
+            if field.name in ('prices', 'input_token_budget'):
                 continue
             value = getattr(self, field.name)
             if value is None:
@@ -236,10 +237,12 @@ class ModelRoute:
             raise DomainError('A model route requires both provider and model')
         if self.prices is not None and type(self.prices) is not Prices:
             raise DomainError('Invalid model prices')
+        if self.input_token_budget is not None:
+            natural(self.input_token_budget, 'input_token_budget', positive=True)
         if self.prompt_cache not in (None, 'explicit', 'disabled'):
             raise DomainError('prompt_cache must be explicit or disabled')
         if not self.configured and any(getattr(self, name) is not None for name in (
-                'transport', 'account', 'endpoint', 'credential_env', 'prompt_cache', 'prices')):
+                'transport', 'account', 'endpoint', 'credential_env', 'prompt_cache', 'prices', 'input_token_budget')):
             raise DomainError('Model route settings require provider and model')
         if self.credential_env is not None and not _ENV_NAME.fullmatch(self.credential_env):
             raise DomainError('credential_env must name an environment variable')
