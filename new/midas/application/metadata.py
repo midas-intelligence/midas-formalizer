@@ -34,20 +34,19 @@ class Owner:
     stopped: bool = False
     reason: str | None = None
     evidence: tuple[ArtifactRef, ...] = ()
-    stop_request: ArtifactRef | None = None
 
     @property
     def payload(self):
         return pack([ref(self.context), ref(self.identity), self.index, ref(self.base), self.submission,
-                     ref(self.memory), self.stopped, self.reason, [ref(r) for r in self.evidence], ref(self.stop_request)])
+                     ref(self.memory), self.stopped, self.reason, [ref(r) for r in self.evidence]])
 
     @classmethod
     def load(cls, data):
         v = load_record(data, limit=META)
-        if type(v) is not list or len(v) != 10:
+        if type(v) is not list or len(v) != 9:
             raise ValueError('Invalid application owner')
         return cls(unref(v[0]), unref(v[1]), v[2], unref(v[3]), v[4], unref(v[5]), v[6], v[7],
-                   tuple(unref(r) for r in v[8]), unref(v[9]))
+                   tuple(unref(r) for r in v[8]))
 
 
 def owner_state(reader, key):

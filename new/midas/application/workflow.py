@@ -15,7 +15,7 @@ from ..prompt import Options, Section, Snapshot as Display, subject
 from ..provider import Limits, ModelRequest, Route
 from ..storage import Changes
 from ..status import progress as committed_progress
-from ..strategy import Attempt, Context, Dispatch, Draft, Memory, Snapshot, StopRequest, Strategy, Turn, Version
+from ..strategy import Attempt, Context, Dispatch, Draft, Memory, Snapshot, Strategy, Turn, Version
 from . import candidates, records as r, token_usage
 
 
@@ -98,8 +98,7 @@ class Workflow:
             forbidden_names=tuple(t.selector for t in self.selection.selected.targets),
             allowed_pins=tuple(a.id for a in archives),
             cursors=tuple(f'{a.id}:{i}' for a in archives for i in range(1, min(len(a.pages), 128))
-                          if a.pages[i] not in displayed),
-            stop_request=StopRequest.load(r.read(reader, state.stop_request, 65536)) if state.stop_request else None)
+                          if a.pages[i] not in displayed))
 
     def display(self, reader, snapshot, *, formal_only=False, review=None, bounded_evidence=False):
         from . import presentation
@@ -163,9 +162,6 @@ class Workflow:
         elif snapshot.base:
             sections.append(presentation.candidate(snapshot.base, snapshot.context))
             refs.append(state.base)
-        if snapshot.stop_request:
-            sections.append(presentation.stop_request(snapshot.stop_request))
-            refs.extend((state.stop_request, snapshot.stop_request.source))
         if snapshot.attempt:
             candidate = snapshot.attempt.candidate
             if review is None:
@@ -236,7 +232,7 @@ class Workflow:
             limits or self.policy.config.checker.limits(), binding, helper=helper)
 
     def model_job(self, reader, snapshot, work, *, binding=None):
-        role = 'reviewer' if work.operation in ('review', 'review_stop') else 'prover'
+        role = 'reviewer' if work.operation == 'review' else 'prover'
         route = Route.from_config(getattr(self.policy.config, role))
         options = Options(route.transport, route.model, **({} if route.transport == 'codex' else
             dict(prompt_cache=route.prompt_cache, cache_scope=route.scope if route.prompt_cache == 'explicit' else None)))
@@ -522,12 +518,6 @@ class Workflow:
             state = replace(state, memory=data.reference)
         state = replace(state, reason=proposal.reason,
                         stopped=proposal.stopped if proposal.stopped is not None else state.stopped)
-        if proposal.stop_request:
-            data = artifact(proposal.stop_request.payload)
-            effects.append(Effect(artifacts=(data,)))
-            state = replace(state, stop_request=data.reference)
-        elif proposal.stopped is not None:
-            state = replace(state, stop_request=None)
         if proposal.reason and proposal.reason.endswith('_revision_allowance_exhausted'):
             state = replace(state, stopped=True)
         if proposal.draft:
@@ -553,9 +543,9 @@ class Workflow:
                 state, extra = page_effect(self, reader, snapshot, turn, proposal.work[0], state)
                 effects.append(extra)
             effects.append(r.save_owner(reader, owner.obligation_id, state))
-            if proposal.revision_charge or proposal.stop_charge:
+            if proposal.revision_charge:
                 from ..storage import CounterChange
-                scope, name = 'owner:'+owner.obligation_id, proposal.revision_charge or 'stop_requests'
+                scope, name = 'owner:'+owner.obligation_id, proposal.revision_charge
                 before = reader.counter(scope, name)
                 effects.append(Effect(Changes(counters=(CounterChange(scope, name, before, before+1),))))
         return r.merge(*effects)

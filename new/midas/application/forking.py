@@ -55,7 +55,7 @@ def fork(application, parent, directory, *, config=None, package=None, workflow=
                         if scope == 'application.owners':
                             state = r.Owner.load(r.read(reader, saved.artifact))
                             effects.append(r.save_owner(child.writer, saved.key, replace(state, submission=None,
-                                stopped=bool(joint and saved.key != coordinator), reason=None, stop_request=None)))
+                                stopped=bool(joint and saved.key != coordinator), reason=None)))
                         else:
                             effects.append(Effect(Changes(records=(r.pointer(child.writer, scope, saved.key, saved.artifact),))))
                     commit(child.writer, 'fork-records:'+scope+':'+page[-1].key, r.merge(*effects))

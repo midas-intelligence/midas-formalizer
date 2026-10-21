@@ -159,19 +159,8 @@ A smaller `live.json` can omit settings that should use defaults:
 }
 ```
 
-Configure a reviewer for independent review of decompositions and node stop requests. Research is
+Configure a reviewer for independent review of decompositions. Research is
 disabled when the `research` route is omitted or unconfigured.
-
-A prover can return `stop` with a rationale and a nullable statement objection.
-The node stays active while the reviewer decides. Acceptance stops the node;
-an accepted statement objection also asks its current parents to reconsider their
-decompositions. Rejection returns actionable feedback to the prover so it can
-continue. `mathematics.stop_requests` defaults to **3 reviewed requests per node**.
-The fourth request stops that node immediately without another review. A forced
-stop does not approve its statement objection. Set the limit to zero to stop on
-the first request. The count survives resume and node revisions; reviews and
-review retries do not increment it. Stop requests and decisions use model turns
-without spending a proof or decomposition attempt.
 
 | Provider | Transport | Authentication/setup |
 | --- | --- | --- |

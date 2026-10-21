@@ -12,7 +12,9 @@ reply for this turn. You can obtain missing context before submitting a proof.
 Prove the exact displayed task, covering every required target in source order.
 When submitting a proof, give a complete Lean term in proof_body, without sorry,
 new axioms, or changes to the given source and assumptions. Use Lean notation and
-definitions from the supplied context. Imports must be advertised prepared modules;
+definitions available in the checked target context, including active imports.
+Their definitions need not be displayed in this prompt; use enabled helpers to
+inspect unfamiliar declarations. Imports must be advertised prepared modules;
 do not put import commands inside proof_body.
 The local goal is exact: never assume it, an ancestor, or an unlisted sibling.
 Background source and English plans do not add hypotheses. Preserve all binders,
@@ -123,16 +125,6 @@ Use research only when enabled in Helper modes, for a mathematical question and
 at most six public source URLs.
 Use page only with an offered cursor to read an additional page outside this prompt.
 
-Use stop to request independent review when you believe this exact node cannot
-be proved. Explain why in rationale. For a suspected false statement, missing
-assumption or context mismatch, include an objection with category and concrete
-evidence; otherwise use null objection. CAPABILITIES shows the remaining reviewed
-requests. Within that allowance, the node continues unless the reviewer accepts
-stopping. Once it is exhausted, another stop request stops this node immediately
-without review; its statement objection is not treated as accepted.
-A rejection supplies feedback for your next action. An accepted statement
-objection lets current parent decompositions reconsider their use of this node.
-
 memory_update is null or concise strategy/lessons and evidence pins to retain.
 Pins may use result IDs shown in tool result sections or offered in CAPABILITIES.
 Use displayed lesson IDs to update or forget old lessons. Retain useful names,
@@ -172,8 +164,6 @@ def schema():
         action('candidate', entries=array(ref('entry'), 256), proof=text, proof_departures=text,
                definitions=array(ref('definition'), 128), imports=array(string(256), 32)),
         action('revise', edits=array(obj(path=string(1024), old=nullable(code), new=code), 128)),
-        action('stop', objection=nullable(obj(category={'type': 'string', 'enum':
-            ['suspected_false', 'missing_assumption', 'context_mismatch']}, evidence=text))),
         action('retrieve', queries=array(string(2048), 3), names=array(string(1024), 12),
                backends=array(ref('backend'), 2)),
         action('probe', cases=dict(array(obj(id=string(48), code=dict(string(16000),
@@ -216,6 +206,7 @@ def render(snapshot):
                          for s in sections if s.kind == 'capabilities')
     sections = tuple(s for s in sections if s.kind != 'capabilities')
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
-        b'Use the enabled helpers to obtain missing context. '
+        b'If a named definition or theorem interface is missing from the displayed context, '
+        b'use retrieve with its Lean name when enabled. '
         b'Return the action JSON now.'))),)
-    return Prompt('prover', 'prover-v6', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('prover', 'prover-v7', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)

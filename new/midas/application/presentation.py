@@ -105,12 +105,3 @@ def memory(value):
     if rows:
         sections.append(Section('memory', 'memory', '\n\n'.join(rows).encode()))
     return tuple(sections)
-
-
-def stop_request(request):
-    rows = [b'Stop request for independent review. This node is still active.',
-            b'Rationale:\n' + exact(request.rationale)]
-    if request.objection:
-        rows.extend((b'Statement objection: ' + request.objection.category.encode(),
-                     b'Evidence claimed:\n' + exact(request.objection.evidence)))
-    return Section('candidate', 'stop-request', b'\n\n'.join(rows))

@@ -21,7 +21,6 @@
   "mathematics": {
     "direct": 7,
     "decomposition": 7,
-    "stop_requests": 3,
     "backtracks": 12,
     "owner_backtracks": 3,
     "repair": 2,

@@ -54,7 +54,7 @@ def begin(flow, reader, owner, draft, *, supplied=False, state=None):
     return r.merge(reserve_candidate(reader, flow.policy, owner, attempt, draft.mode),
         r.record(reader, 'application.submissions', key, saved),
         r.save_owner(reader, owner.obligation_id, replace(state, base=data.reference, submission=key,
-                                                       reason=None, stop_request=None)),
+                                                       reason=None)),
         Effect(artifacts=(data,)))
 
 
