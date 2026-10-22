@@ -377,7 +377,7 @@ def _run_process(command, limits, *, cancel=None, status_pipe=None, env=None,
     """Private trusted-argv boundary. Ownership of all supplied FDs transfers here.
 
     Public execution always constructs a namespace launch in isolation.py.
-    Raw argv exists for process-supervisor tests, not for compiler fallback.
+    Raw argv also runs the fixed trusted search worker, never a compiler fallback.
     """
     if not isinstance(limits, ResourceLimits):
         raise ValueError('Expected ResourceLimits')

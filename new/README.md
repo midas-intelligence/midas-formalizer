@@ -1067,6 +1067,13 @@ for one matching JSON object without Markdown fences. Responses omits `text.form
 Codex omits `turn/start.outputSchema` and includes the schema in `baseInstructions`.
 Strategy still validates responses before accepting actions. The schema and its
 instruction header count toward the input budget and cache identity.
+Model responses may contain prose or Markdown fences around a single complete
+JSON object. Extraction respects strings and escapes; multiple objects, outer
+arrays, malformed JSON, duplicate keys and schema violations remain errors.
+This applies to prover, reviewer and research responses, not provider envelopes.
+Default model byte budgets are 8 MiB of output, 16 MiB per transport frame and
+64 MiB of events, allowing long responses without the previous 128 KiB cutoff.
+These are byte limits, independent of the model's output-token limit.
 Wire strings are escaped in bounded byte chunks,
 without passing large content through a JSON library. Only small schemas and
 transport controls use JSON serialization. Bounded caches reuse exact schemas
@@ -1149,6 +1156,14 @@ These replace the tools responsibilities of `combined_retrieval`, `discovery`,
 publication, scheduling and model/compiler execution remain with their owning components.
 Research prompt wording and response schemas belong to `prompt/researcher.py`.
 The original `midas_formalizer` files remain unchanged and are not imported.
+
+Built-in search and package index construction run in a supervised Python child.
+The child's address space is capped by the invocation's `memory_mib`; wall time,
+cancellation, output capture and termination use the executor supervisor. SQLite
+temporary tables may spill to disk. Warm searches reuse package/cache postings;
+index construction passes bounded source-reference/path records and verifies
+each file in the child without copying package sources. The parent retains only
+bounded result excerpts. Custom injected search transports own their isolation.
 
 `HelperRequest` freezes a retrieve, probe or research action, continuation,
 forbidden names and `Scope`. Search and lookup are accepted only as internal

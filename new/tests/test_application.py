@@ -817,8 +817,7 @@ class Contracts(unittest.TestCase):
         self.environment.manifest.inventory = SimpleNamespace(files=(
             File('project/Support.lean', len(source), False, sha256(source).hexdigest()),))
         self.environment.manifest.modules = {}
-        context = SimpleNamespace(check=lambda: None, cancellation=Event(), deadline=time.monotonic()+30)
-        preparation.index_sources(self.environment, context)
+        preparation.operate(lambda context: preparation.index_sources(self.environment, context))
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         retrieve = dict(mode='retrieve', rationale='Find a helper.', queries=['helper'], names=[],
                         backends=[dict(name='frozen-source', prefixes=['project'])])

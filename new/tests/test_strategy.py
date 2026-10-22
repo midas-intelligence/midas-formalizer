@@ -141,7 +141,7 @@ class ProtocolTests(unittest.TestCase):
         value = response(proof())
         parsed = interpret(value, role='prover', contract='prover-action-v2')
         self.assertEqual(parsed.mode, 'proof')
-        for raw in (b'```json\n' + value + b'\n```', b'prefix ' + value, value + b'{}',
+        for raw in (value + b'{}',
                     b'{"action":{},"action":{}}', b'{"x":NaN}', b'{"x":"\\ud800"}'):
             with self.subTest(raw=raw[:60]), self.assertRaises(ValueError):
                 interpret(raw, role='prover', contract='prover-action-v2')
@@ -153,12 +153,26 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             interpret(response(malformed), role='prover', contract='prover-action-v2')
 
+    def test_single_wrapped_object_preserves_validation(self):
+        action = proof()
+        action['proof_body'] = 'by\n -- braces { [ ] }, quotes " and escaped \\"\n rfl'
+        value = response(action)
+        for prefix, suffix in ((b'```json\n', b'\n```'), (b'Here is the proof:\n', b'\nThis closes the goal.'),
+                               (b'"Result":\n```json\n', b'\n```\nDone.')):
+            with self.subTest(prefix=prefix):
+                parsed = interpret(prefix+value+suffix, role='prover', contract='prover-action-v2')
+                self.assertEqual(parsed.value['proof_body'], action['proof_body'])
+        for raw in (b'['+value+b']', b'{"nested":'+value+b'}', value+b'\n'+value,
+                    b'{}\n'+value, b'{broken}\n'+value, value[:-1], b'```json\n'+value[:-1]+b'\n```'):
+            with self.subTest(raw=raw[:40]), self.assertRaises(ValueError):
+                interpret(raw, role='prover', contract='prover-action-v2')
+
     def test_large_response_never_calls_json_library(self):
         action = proof()
         action['proof_body'] = 'by\n  -- ' + 'x'*900000 + '\n  rfl'
         raw = response(action)
         with patch('json.loads', side_effect=AssertionError('JSON loads')), patch('json.dumps', side_effect=AssertionError('JSON dumps')):
-            result = interpret(raw, role='prover', contract='prover-action-v2')
+            result = interpret(b'Here is the proof:\n```json\n'+raw+b'\n```', role='prover', contract='prover-action-v2')
             draft = expand(result.value, context(), uid('large'))
             self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], action['proof_body'])
             self.assertEqual(Draft.load(draft.payload), draft)

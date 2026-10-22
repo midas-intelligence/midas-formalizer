@@ -134,15 +134,17 @@ class ProviderTests(unittest.TestCase):
                 self.request.validate_for(replace(inv.request, job=job), self.a)
 
     def test_large_payloads_never_use_json_library(self):
+        from midas.policy.config import ModelConfig
         raw = WIRE.replace(b'prove', ('x'*500000+'∀').encode())
-        frame = b'{"type":"response.completed","response":{"output":[{"content":[{"type":"output_text","text":"'+b'x'*100000+b'"}]}]}}'
-        req = replace(self.request, wire=self.a.save(raw))
+        output = b'x' * (1024**2 + 1)
+        frame = b'{"type":"response.completed","response":{"output":[{"content":[{"type":"output_text","text":"'+output+b'"}]}]}}'
+        req = replace(self.request, wire=self.a.save(raw), limits=Limits.from_config(ModelConfig()))
         with patch('json.loads', side_effect=AssertionError('JSON decode')), patch('json.dumps', side_effect=AssertionError('JSON encode')):
             validate_wire(req, raw)
             self.assertEqual(ModelRequest.load(req.payload), req)
             out = self.http(lambda _: httpx.Response(200, stream=Chunks([b'data: '+frame+b'\n\n'])), request=req)
         self.assertIsNone(out.error)
-        self.assertEqual(out.raw, b'x'*100000)
+        self.assertEqual(out.raw, output)
 
     def test_protocol_unicode_and_invalid_shapes(self):
         value = {'text':'a'*8190+'∀\n"\\😀', 'x':[True, False, None, 1, -2, .25]}

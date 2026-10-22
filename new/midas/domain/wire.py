@@ -11,6 +11,52 @@ _SPECIAL = re.compile(rb'["\\\x00-\x1f]')
 _NUMBER = re.compile(rb'-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?')
 _SPACE = re.compile(rb'[ \t\r\n]*')
 _ESCAPES = {34: b'"', 92: b'\\', 47: b'/', 98: b'\b', 102: b'\f', 110: b'\n', 114: b'\r', 116: b'\t'}
+_STRUCTURE = re.compile(rb'["\\{}\[\]]')
+
+
+def decode_object(data, *, limit):
+    """Unwrap one model object without repairing JSON or choosing among objects.
+
+    Scan once, respecting quoted strings and escapes. Arrays, extra containers,
+    mismatched delimiters and incomplete objects are rejected, including when
+    they surround an otherwise valid nested action. Wire envelopes use decode.
+    """
+    if type(data) is not bytes or not 0 < len(data) <= limit:
+        raise DomainError('Protocol frame exceeds byte limit')
+    start = end = None
+    stack = []
+    quoted = False
+    skip = -1
+    for match in _STRUCTURE.finditer(data):
+        pos, tag = match.start(), match[0][0]
+        if pos <= skip:
+            continue
+        if not stack:
+            if tag in (34, 92):
+                continue  # Quotes in the surrounding prose are not JSON strings.
+            if start is not None or tag != 123:
+                raise DomainError('Expected a single JSON object')
+            start = pos
+            stack.append(125)
+        elif quoted:
+            if tag == 92:
+                skip = pos + 1
+            elif tag == 34:
+                quoted = False
+        elif tag == 34:
+            quoted = True
+        elif tag in (123, 91):
+            stack.append(125 if tag == 123 else 93)
+            if len(stack) > 17:
+                raise DomainError('Protocol structure exceeds limit')
+        elif tag in (125, 93):
+            if stack.pop() != tag:
+                raise DomainError('Mismatched JSON delimiters')
+            if not stack:
+                end = pos + 1
+    if start is None or stack or end is None:
+        raise DomainError('Expected a complete JSON object')
+    return decode(data[start:end], limit=limit)
 
 
 def decode(data, *, limit):

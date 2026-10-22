@@ -156,15 +156,15 @@ class ModelConfig:
     pool_ms: int = 10_000
     startup_ms: int = 30_000
     shutdown_ms: int = 3000
-    output_bytes: int = 131_072
-    frame_bytes: int = MIB
-    event_bytes: int = 4 * MIB
+    output_bytes: int = 8 * MIB
+    frame_bytes: int = 16 * MIB
+    event_bytes: int = 64 * MIB
     request_max_retries: int = 0
     stream_max_retries: int = 0
 
     def __post_init__(self):
         _integers(self, zero=('request_max_retries', 'stream_max_retries'))
-        if not self.output_bytes <= self.frame_bytes <= self.event_bytes <= 4 * MIB:
+        if not self.output_bytes <= self.frame_bytes <= self.event_bytes <= 64 * MIB:
             raise DomainError('Invalid model byte bounds')
         if max(self.invocation_ms, self.startup_ms) > 7_200_000:
             raise DomainError('Model timeout exceeds profile')

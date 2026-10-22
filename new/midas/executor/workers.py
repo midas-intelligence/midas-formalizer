@@ -3,6 +3,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
 import queue
+import sys
 import threading
 import time
 
@@ -12,7 +13,7 @@ from ..domain import (CapacityGrant, DeliveryCertainty, Invocation, JobKind,
 from ..domain.records import instance, natural
 from .imports import ImportRecipe, _ImportWorker
 from .isolation import LaunchSpec, _launch
-from .process import Outcome, ProcessResult, failure
+from .process import Outcome, ProcessResult, failure, _run_process
 
 _LOCAL = threading.local()
 _COMPILER_KINDS = frozenset(JobKind) - {JobKind.MODEL, JobKind.SEARCH, JobKind.NETWORK_SEARCH}
@@ -166,6 +167,32 @@ class WorkerContext:
             if limits is None:
                 return self._exhausted()
             return self._record(_launch(spec, limits, cancel=self.cancellation, evidence_path=evidence_path))
+        finally:
+            self._operation.release()
+
+    def run_search(self, request):
+        """Run only the trusted search worker, with this invocation's limits.
+
+        This is not a compiler launch path. The child sets an address-space
+        ceiling before importing search code; the supervisor owns cancellation,
+        wall time, captured bytes and process-tree termination.
+        """
+        self.check()
+        if not (self._cpu or self._network):
+            raise ValueError('This invocation has no search capacity grant')
+        request = Path(request).absolute()
+        if not request.resolve(strict=True).is_relative_to(self.workspace):
+            raise ValueError('Search request must be in the private workspace')
+        if not self._operation.acquire(blocking=False):
+            raise ValueError('A capacity grant permits only one process operation at a time')
+        try:
+            limits = self._remaining()
+            if limits is None:
+                return self._exhausted()
+            script = Path(__file__).resolve().parents[1]/'tools'/'search_process.py'
+            return self._record(_run_process(
+                (sys.executable, '-B', str(script), str(limits.memory_mib), str(request)),
+                limits, cancel=self.cancellation, cwd=self.workspace))
         finally:
             self._operation.release()
 

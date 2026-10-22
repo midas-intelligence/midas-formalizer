@@ -4,7 +4,7 @@ import re
 
 from ..domain import ResultStatus
 from ..domain import encoding as codec
-from ..domain.wire import decode
+from ..domain.wire import decode_object
 from .protocol import Research, Stage, pack, public_url, read, text
 
 RESEARCH_BYTES = 131072
@@ -70,7 +70,7 @@ def research_evidence(stage, raw, events):
     """Called only after provider receipt admission; returns flat binary evidence."""
     if not isinstance(stage, Stage) or not isinstance(stage.action, Research):
         raise ValueError('Expected research stage')
-    value = decode(raw, limit=RESEARCH_BYTES)
+    value = decode_object(raw, limit=RESEARCH_BYTES)
     codec.fields(value, ('answer', 'sources', 'unresolved'))
     text(value['answer'], 'research answer', 32000)
     if type(value['sources']) is not list or len(value['sources']) > 6:

@@ -65,11 +65,10 @@ def package(destination, config, *, limits=DEFAULT_LIMITS, cancellation=None):
 
 def index_sources(environment, context):
     """Keep derived search postings with the package; only refs/hash reach tools."""
-    from ..tools.bm25 import prepare
+    from ..tools.search_process import prepare_index
     context.check()
     sources = FrozenSources(environment)
-    path = prepare(sources.index, sources, context.cancellation, context.deadline,
-                   environment.directory/SEARCH_INDEX)
+    path = prepare_index(sources.index, sources, environment.directory/SEARCH_INDEX, context)
     context.check()
     return path
 
@@ -129,3 +128,7 @@ class FrozenSources:
         if reference.byte_count > max_bytes:
             raise ValueError('Source exceeds read limit')
         return reference.verify(safe_read(self.paths[reference], max_bytes), max_bytes=max_bytes)
+
+    def artifact_path(self, reference):
+        """A file capability; the search child verifies its bytes against the ref."""
+        return self.paths[reference]

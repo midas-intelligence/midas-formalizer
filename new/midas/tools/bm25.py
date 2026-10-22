@@ -168,7 +168,7 @@ def corpus_key(index):
 def _connect(path, cancel, deadline, *, readonly=False):
     db = sqlite3.connect(path.as_uri()+'?mode=ro' if readonly else path, uri=readonly)
     db.set_progress_handler(lambda: int(cancel.is_set() or time.monotonic() >= deadline), 1000)
-    db.execute('PRAGMA temp_store=MEMORY')
+    db.execute('PRAGMA temp_store=FILE')
     return db
 
 
@@ -222,7 +222,7 @@ def _valid(path, key, cancel, deadline):
         return False
 
 
-def prepare(index, reader, cancel, deadline, path):
+def prepare(index, reader, cancel, deadline, path, *, temporary_path=None):
     """Publish reusable postings atomically under a cancellable builder lock."""
     stopped(cancel, deadline)
     path = Path(path).absolute()
@@ -238,8 +238,13 @@ def prepare(index, reader, cancel, deadline, path):
                 except BlockingIOError:
                     cancel.wait(.02)
             if not _valid(path, key, cancel, deadline):
-                with NamedTemporaryFile(prefix=path.stem+'-', suffix='.sqlite', dir=path.parent, delete=False) as temporary:
-                    temp = Path(temporary.name)
+                if temporary_path is None:
+                    with NamedTemporaryFile(prefix=path.stem+'-', suffix='.sqlite', dir=path.parent, delete=False) as temporary:
+                        temp = Path(temporary.name)
+                else:
+                    temp = Path(temporary_path)
+                    if temp.parent != path.parent or temp == path:
+                        raise ValueError('Index temporary must be a separate file beside its destination')
                 try:
                     _build(temp, key, index, reader, cancel, deadline)
                     stopped(cancel, deadline)

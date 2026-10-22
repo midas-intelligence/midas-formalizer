@@ -271,7 +271,7 @@ class ConfigTests(unittest.TestCase):
             b'{"format":"midas-config-v1","run":null}',
             b'{"format":"midas-config-v1","checker":{"memory_mib":8192}}',
             b'{"format":"midas-config-v1","recovery":{"unknown_retries":3}}',
-            b'{"format":"midas-config-v1","model":{"output_bytes":5000000}}',
+            b'{"format":"midas-config-v1","model":{"output_bytes":17000000}}',
             b'{"format":"midas-config-v1","scheduling":{"backlog_low":99}}',
         )
         for payload in cases:
@@ -471,7 +471,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual((caps.direct_remaining, caps.web_calls), (0, 3))
         self.assertFalse(self.admit(request(candidate_mode='direct')).allowed)
         req = request()
-        req = replace(req, job=replace(req.job, limits=replace(req.job.limits, output_bytes=131_073)))
+        req = replace(req, job=replace(req.job, limits=replace(req.job.limits, output_bytes=config.model.output_bytes+1)))
         self.assertEqual(self.admit(req).reason, 'model_resource_limit')
         req = request(JobKind.CHECK_PROOF)
         req = replace(req, job=replace(req.job, limits=replace(req.job.limits, wall_ms=90_001)))

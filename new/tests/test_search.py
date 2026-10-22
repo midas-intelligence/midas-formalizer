@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from midas.application.helpers import page_text
-from midas.domain import OwnerVersion
+from midas.domain import OwnerVersion, ResourceLimits
 from midas.tools import (Backend, Lookup, Match, Scope, Search, SearchResult,
     SourceEntry, SourceIndex, Stage, execute_search, prepare_archive, search_summary)
 from midas.tools import bm25
@@ -33,6 +33,90 @@ class SearchTests(unittest.TestCase):
         stage = Stage('3'*64, 0, self.scope, action)
         return execute_search(stage, self.artifacts, self.cancel, self.deadline,
                               index=index, cache_directory=self.cache, prepared_path=prepared_path)
+
+    def isolated_search(self, index, query, *, memory_mib=128, prepared_path=None, cancellation=None):
+        from midas.application.preparation import operate
+        stage = Stage('3'*64, 0, self.scope, Search(query, Backend('frozen-source')))
+        return operate(lambda context: execute_search(stage, self.artifacts, context.cancellation,
+            context.deadline, index=index, cache_directory=self.cache, prepared_path=prepared_path,
+            context=context), limits=ResourceLimits(10000, memory_mib, 1024**2, 1024**2),
+            cancellation=cancellation)
+
+    def test_isolated_search_matches_rankings_and_reuses_postings(self):
+        index = self.index(('lib/Mathlib/A.lean', '/-- apple apple -/\ndef apple : Nat := 0\n'),
+                           ('lib/Mathlib/B.lean', 'def other : Nat := 1\n'))
+        first = self.isolated_search(index, 'apple')
+        self.assertEqual(first, self.search(index, 'apple', prefixes=()))
+        self.artifacts.reads.clear()
+        second = self.isolated_search(index, 'apple', prepared_path=self.cache/'missing.sqlite')
+        self.assertEqual(first, second)
+        self.assertEqual(self.artifacts.reads, [index.entries[0].artifact])
+
+    def test_isolated_index_memory_failure_does_not_kill_application(self):
+        # A small source expands into many lexical offsets and FTS documents.
+        # Exercise a real child address-space limit, not a mocked MemoryError.
+        index = self.index(('lib/Mathlib/Large.lean',
+                            ''.join(f'def value{i} : Nat := {i}\n' for i in range(50000))))
+        with self.assertRaisesRegex(RuntimeError, '[Mm]emory|allocate'):
+            self.isolated_search(index, 'value', memory_mib=64)
+        self.assertFalse(list(self.cache.glob('*.sqlite*')))
+        small = self.index(('lib/Mathlib/Small.lean', 'def apple : Nat := 0\n'))
+        self.assertEqual(self.isolated_search(small, 'apple').records[0].names, ('apple',))
+
+    def test_isolated_preparation_uses_existing_source_files(self):
+        from midas.application.preparation import operate
+        from midas.tools.search_process import prepare_index
+        index = self.index(('lib/Mathlib/A.lean', 'def apple : Nat := 0\n'))
+        source = self.cache/'source.lean'
+        source.write_bytes(self.artifacts.data[index.entries[0].artifact.id])
+        class Reader:
+            def artifact_path(self, ref):
+                return source
+            def read_artifact(self, *args, **kwargs):
+                raise AssertionError('Package sources must not be copied by the parent')
+        path = self.cache/'prepared.sqlite'
+        operate(lambda context: prepare_index(index, Reader(), path, context),
+                limits=ResourceLimits(10000, 128, 1024**2, 1024**2))
+        self.assertTrue(path.is_file())
+        self.assertEqual(self.isolated_search(index, 'apple', prepared_path=path).records[0].names, ('apple',))
+
+    def test_cancel_isolated_builder_waiting_for_lock(self):
+        import fcntl
+        from threading import Timer
+        index = self.index(('lib/Mathlib/A.lean', 'def apple : Nat := 0\n'))
+        lock_path = self.cache/(index.search_key+'.lock')
+        cancel = Event()
+        with lock_path.open('ab') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            timer = Timer(.3, cancel.set)
+            timer.start()
+            started = time.monotonic()
+            try:
+                with self.assertRaisesRegex(RuntimeError, '[Cc]ancel'):
+                    self.isolated_search(index, 'apple', cancellation=cancel)
+            finally:
+                timer.cancel()
+                timer.join()
+        self.assertLess(time.monotonic()-started, 3)
+        self.assertFalse(list(self.cache.glob('*.sqlite*')))
+        self.assertEqual(self.isolated_search(index, 'apple').records[0].names, ('apple',))
+
+    def test_hosted_worker_protocol_uses_bounded_binary_records(self):
+        import io
+        from types import SimpleNamespace
+        from midas.executor import Outcome
+        from midas.tools.search_process import hosted_search, _main
+        context = SimpleNamespace(workspace=self.cache, check=lambda: None)
+        def run_search(request):
+            output = io.BytesIO()
+            with patch('sys.stdout', SimpleNamespace(buffer=output)):
+                _main(request)
+            return SimpleNamespace(outcome=Outcome.COMPLETED, stdout=SimpleNamespace(data=output.getvalue()))
+        context.run_search = run_search
+        stage = Stage('3'*64, 0, self.scope, Search('addition', Backend('leanexplore')))
+        with patch('midas.tools.search.hosted', return_value=(Match(('Nat.add',)),)) as hosted:
+            self.assertEqual(hosted_search(stage, context), (Match(('Nat.add',)),))
+            self.assertEqual(hosted.call_args.args[0], stage.action)
 
     def test_tokenization_preserves_multiplicity_without_stemming(self):
         self.assertEqual(bm25.token_text('Functor.map_comp compactManifold functors objects α α the'),

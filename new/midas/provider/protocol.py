@@ -106,7 +106,7 @@ class Limits:
         for f in fields(self):
             natural(getattr(self, f.name), f.name,
                     positive=f.name not in ('web_calls', 'request_max_retries', 'stream_max_retries'))
-        if (not self.output_bytes <= self.frame_bytes <= self.event_bytes <= 4 * 1024**2
+        if (not self.output_bytes <= self.frame_bytes <= self.event_bytes <= 64 * 1024**2
                 or max(self.invocation_ms, self.startup_ms) > 7_200_000 or self.web_calls > 12):
             raise DomainError('Invalid transport limits')
 

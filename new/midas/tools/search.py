@@ -170,13 +170,19 @@ class SearchResult:
         return cls(v[1], tuple(rows), v[3])
 
 
-def source_search(stage, index, reader, cancel, deadline, *, cache_directory=None, prepared_path=None):
+def source_search(stage, index, reader, cancel, deadline, *, cache_directory=None, prepared_path=None,
+                  context=None):
     if index is None or index.environment_id != stage.scope.environment_id:
         raise ValueError('Source index differs from search environment')
     action = stage.action
     prefixes = index.resolve(action.backend.prefixes) if action.backend.prefixes else index.roots
-    with database(index, reader, cancel, deadline, cache_directory, prepared_path=prepared_path) as db:
-        hits = ranked(db, action.query, prefixes, limit=action.limit)
+    if context is None:
+        with database(index, reader, cancel, deadline, cache_directory, prepared_path=prepared_path) as db:
+            hits = ranked(db, action.query, prefixes, limit=action.limit)
+    else:
+        from .search_process import search_hits
+        hits = search_hits(index, reader, action, prefixes, context,
+                          cache_directory=cache_directory, prepared_path=prepared_path)
     result, loaded = [], {}
     for rank, (name, path, line, start_line, start, end, score) in enumerate(hits):
         stopped(cancel, deadline)
@@ -225,13 +231,20 @@ def hosted(action, cancel, deadline, *, opener=None):
 
 
 def execute_search(stage, reader, cancel, deadline, *, index=None, transport=hosted,
-                   cache_directory=None, prepared_path=None):
+                   cache_directory=None, prepared_path=None, context=None):
     if not isinstance(stage.action, Search):
         raise ValueError('Expected search stage')
     stopped(cancel, deadline)
-    rows = (source_search(stage, index, reader, cancel, deadline, cache_directory=cache_directory,
-                          prepared_path=prepared_path) if stage.action.backend.name == 'frozen-source'
-            else transport(stage.action, cancel, deadline))
+    if stage.action.backend.name == 'frozen-source':
+        rows = source_search(stage, index, reader, cancel, deadline, cache_directory=cache_directory,
+                             prepared_path=prepared_path, context=context)
+    elif context is not None and transport is hosted:
+        from .search_process import hosted_search
+        rows = hosted_search(stage, context)
+    else:
+        # Custom transports own their isolation; the built-in hosted transport
+        # runs in the same bounded worker as frozen-source search.
+        rows = transport(stage.action, cancel, deadline)
     stopped(cancel, deadline)
     return SearchResult(stage.sha256, rows).validate_for(stage)
 
@@ -263,7 +276,7 @@ class SearchService:
         status = ResultStatus.SUCCEEDED
         try:
             result = execute_search(stage, self.source_reader or context.reader, context.cancellation, context.deadline,
-                                    index=self.index, transport=self.transport, cache_directory=self.cache_directory,
+                                    index=self.index, transport=self.transport, context=context, cache_directory=self.cache_directory,
                                     prepared_path=self.prepared_path)
         except Exception as exc:
             status = ResultStatus.CANCELLED if context.cancellation.is_set() else ResultStatus.FAILED

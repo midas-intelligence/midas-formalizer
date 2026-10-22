@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from ..domain import DomainError
-from ..domain.wire import decode
+from ..domain.wire import decode, decode_object
 from ..prompt import prover, reviewer
 from .memory import Update, text
 
@@ -85,7 +85,7 @@ class Response:
 def interpret(payload, *, role, contract):
     if CONTRACTS.get(role) != contract:
         raise DomainError('No interpreter for dispatched response contract')
-    value = decode(payload, limit=RESPONSE_BYTES)
+    value = decode_object(payload, limit=RESPONSE_BYTES)
     _default(role)(value)
     if role == 'prover':
         action = value['action']
