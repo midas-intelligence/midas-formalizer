@@ -213,6 +213,7 @@ class Status:
     intents: tuple[tuple[str, int], ...]
     executions: tuple[tuple[str, int], ...]
     accounting: Accounting
+    active_nodes: int
 
 
 @dataclass(frozen=True, slots=True)

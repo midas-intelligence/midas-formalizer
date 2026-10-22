@@ -5,11 +5,16 @@ from . import records as r
 
 
 def sample(reader, owner, role, route):
+    # Research reports cumulative agent usage, not the initial prompt's tokens.
+    if role == 'research':
+        return None
     value = r.value(reader, 'application.prompt_usage', owner.obligation_id+':'+role)
     return tuple(value[1:]) if value and value[0] == route.scope else None
 
 
 def prepare(reader, key, owner, role, route, prompt):
+    if role == 'research':
+        return Effect()
     return r.record(reader, 'application.prompt_inputs', key,
                     [owner.obligation_id+':'+role, route.scope, prompt.input_bytes])
 
@@ -22,6 +27,9 @@ def observe(reader, invocation, result):
     if not saved:
         return Effect()
     key, scope, size = saved
+    # Also ignore research input records prepared before this exclusion.
+    if key.endswith(':research'):
+        return Effect()
     value = [scope, size, tokens]
     if r.value(reader, 'application.prompt_usage', key) == value:
         return Effect()

@@ -58,12 +58,10 @@ class Strategy:
                 return result('binding_complete')
             if attempt.checked is None:
                 return result(work=(_work(snapshot, 'proof'),))
-            if attempt.candidate.joint_submission_id is not None:
-                return result(work=(_work(snapshot, 'joint'),))
             if attempt.checked.kind == CheckKind.CONDITIONAL and attempt.review is None:
                 return result('supplied_review_required') if snapshot.workflow == 'supplied' else result(
                     work=(_work(snapshot, 'review'),))
-            return result(work=(_work(snapshot, 'activate'),))
+            return result(work=(_work(snapshot, 'joint' if attempt.candidate.joint_submission_id else 'activate'),))
         if node.state == ProofState.CONDITIONAL:
             dependencies = node.selected.candidate.logical_dependencies
             children = tuple(dict.fromkeys(d.owner for d in dependencies
@@ -312,12 +310,12 @@ class Strategy:
         if pending is None or not pending.bound or pending.binding_only or checked.candidate != pending.candidate:
             raise ValueError('Proof check differs from bound pending candidate')
         pending = replace(pending, checked=checked)
-        if checked.candidate.joint_submission_id is not None:
-            return Changes(snapshot.version, (_work(snapshot, 'joint'),), attempt=pending)
         if checked.kind == CheckKind.CONDITIONAL:
             return Changes(snapshot.version,
                 () if snapshot.workflow == 'supplied' else (_work(snapshot, 'review'),),
                 reason='supplied_review_required' if snapshot.workflow == 'supplied' else None, attempt=pending)
+        if checked.candidate.joint_submission_id is not None:
+            return Changes(snapshot.version, (_work(snapshot, 'joint'),), attempt=pending)
         graph = accept_checked_proof(snapshot.graph, checked)
         return Changes(snapshot.version, decision=AttemptDecision(checked.candidate.id, 'success',
             policy.mathematical_charge('success')), graph=graph, graph_revision=snapshot.graph.revision)
@@ -330,6 +328,8 @@ class Strategy:
             raise ValueError('Review differs from checked pending composition')
         if not review.approved:
             return self.on_failure(snapshot, policy, 'rejection', evidence=evidence, diagnostics=diagnostics, source='review')
+        if pending.candidate.joint_submission_id is not None:
+            return Changes(snapshot.version, (_work(snapshot, 'joint'),), attempt=replace(pending, review=review))
         graph = accept_checked_proof(snapshot.graph, pending.checked, review)
         return Changes(snapshot.version, decision=AttemptDecision(review.candidate.id, 'success',
             policy.mathematical_charge('success')), graph=graph, graph_revision=snapshot.graph.revision)

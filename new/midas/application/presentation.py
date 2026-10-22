@@ -87,12 +87,13 @@ def memory(value):
     sections = []
     # Complete observations are stable history records; strategy/lessons are
     # changing turn material. Never flatten diagnostic newlines or lose notices.
-    for index, observation in enumerate(value.observations):
+    observations = tuple(o for o in value.observations if o.status != 'protocol')
+    for index, observation in enumerate(observations):
         rows = [f'{observation.source}: {observation.status}'.encode()]
         rows.extend(message.encode() for message in observation.messages)
         if observation.omitted:
             rows.append(f'{observation.omitted} diagnostic message(s) omitted.'.encode())
-        kind = 'feedback' if index == len(value.observations) - 1 else 'history'
+        kind = 'feedback' if index == len(observations) - 1 else 'history'
         sections.append(Section(kind, f'observation-{index+1}', b'\n\n'.join(rows)))
     rows = []
     if value.strategy:

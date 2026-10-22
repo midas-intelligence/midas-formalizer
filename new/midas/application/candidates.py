@@ -3,7 +3,7 @@ from dataclasses import replace
 from uuid import UUID, uuid5
 
 from ..controller import Effect, artifact, reserve_candidate, settle_candidate
-from ..domain import (Candidate, CheckKind, Dependency, DependencyOrigin, OwnerVersion,
+from ..domain import (AdmittedReview, Candidate, CheckKind, Dependency, DependencyOrigin, OwnerVersion,
     ProofNode, accept_checked_proof, accept_joint,
     joint_targets, load_identity, load_submission, resolve_entry)
 from ..domain.identity import entry_context, CLOSED
@@ -30,6 +30,33 @@ def prerequisites(reader, context, environment_id):
 
 def submission(reader, key):
     return r.value(reader, 'application.submissions', key)
+
+
+def pending_graph(flow, reader):
+    """Overlay reviewed joint proofs for child scheduling and private assembly only."""
+    graph = flow.graph(reader)
+    if not joint_targets(flow.selection):
+        return graph, {}
+    updates, locations, handled = {}, {}, set()
+    for node in graph.nodes:
+        _, state = r.owner_state(reader, node.owner.obligation_id)
+        if not state.submission or state.submission in handled:
+            continue
+        handled.add(state.submission)
+        saved = submission(reader, state.submission)
+        for entry_key, row in saved['rows'].items():
+            checked = r.uncheck(row.get('checked'))
+            if not row.get('done') or checked is None or checked.candidate.joint_submission_id is None:
+                continue
+            current = graph.node(checked.candidate.owner)
+            review = AdmittedReview(checked.candidate, r.unreceipt(row['review']), True) if row.get('review') else None
+            updated = replace(current, selected=checked, review=review, assembly=r.uncheck(row.get('assembly')))
+            if current.selected is None:
+                updates[current.owner.obligation_id] = updated
+                locations[current.owner.obligation_id] = (state.submission, entry_key)
+    if not updates:
+        return graph, locations
+    return replace(graph, nodes=tuple(updates.get(n.owner.obligation_id, n) for n in graph.nodes)), locations
 
 
 def entries(reader, saved):
@@ -64,6 +91,39 @@ def _index(flow, entry):
     return next(i for i, t in enumerate(flow.selection.selected.targets) if t.selector == name)
 
 
+def definition_bindings(flow, reader, key, saved, entry, draft):
+    """Bind a lemma only after its selected definition dependencies have closed proofs."""
+    if entry['subject']['kind'] != 'lemma':
+        return ()
+    definitions = {i.id for t, i in zip(flow.selection.selected.targets, flow.selection.identities) if t.kind == 'def'}
+    if not definitions:
+        return ()
+    result, previous_drafts = [], {key: draft}
+    for dep in entry['dependencies']:
+        origin = dep['entry']
+        previous = saved if origin['submission_id'] == key else submission(reader, origin['submission_id'])
+        if previous is None or origin['key'] not in previous['rows']:
+            return None
+        if previous['rows'][origin['key']]['owner'] not in definitions:
+            continue
+        if origin['submission_id'] not in previous_drafts:
+            previous_drafts[origin['submission_id']] = Draft.load(r.read(reader, r.unref(previous['draft']), 17*1024**2))
+        if origin['key'] not in previous_drafts[origin['submission_id']].closed_definitions:
+            continue
+        row = previous['rows'][origin['key']]
+        checked = r.uncheck(row.get('assembly') or row.get('checked'))
+        if checked is None or checked.kind == CheckKind.CONDITIONAL:
+            return None
+        child = reader.node(row['owner']).node
+        if child.owner != checked.candidate.owner:
+            raise ValueError('Binding definition has been retired')
+        _, state = r.owner_state(reader, child.owner.obligation_id)
+        dependency = Dependency(child.owner, dep['parameter'], child.interface,
+            DependencyOrigin.CLOSED_DEFINITION, checked.evidence, origin['submission_id'])
+        result.append((dependency, identity(reader, state, flow.selection.environment_id), checked))
+    return tuple(result)
+
+
 def plan(flow, reader, key, saved):
     """A submission advances one ready stage at a time; stages survive restart."""
     if saved['phase'] in ('done', 'failed'):
@@ -72,23 +132,30 @@ def plan(flow, reader, key, saved):
         return None
     draft, value, by_key = entries(reader, saved)
     coordinator = OwnerVersion(*saved['owner'])
+    definitions = {i.id for t, i in zip(flow.selection.selected.targets, flow.selection.identities) if t.kind == 'def'}
     for entry_key in saved['order']:
         if entry_key in saved['rows']:
             continue
         entry = resolve_entry(value, by_key[entry_key])
+        closed = definition_bindings(flow, reader, key, saved, entry, draft)
+        if closed is None or any(d['entry']['submission_id'] == key and d['entry']['key'] not in saved['rows']
+                                 for d in entry['dependencies']):
+            continue
         index = _index(flow, entry)
         scope_owner = reader.node(flow.selection.identities[index].id).node.owner
         request = flow.checker.prepare('binding', flow.selection, index, scope_owner,
             statement=entry['subject'].get('statement'),
             parameters=tuple(d['parameter'] for d in entry['dependencies']),
             context=entry['subject'].get('declaration_context', CLOSED),
-            imports=tuple(entry.get('imports', ())))
+            imports=tuple(entry.get('imports', ())), closed_definitions=closed, reader=reader)
         job_key = f'candidate:{key}:binding:{entry_key}'
-        return r.merge(flow.compiler_job(reader, job_key, request, (coordinator,),
+        return r.merge(flow.compiler_job(reader, job_key, request, (coordinator, *(d.owner for d, _, _ in closed)),
             ['binding', key, entry_key]), r.record(reader, 'application.submissions', key,
                 dict(saved, current=job_key)))
-    # All identities exist before any candidate or dependency is constructed.
+    # Only already-bound entries and dependencies may enter proof checking.
     for entry_key in saved['order']:
+        if entry_key not in saved['rows']:
+            continue
         row = saved['rows'][entry_key]
         if row.get('done'):
             continue
@@ -100,7 +167,6 @@ def plan(flow, reader, key, saved):
                 if saved['supplied']:
                     # Supplied approval is explicit input. Its provenance is the
                     # compiler receipt binding the exact saved candidate source.
-                    from ..domain import AdmittedReview
                     review = AdmittedReview(checked.candidate, checked.receipt, True)
                     return activate(flow, reader, key, saved, entry_key, checked, review)
                 return flow.review_job(reader, key, saved, entry_key, checked)
@@ -109,7 +175,8 @@ def plan(flow, reader, key, saved):
         node = reader.node(row['owner']).node
         _, state = r.owner_state(reader, node.owner.obligation_id)
         ident = identity(reader, state, flow.selection.environment_id)
-        deps, identities, closed = [], [], []
+        deps, identities, closed, joint_id = [], [], [], None
+        prior_drafts = {key: draft}
         for dep in entry['dependencies']:
             origin = dep['entry']
             previous = saved if origin['submission_id'] == key else submission(reader, origin['submission_id'])
@@ -122,18 +189,24 @@ def plan(flow, reader, key, saved):
             _, child_state = r.owner_state(reader, child.owner.obligation_id)
             identities.append(identity(reader, child_state, flow.selection.environment_id))
             kind, certificate, joint = DependencyOrigin.ABSTRACTED_LEMMA, None, None
-            if origin['submission_id'] == key and origin['key'] in draft.closed_definitions:
-                prior = r.uncheck(child_row.get('checked'))
-                if prior is None:
+            if child.owner.obligation_id in definitions and origin['submission_id'] not in prior_drafts:
+                prior_drafts[origin['submission_id']] = Draft.load(r.read(reader, r.unref(previous['draft']), 17*1024**2))
+            if child.owner.obligation_id in definitions and origin['key'] in prior_drafts[origin['submission_id']].closed_definitions:
+                prior = r.uncheck(child_row.get('assembly') or child_row.get('checked'))
+                if prior is None or prior.kind == CheckKind.CONDITIONAL:
                     return None
-                kind, certificate, joint = DependencyOrigin.CLOSED_DEFINITION, prior.evidence, key
+                kind, certificate, joint = DependencyOrigin.CLOSED_DEFINITION, prior.evidence, origin['submission_id']
+                if joint_id is not None and joint_id != joint:
+                    raise ValueError('Definition dependencies belong to different joint submissions')
+                joint_id = joint
                 closed.append(prior)
             elif child.owner.obligation_id in {i.id for i in flow.selection.identities}:
                 kind = DependencyOrigin.FROZEN_PEER
             deps.append(Dependency(child.owner, dep['parameter'], child.interface, kind, certificate, joint))
         source = artifact(entry['proof'].encode())
         candidate = Candidate(str(uuid5(UUID(key), entry_key)), node.owner, flow.selection.environment_id,
-            source.reference, tuple(deps), entry['revision_of'], key if joint_targets(flow.selection) else None)
+            source.reference, tuple(deps), entry['revision_of'],
+            key if draft.closed_definitions and entry['subject']['kind'] == 'target' else joint_id)
         request = flow.checker.prepare('proof', flow.selection, state.index, candidate,
             flow.overlay(reader, (source,)), identity=ident, statement=entry['subject'].get('statement'),
             dependencies=tuple(identities), closed_definitions=tuple(closed),
@@ -143,13 +216,23 @@ def plan(flow, reader, key, saved):
         updated = dict(saved, current=job_key, phase='proof', rows=dict(saved['rows'], **{entry_key: next_row}))
         return r.merge(flow.compiler_job(reader, job_key, request, (coordinator,), ['proof', key, entry_key]),
             r.record(reader, 'application.submissions', key, updated), Effect(artifacts=(source,)))
-    # A joint definition/property group becomes visible in one graph commit.
+    if len(saved['rows']) != len(saved['order']):
+        return None
+    # Required roots remain private until the whole group has checked terms.
     graph_effect = Effect()
-    if joint_targets(flow.selection):
-        ordered = [saved['rows'][e['key']] for e in value['entries']]
+    if draft.closed_definitions:
+        ordered = [saved['rows'][e['key']] for e in value['entries'] if e['subject']['kind'] == 'target']
         checks = tuple(r.uncheck(row['checked']) for row in ordered)
+        reviews = tuple(AdmittedReview(check.candidate, r.unreceipt(row['review']), True)
+                        if row.get('review') else None for row, check in zip(ordered, checks))
+        assemblies = tuple(r.uncheck(row.get('assembly')) for row in ordered)
+        pending, locations = pending_graph(flow, reader)
+        roots = {i.id for i in flow.selection.identities}
+        support = tuple(pending.node(OwnerVersion(*row['version'])) for row in saved['rows'].values()
+                        if row['owner'] not in roots and row['owner'] in locations)
         graph = flow.graph(reader)
-        graph_effect = r.graph_changes(reader, graph, accept_joint(graph, flow.selection, key, checks))
+        graph_effect = r.graph_changes(reader, graph, accept_joint(graph, flow.selection, key, checks,
+            reviews=reviews, assemblies=assemblies, support=support))
     return r.merge(finish(flow, reader, key, saved, 'success'), graph_effect)
 
 
@@ -162,6 +245,8 @@ def on_binding(flow, reader, key, saved, entry_key, bound):
     draft, value, by_key = entries(reader, saved)
     entry = by_key[entry_key]
     ident, admitted = bound.identity, bound.admitted
+    if entry['subject']['kind'] == 'lemma' and ident.id in {i.id for i in flow.selection.identities}:
+        raise ValueError('Supporting lemma duplicates a selected target obligation')
     index = _index(flow, entry)
     try:
         previous = reader.node(ident.id)
@@ -171,13 +256,16 @@ def on_binding(flow, reader, key, saved, entry_key, bound):
     if owner.generation != admitted.owner.generation:
         resolved = resolve_entry(value, entry)
         scope_owner = reader.node(flow.selection.identities[index].id).node.owner
+        closed = definition_bindings(flow, reader, key, saved, resolved, draft)
+        if closed is None:
+            raise ValueError('Rebinding definition proof is no longer available')
         request = flow.checker.prepare('binding', flow.selection, index, scope_owner,
             statement=resolved['subject'].get('statement'),
             parameters=tuple(d['parameter'] for d in resolved['dependencies']),
             context=resolved['subject'].get('declaration_context', CLOSED),
-            imports=tuple(resolved.get('imports', ())), subject_owner=owner)
+            imports=tuple(resolved.get('imports', ())), subject_owner=owner, closed_definitions=closed, reader=reader)
         job_key = f'candidate:{key}:binding:{entry_key}:generation:{owner.generation}'
-        return r.merge(flow.compiler_job(reader, job_key, request, (OwnerVersion(*saved['owner']), owner),
+        return r.merge(flow.compiler_job(reader, job_key, request, (OwnerVersion(*saved['owner']), owner, *(d.owner for d, _, _ in closed)),
             ['binding', key, entry_key]), r.record(reader, 'application.submissions', key, dict(saved, current=job_key)))
     if previous and previous.node.binding:
         if previous.node.interface.sha256 != admitted.interface.sha256:
@@ -215,11 +303,28 @@ def on_check(flow, reader, key, saved, entry_key, checked):
 
 def activate(flow, reader, key, saved, entry_key, checked, review=None):
     graph_effect = Effect()
-    if checked.candidate.joint_submission_id is None:
+    joint = checked.candidate.joint_submission_id
+    if joint is None:
         graph = flow.graph(reader)
         graph_effect = r.graph_changes(reader, graph, accept_checked_proof(graph, checked, review))
+    elif joint != key:
+        graph = flow.graph(reader)
+        roots = tuple(graph.node(reader.node(i.id).node.owner) for i in flow.selection.identities)
+        if all(node.selected is not None for node in roots):
+            node = replace(graph.node(checked.candidate.owner), selected=checked, review=review)
+            graph_effect = r.graph_changes(reader, graph, accept_joint(graph, flow.selection, joint,
+                tuple(n.selected for n in roots), reviews=tuple(n.review for n in roots),
+                assemblies=tuple(n.assembly for n in roots), support=(node,)))
+        else:
+            parent = submission(reader, joint)
+            rows = dict(parent['rows'])
+            for name, row in rows.items():
+                if row['owner'] == checked.candidate.owner.obligation_id:
+                    rows[name] = dict(row, checked=r.check(checked), done=True,
+                                      review=r.receipt(review.receipt) if review else None)
+            graph_effect = r.record(reader, 'application.submissions', joint, dict(parent, rows=rows))
     return r.merge(graph_effect, _row(reader, key, saved, entry_key,
-        dict(saved['rows'][entry_key], done=True)))
+        dict(saved['rows'][entry_key], done=True, review=r.receipt(review.receipt) if review else None)))
 
 
 def finish(flow, reader, key, saved, outcome, *, exception=None, reason=None, evidence=None, diagnostics=()):

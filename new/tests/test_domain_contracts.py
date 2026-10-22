@@ -32,7 +32,7 @@ from midas.domain.submission import (
     resolve_entry, validate_submission,
 )
 from midas.domain import (
-    AdmittedCheck, Candidate, CheckKind, Dependency, DomainError, OwnerVersion,
+    AdmittedCheck, AdmittedReview, Candidate, CheckKind, Dependency, DomainError, OwnerVersion,
     ProofGraph, ProofNode, ProofState, accept_checked_proof,
 )
 from tests.test_domain import artifact, receipt, uid
@@ -699,6 +699,32 @@ class JointTests(unittest.TestCase):
             accept_joint(self.graph, self.selection, self.sid, (self.checks[0], replace(self.checks[1], candidate=wrong)))
         with self.assertRaises(DomainError):
             accept_joint(self.graph, self.selection, self.sid, self.checks[::-1])
+
+    def test_joint_conditional_definition_requires_assembled_certificate(self):
+        child = ProofNode(OwnerVersion('obl_' + 'a'*64, 0), self.nodes[0].environment_id, artifact('child interface'))
+        proof = Candidate(uid('child proof'), child.owner, child.environment_id, artifact('child proof'))
+        child = replace(child, selected=AdmittedCheck(proof, CheckKind.DIRECT, receipt('child'), artifact('child evidence')))
+        graph = replace(self.graph, nodes=(*self.graph.nodes, child))
+        candidate = replace(self.checks[0].candidate, dependencies=(Dependency(child.owner, 'h', child.interface),))
+        checked = AdmittedCheck(candidate, CheckKind.CONDITIONAL, receipt('conditional'), artifact('conditional evidence'))
+        review = AdmittedReview(candidate, receipt('review'), True)
+        assembled = AdmittedCheck(candidate, CheckKind.ASSEMBLY, receipt('assembled'), artifact('assembled evidence'),
+                                  (child.proof,))
+        property_candidate = replace(self.checks[1].candidate, dependencies=(replace(
+            self.checks[1].candidate.dependencies[0], certificate=assembled.evidence),))
+        checks = checked, replace(self.checks[1], candidate=property_candidate)
+        with self.assertRaises(DomainError):
+            accept_joint(graph, self.selection, self.sid, checks, reviews=(review, None))
+        result = accept_joint(graph, self.selection, self.sid, checks,
+                              reviews=(review, None), assemblies=(assembled, None))
+        self.assertTrue(all(node.state == ProofState.VERIFIED for node in result.nodes))
+        self.assertIsNone(graph.node(candidate.owner).selected)
+        with self.assertRaises(DomainError):
+            accept_joint(graph, self.selection, self.sid, checks,
+                         assemblies=(assembled, None))
+        with self.assertRaises(DomainError):
+            accept_joint(graph, self.selection, self.sid, (checked, self.checks[1]),
+                         reviews=(review, None), assemblies=(assembled, None))
 
     def test_joint_submission_requires_all_targets_and_earlier_definition_scope(self):
         value = submission()

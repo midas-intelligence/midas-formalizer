@@ -314,8 +314,14 @@ python -B -m midas status run --nodes --state UNRESOLVED --limit 100 --json
 python -B -m midas status run --owner OBLIGATION_ID
 ```
 
-Node states are `UNRESOLVED`, `CONDITIONAL`, and `VERIFIED`. `--roots` restricts
-results to selected roots; `--after ID` uses an exclusive obligation-ID cursor.
+Node states are `UNRESOLVED`, `CONDITIONAL`, and `VERIFIED`. The progress summary
+counts current targets, dependencies, pending submission entries, and running work; other saved nodes
+appear separately as `discarded` and do not inflate `waiting`. `--nodes` still
+includes those historical nodes for inspection. JSON summaries expose the separate
+`discarded_nodes` count.
+
+`--roots` restricts results to selected roots; `--after ID` uses an exclusive
+obligation-ID cursor.
 Page sizes range from 1 to 1000. JSON pages include a revision and next cursor.
 Status reads do not start compilers or require provider credentials.
 

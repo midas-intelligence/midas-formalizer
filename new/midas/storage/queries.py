@@ -167,6 +167,26 @@ class RunReader:
                 rows = self._db.execute('SELECT id FROM nodes WHERE state=? AND id>? ORDER BY id LIMIT ?', (state, after, page_limit(limit)))
             return tuple(self.node(row[0]) for row in rows)
 
+    def display_nodes(self, *, extra_roots=(), after='', limit=100):
+        """Page roots, running owners and their dependencies, plus caller-supplied roots."""
+        self._check()
+        page_limit(limit)
+        if len(extra_roots) > 1000:
+            raise ValueError('Display roots exceed batch allowance')
+        extra = ' UNION SELECT id FROM nodes WHERE id IN ('+','.join('?' for _ in extra_roots)+')' if extra_roots else ''
+        rows = self._db.execute('''WITH RECURSIVE current(id) AS (
+            SELECT owner FROM roots
+            UNION SELECT i.owner FROM intents i JOIN nodes n ON n.id=i.owner AND n.generation=i.generation
+                WHERE i.state='RUNNING'
+            '''+extra+'''
+            UNION SELECT e.child FROM edges e JOIN current c ON e.parent=c.id
+        ) SELECT n.id,n.generation,n.revision,n.state,a.id,a.digest,a.size,r.ordinal
+            FROM current c JOIN nodes n ON n.id=c.id JOIN artifacts a ON a.id=n.interface
+            LEFT JOIN roots r ON r.owner=n.id WHERE n.id>? ORDER BY n.id LIMIT ?''',
+            (*extra_roots, after, limit))
+        return tuple(NodeSummary(OwnerVersion(*row[:2]), row[2], row[3], ArtifactRef(*row[4:7]), row[7])
+                     for row in rows)
+
     def consumers(self, owner_id, *, after='', limit=100):
         self._check()
         return tuple(row[0] for row in self._db.execute(
@@ -209,18 +229,22 @@ class RunReader:
             if self._status_cache is not None and self._status_cache[0] == cache_key:
                 return self._status_cache[1]
         # One SQLite statement is one consistent snapshot, even for a live reader.
-        rows = self._db.execute('''SELECT r.revision,r.graph_revision,a.*,c.category,c.state,c.value
+        # Start with indexed running work, not the potentially large unresolved graph.
+        rows = self._db.execute('''SELECT r.revision,r.graph_revision,a.*,c.category,c.state,c.value,
+            (SELECT count(DISTINCT i.owner) FROM intents i
+             CROSS JOIN nodes n ON n.id=i.owner AND n.generation=i.generation
+             WHERE i.state='RUNNING' AND n.state='UNRESOLVED')
             FROM run r JOIN accounting a ON a.singleton=r.singleton LEFT JOIN counts c ON c.value>0
             ORDER BY c.category,c.state''').fetchall()
         revision, graph = rows[0][:2]
-        a = rows[0][3:-3]
+        a = rows[0][3:-4]
         counts = {k: [] for k in ('nodes', 'intents', 'executions')}
         for row in rows:
-            category, state, value = row[-3:]
+            category, state, value = row[-4:-1]
             if category is not None:
                 counts[category].append((state, value))
         result = Status(revision, graph, *(tuple(counts[k]) for k in ('nodes', 'intents', 'executions')),
-                        Accounting(a[0], Usage(*a[1:5]), Usage(*a[5:9]), Usage(*a[9:13]), *a[13:]))
+                        Accounting(a[0], Usage(*a[1:5]), Usage(*a[5:9]), Usage(*a[9:13]), *a[13:]), rows[0][-1])
         if cache_key is not None:
             self._status_cache = (cache_key, result)
         return result

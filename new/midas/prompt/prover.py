@@ -63,7 +63,9 @@ unfolding during elaboration, consider local transparency control or intermediat
 equalities before repeating the same repair. A simplified probe may miss the issue.
 
 Use candidate for joint targets, with target entries in source order and any
-shared lemma entries. Use null scope_target/statement for targets. Unproved lemma
+shared lemma entries. Use null scope_target/statement for targets. For each lemma,
+set scope_target to the exact selected target name whose source context it uses,
+and supply its statement. Unproved lemma
 entries have null proof_body and a concrete English proof plan. Dependencies name
 explicit parameters and entries; submission is current for this action or an
 advertised reference (including base only when offered in INTERFACES). The
@@ -102,8 +104,8 @@ project searches the frozen project sources.
 Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
 preference within the selected scope. Large excerpts may continue on another page.
-Queries require backends. For names-only retrieval, use empty queries and backends
-arrays. Supply at least one query or name.
+Queries require backends. For names-only retrieval, use "queries":[] and
+"backends":[]. Supply at least one query or name.
 For example (replace Nat.Prime with the actual name from your task):
 {"action":{"mode":"retrieve","rationale":"Inspect the definition used in the goal.","queries":[],"names":["Nat.Prime"],"backends":[]},"memory_update":null}
 Discovery alone does not certify availability.

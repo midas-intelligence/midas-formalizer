@@ -359,7 +359,7 @@ class Contracts(unittest.TestCase):
             self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'stop_requests'), 1)
             self.assertIn('Apply True.intro.', Memory.load(r.read(run.writer, state.memory)).observations[-1].messages)
 
-    def test_protocol_rejection_reaches_next_model_prompt(self):
+    def test_protocol_rejection_is_saved_but_omitted_from_next_model_prompt(self):
         from midas.application import records as r
         from midas.provider import ModelOutput, Route
         from midas.strategy import Memory
@@ -381,8 +381,9 @@ class Contracts(unittest.TestCase):
                     if len(calls) == 1:
                         reply = response(action)
                     else:
-                        self.assertIn(b'Action rejected: '+expected, raw)
-                        self.assertIn(b'Correct the action using the current CAPABILITIES', raw)
+                        self.assertNotIn(b'Action rejected:', raw)
+                        self.assertNotIn(b'Correct the action using the current CAPABILITIES', raw)
+                        self.assertNotIn(b'FEEDBACK observation-', raw)
                         reply = response(proof())
                     return ModelOutput(raw=reply, usage=Usage(0, 0, 0, 0))
                 self.app.transports = {Route.from_config(route).scope: transport}
@@ -397,7 +398,35 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(run.writer.counter('owner:'+owner, 'retrieval'), 0)
                     self.assertEqual(run.writer.counter('owner:'+owner, 'research'), 0)
                     self.assertEqual(calls[0].partition(b'QUESTION next-action')[0],
-                                     calls[1].partition(b'FEEDBACK observation-1')[0])
+                                     calls[1].partition(b'QUESTION next-action')[0])
+
+    def test_resume_raised_protocol_allowance_reopens_exhausted_node(self):
+        from midas.application import records as r
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        calls = []
+        def transport(request, raw, *args):
+            calls.append(raw)
+            self.assertNotIn(b'Action rejected:', raw)
+            action = (dict(mode='retrieve', rationale='Inspect addition.', queries=[{'dummy': ''}],
+                           names=[], backends=[]) if len(calls) <= 3 else proof())
+            return ModelOutput(raw=response(action), usage=Usage(0, 0, 0, 0))
+        self.app.transports = {Route.from_config(route).scope: transport}
+        with self.start(workflow='live', config=replace(Config(), prover=route)) as run:
+            self.assertEqual(self.finish(run).exit_code, 1)
+            owner = self.selected.identities[0].id
+            _, state = r.owner_state(run.writer, owner)
+            self.assertTrue(state.stopped)
+            self.assertEqual(state.reason, 'protocol_revision_allowance_exhausted')
+            self.assertEqual(run.writer.counter('owner:'+owner, 'protocol'), 2)
+        with self.app.resume(self.root/'run', increases={'run': {'turns': 401}}) as run:
+            self.assertTrue(r.owner_state(run.writer, owner)[1].stopped)
+            self.assertEqual(self.finish(run).exit_code, 1)
+        with self.app.resume(self.root/'run', increases={'mathematics': {'protocol': 5}}) as run:
+            self.assertFalse(r.owner_state(run.writer, owner)[1].stopped)
+            self.assertEqual(run.writer.counter('owner:'+owner, 'protocol'), 2)
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(len(calls), 4)
 
     def test_inspect_does_not_open_services_or_claim_writer(self):
         with self.start() as run:
@@ -500,6 +529,45 @@ class Contracts(unittest.TestCase):
         with self.app.resume(self.root/'run') as run:
             self.assertEqual(token_usage.sample(run.writer, owner, 'prover', provider_route), (1000, 500))
             self.assertEqual(r.owner_state(run.writer, owner.obligation_id)[1].evidence, evidence)
+
+    def test_research_usage_does_not_calibrate_prompts_but_remains_charged(self):
+        from midas.application import records as r, token_usage
+        from midas.application.service import commit
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        research_route = ModelRoute(provider='openai', model='fixture', input_token_budget=262144)
+        research = dict(mode='research', rationale='Read supporting context.', question='What proves True?', urls=[])
+        replies = iter((response(research), response(research), response(proof())))
+        research_calls = []
+        def transport(request, raw, *args):
+            if request.role == 'research':
+                research_calls.append(raw)
+                return ModelOutput(raw=model_json(dict(answer='Use True.intro.', sources=[], unresolved=[])),
+                                   usage=Usage(332725, 263040, 5283, 100))
+            return ModelOutput(raw=next(replies), usage=Usage(100, 0, 10, 0))
+        self.app.transports = {Route.from_config(setting).scope: transport for setting in (route, research_route)}
+        with self.start(workflow='live', config=replace(Config(), prover=route, research=research_route)) as run:
+            reader = run.writer
+            owner = run.workflow.graph(reader).nodes[0].owner
+            key = owner.obligation_id+':research'
+            saved_sample = [Route.from_config(research_route).scope, 1, 332725]
+            commit(reader, 'previous-research-sample', r.merge(
+                r.record(reader, 'application.prompt_usage', key, saved_sample),
+                r.record(reader, 'application.prompt_inputs', 'previous-research',
+                         [key, saved_sample[0], 7042])))
+            # A resumed, already-prepared research call must not update calibration either.
+            commit(reader, 'previous-research-observation', token_usage.observe(reader,
+                SimpleNamespace(request=SimpleNamespace(job=SimpleNamespace(semantic_key='previous-research'))),
+                SimpleNamespace(status=ResultStatus.SUCCEEDED, usage=Usage(400000, 0, 0, 0))))
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(len(research_calls), 2)
+            self.assertEqual(reader.status_snapshot().accounting.actual, Usage(665750, 526080, 10596, 200))
+            self.assertIsNone(token_usage.sample(reader, owner, 'research', Route.from_config(research_route)))
+            self.assertEqual(r.value(reader, 'application.prompt_usage', key), saved_sample)
+            self.assertEqual(token_usage.sample(reader, owner, 'prover', Route.from_config(route))[1], 100)
+            new_inputs = [record for record in reader.records('application.prompt_inputs')
+                          if record.key != 'previous-research']
+            self.assertEqual(len(new_inputs), 3)
 
     def test_finite_budget_with_unknown_projection_returns_blocked(self):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
@@ -1144,6 +1212,7 @@ class ExportScheduling(unittest.TestCase):
             parent_request=Mock(), policy=SimpleNamespace(config=Config(), export_limits=Mock()),
             compiler_job=Mock(side_effect=AssertionError('Duplicate export job')))
         reader = Mock()
+        flow.work_graph = lambda reader: (flow.graph(reader), {})
         reader.counter.return_value = 0
         return flow, reader, 'export:' + request.sha256
 

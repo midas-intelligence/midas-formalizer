@@ -17,6 +17,8 @@ class Inspection:
     runtime_ms: int
     model_slots: int
     compiler_slots: int
+    node_counts: tuple | None = None
+    discarded_nodes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,12 +51,14 @@ def progress(reader, *, committed=None, integration=Stage.PENDING, verification=
         reasons=tuple(dict.fromkeys(reasons))[:20], allow_sorry=allow_sorry)
 
 
-def project(reader, policy, *, workflow, progress, committed=None, completion=None):
+def project(reader, policy, *, workflow, progress, committed=None, completion=None, node_counts=None):
     config = policy.config
-    return Inspection(reader.run_id, workflow, committed or reader.status_snapshot(),
+    committed = committed or reader.status_snapshot()
+    discarded = sum(n for _, n in committed.nodes)-sum(n for _, n in node_counts) if node_counts is not None else 0
+    return Inspection(reader.run_id, workflow, committed,
         completion or policy.completion(progress), progress, reader.frozen_run().environment_id,
         config.run.turns, config.run.runtime_ms,
-        config.scheduling.model_concurrency, config.scheduling.compiler_concurrency)
+        config.scheduling.model_concurrency, config.scheduling.compiler_concurrency, node_counts, discarded)
 
 
 def nodes(reader, *, after='', limit=100, state=None, owner=None, roots=False):

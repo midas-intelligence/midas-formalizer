@@ -9,10 +9,10 @@
     "max_cost_microusd": null
   },
   "scheduling": {
-    "model_concurrency": 2,
-    "network_concurrency": 2,
-    "compiler_concurrency": 1,
-    "compiler_memory_mib": 4096,
+    "model_concurrency": 25,
+    "network_concurrency": 10,
+    "compiler_concurrency": 15,
+    "compiler_memory_mib": 8192,
     "backlog_low": 4,
     "backlog_new_stop": 52,
     "backlog_all_stop": 72,
@@ -38,30 +38,30 @@
   },
   "checker": {
     "wall_ms": 90000,
-    "memory_mib": 4096,
+    "memory_mib": 8192,
     "output_bytes": 8388608,
     "evidence_bytes": 67108864,
     "max_heartbeat": 2000000,
-    "max_rec_depth": 1000
+    "max_rec_depth": 4096
   },
   "local": {
     "wall_ms": 60000,
-    "memory_mib": 4096,
+    "memory_mib": 8192,
     "output_bytes": 8388608,
     "evidence_bytes": 67108864,
     "max_heartbeat": 2000000,
-    "max_rec_depth": 1000
+    "max_rec_depth": 4096
   },
   "export": {
     "timeout_ms": 90000,
     "comparator_timeout_ms": 1800000,
     "deadline_ms": 7200000,
-    "memory_mib": 4096,
+    "memory_mib": 8192,
     "max_bytes": 17179869184,
     "output_bytes": 8388608,
     "evidence_bytes": 67108864,
     "max_heartbeat": 2000000,
-    "max_rec_depth": 1000
+    "max_rec_depth": 4096
   },
   "model": {
     "invocation_ms": 600000,

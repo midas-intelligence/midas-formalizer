@@ -1,5 +1,6 @@
 """Command workflows and concrete service ownership; the controller owns all run work."""
 from pathlib import Path
+from dataclasses import replace
 from uuid import uuid4
 import time
 
@@ -17,7 +18,7 @@ from ..strategy import Context, Subject
 from ..tools import SearchService
 from . import candidates, preparation, providers, records as r
 from .workflow import Workflow
-from .inspection import Inspector
+from .inspection import Inspector, current_node_counts
 from ..status import project
 
 
@@ -40,7 +41,7 @@ class Run:
             if observe is not None and (completion.exit_code is not None or now >= next_update):
                 next_update = now+1
                 observe(project(self.writer, self.workflow.policy, workflow=self.workflow.mode,
-                                progress=progress, completion=completion))
+                                progress=progress, completion=completion, node_counts=current_node_counts(self.writer)))
         result = self.controller.run(self.workflow.progress, poll_interval=poll_interval,
                                      observe=publish if observe is not None else None)
         commit(self.writer, 'completion:'+str(uuid4()), r.record(self.writer, r.SCOPE, 'completion',
@@ -280,6 +281,17 @@ class Application:
                               library=library, export_only=export_only, allow_sorry=allow_sorry)
             try:
                 self.validate(run)
+                if increases:
+                    raised = {kind for kind in ('protocol', 'timeout', 'memory', 'elaboration')
+                              if getattr(config.mathematics, kind) > getattr(previous.mathematics, kind)}
+                    for node in run.workflow.graph(writer).nodes:
+                        _, state = r.owner_state(writer, node.owner.obligation_id)
+                        kind = next((kind for kind in raised
+                                     if state.reason == kind+'_revision_allowance_exhausted'), None)
+                        if (state.stopped and kind is not None and node.state == ProofState.UNRESOLVED
+                                and run.workflow.policy.revision(kind, run.workflow.owner_usage(writer, node.owner)).allowed):
+                            commit(writer, 'reopen-limit:'+str(uuid4()), r.save_owner(writer,
+                                node.owner.obligation_id, replace(state, stopped=False, reason=None)))
                 run.controller.resume()
                 return run
             except BaseException:

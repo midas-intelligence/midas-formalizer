@@ -16,7 +16,8 @@ def record(view):
         integration=c.integration_state.value, verification=c.export_verification_state.value,
         reasons=[r[:96] for r in c.reasons], reasons_truncated=any(len(r)>96 for r in c.reasons),
         exit_code=c.exit_code, roots=p.roots, verified_roots=p.verified_roots,
-        nodes=dict(view.status.nodes), intents=dict(view.status.intents), executions=dict(view.status.executions),
+        nodes=dict(view.status.nodes if view.node_counts is None else view.node_counts),
+        discarded_nodes=view.discarded_nodes, intents=dict(view.status.intents), executions=dict(view.status.executions),
         turns=a.turns, turn_limit=view.turn_limit, elapsed_ms=p.elapsed_ms, runtime_ms=view.runtime_ms,
         usage=usage(a.actual), known_usage=usage(a.known), unknown_reports=usage(a.unknown),
         reserved_usage=usage(a.reserved), models=a.models, model_slots=view.model_slots,
@@ -36,19 +37,30 @@ def safe(value):
     return ''.join(c if c.isprintable() else ascii(c)[1:-1] for c in str(value))
 
 
+def duration(milliseconds):
+    minutes, seconds = divmod(max(0, milliseconds // 1000), 60)
+    hours, minutes = divmod(minutes, 60)
+    return (f'{hours}h' if hours else '') + (f'{minutes}m' if minutes else '') + (f'{seconds}s' if seconds or not (hours or minutes) else '')
+
+
 def terminal(view):
     a, c, p = view.status.accounting, view.completion, view.progress
     dollars, micros = divmod(a.known.cost_microusd, 1_000_000)
     cost = f'${dollars}.{micros:06d}'
     if a.unknown.cost_microusd:
         cost += ' + unknown'
-    reasons = '; '.join(safe(r) for r in c.reasons)
-    return (f'{safe(c.outcome)} | roots: {p.verified_roots}/{p.roots} verified'
-            f' | integration: {c.integration_state.value} | verification: {c.export_verification_state.value}\n'
-            f'turns: {a.turns}/{view.turn_limit} | cost: {cost}'
+    counts = dict(view.status.nodes if view.node_counts is None else view.node_counts)
+    active = view.status.active_nodes
+    reasons = '; '.join(safe(r) for r in c.reasons if r != 'active_workers')
+    return (f'time: {duration(p.elapsed_ms)}/{duration(view.runtime_ms)}'
+            f' | turns: {a.turns}/{view.turn_limit} | cost: {cost}'
             f' | model: {a.models}/{view.model_slots} | CPU: {a.compilers+a.locals}/{view.compiler_slots}'
-            f' | LeanExplore: {a.networks}'
-            + (f'\nreasons: {reasons}' if reasons else '')+'\n')
+            f' | LeanExplore: {a.networks}\n'
+            f'completed: {counts.get("VERIFIED", 0)} | conditional: {counts.get("CONDITIONAL", 0)}'
+            f' | active: {active} | waiting: {counts.get("UNRESOLVED", 0) - active}'
+            f' | discarded: {view.discarded_nodes}'
+            + (f' | status: {safe(c.outcome)}' if c.exit_code is not None else '')
+            + (f' | reasons: {reasons}' if reasons else '')+'\n')
 
 
 def write_json(stream, value):

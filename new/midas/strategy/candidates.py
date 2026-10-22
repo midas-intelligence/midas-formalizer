@@ -26,6 +26,8 @@ class Subject:
                 raise ValueError('Target statements belong to the frozen selection')
         elif self.kind == 'lemma':
             simple_name(self.name)
+            if self.scope_target is None:
+                raise ValueError('Supporting lemmas require scope_target naming a selected target')
             text(self.scope_target, 1024)
             text(self.statement, 1024**2)
         else:
@@ -299,12 +301,14 @@ def _admit(value, context):
         raise ValueError('Candidate omitted inherited imports')
     if context.definition_targets:
         earlier = set()
-        if len(entries) != len(context.subjects):
-            raise ValueError('Joint definition/property candidates require complete target proofs')
+        selected = {e['key']: e['subject']['name'] for e in entries if e['subject']['kind'] == 'target'}
         for entry in entries:
-            actual = {(d['entry']['submission_id'], d['entry']['key']) for d in entry['dependencies']}
-            if actual != {(value['submission_id'], key) for key in earlier}:
-                raise ValueError('Joint targets require exactly the preceding selected definitions')
+            if entry['subject']['kind'] != 'target':
+                continue
+            actual = {d['entry']['key'] for d in entry['dependencies']
+                      if d['entry']['submission_id'] == value['submission_id'] and d['entry']['key'] in selected}
+            if actual != earlier:
+                raise ValueError('Joint targets require exactly the preceding selected definitions plus supporting lemmas')
             if entry['subject']['name'] in context.definition_targets:
                 earlier.add(entry['key'])
     return value

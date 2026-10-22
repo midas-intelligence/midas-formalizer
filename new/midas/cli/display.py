@@ -35,7 +35,9 @@ class Display:
                 continue
             now = time.monotonic()
             text = terminal(view)
-            if text == previous and now-written < 10:
+            # The frame starts with time: elapsed/limit; only elapsed is volatile.
+            key = text.partition('/')[2]
+            if key == previous and now-written < 10:
                 continue
             try:
                 self.stream.write(text)
@@ -43,7 +45,7 @@ class Display:
             except Exception:
                 self.disabled.set()
                 return
-            previous, written = text, now
+            previous, written = key, now
 
     def __enter__(self):
         self.thread.start()

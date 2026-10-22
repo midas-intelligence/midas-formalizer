@@ -448,22 +448,24 @@ def validate_joint_submission(selection, packet, submission):
         raise ValueError('Joint target set differs from frozen selection')
     if not joint_targets(selection):
         return
-    entries = submission['entries']
+    entries = [e for e in submission['entries'] if e['subject']['kind'] == 'target']
+    selected = {e['key'] for e in entries}
     group = joint_targets(selection)
     if len(entries) != len(group):
-        raise ValueError('Joint candidates require complete target proofs; use local Lean helper lemmas inside each proof')
+        raise ValueError('Joint candidates require every selected target')
     earlier = {}
     for entry, (target, _) in zip(entries, group):
         if entry['subject'] != {'kind':'target', 'name':target.selector}:
             raise ValueError('Joint target order differs from frozen selection')
         for dep in entry['dependencies']:
             ref = dep['entry']
-            if ref['submission_id'] != submission['submission_id'] or ref['key'] not in earlier:
-                raise ValueError('Joint dependencies must reference earlier definitions in this candidate')
+            if ref['submission_id'] == submission['submission_id'] and ref['key'] in selected and ref['key'] not in earlier:
+                raise ValueError('Joint target dependencies must reference earlier definitions in this candidate')
         # Freeze the complete preceding definition context, including values
         # referenced transitively by another definition's certificate.
         expected = set(earlier)
-        supplied = {dep['entry']['key'] for dep in entry['dependencies']}
+        supplied = {dep['entry']['key'] for dep in entry['dependencies']
+                    if dep['entry']['submission_id'] == submission['submission_id']}
         if not expected <= supplied:
             raise ValueError('Include every earlier selected definition as an explicit dependency')
         if target.kind == 'def':
@@ -471,7 +473,7 @@ def validate_joint_submission(selection, packet, submission):
 
 
 def accept_joint(graph: ProofGraph, selection: FrozenSelection, submission_id: str,
-                 checks: tuple[AdmittedCheck, ...]) -> ProofGraph:
+                 checks: tuple[AdmittedCheck, ...], *, reviews=(), assemblies=(), support=()) -> ProofGraph:
     """Select every required root in one replacement, or raise without changes.
 
     The checker must have replayed each closed definition certificate in this
@@ -484,19 +486,28 @@ def accept_joint(graph: ProofGraph, selection: FrozenSelection, submission_id: s
     group = joint_targets(selection)
     if not group or len(checks) != len(group):
         raise DomainError('Joint acceptance requires every selected target')
+    reviews = reviews or (None,) * len(checks)
+    assemblies = assemblies or (None,) * len(checks)
+    if len(reviews) != len(checks) or len(assemblies) != len(checks):
+        raise DomainError('Joint reviews and assemblies must match selected targets')
     updates = {}
     definitions = {}
+    roots = {identity.id for _, identity in group}
     all_unchanged = True
-    for checked, (target, identity) in zip(checks, group):
+    for checked, review, assembly, (target, identity) in zip(checks, reviews, assemblies, group):
         candidate = checked.candidate
         if (candidate.owner.obligation_id != identity.id or candidate.environment_id != identity.environment_id
-                or candidate.joint_submission_id != submission_id or checked.kind != CheckKind.DIRECT):
-            raise DomainError('Joint check differs from target, environment, submission, or direct-proof kind')
+                or candidate.joint_submission_id != submission_id or checked.kind == CheckKind.ASSEMBLY):
+            raise DomainError('Joint check differs from target, environment, submission, or proof kind')
         node = graph.node(candidate.owner)
         if candidate.id in graph.retired_candidates:
             raise DomainError('Retired joint candidate')
         supplied = set()
         for dep in candidate.dependencies:
+            if dep.origin != DependencyOrigin.CLOSED_DEFINITION:
+                if dep.owner.obligation_id in roots:
+                    raise DomainError('Joint selected definitions require closed certificates')
+                continue
             prior = definitions.get(dep.owner.obligation_id)
             if (dep.origin != DependencyOrigin.CLOSED_DEFINITION or prior is None
                     or dep.owner != prior.candidate.owner or dep.submission_id != submission_id
@@ -507,14 +518,34 @@ def accept_joint(graph: ProofGraph, selection: FrozenSelection, submission_id: s
             raise DomainError('Joint check must include every earlier selected definition')
         if node.selected is not None and node.selected != checked:
             raise DomainError('Joint selection conflicts with current proof')
-        all_unchanged &= node.selected == checked
-        updates[node.owner.obligation_id] = replace(node, selected=checked)
+        updated = replace(node, selected=checked, review=review, assembly=assembly)
+        all_unchanged &= node == updated
+        updates[node.owner.obligation_id] = updated
         if target.kind == 'def':
-            definitions[node.owner.obligation_id] = checked
+            definitions[node.owner.obligation_id] = assembly or (checked if checked.kind == CheckKind.DIRECT else None)
+    roots_unchanged = all_unchanged
+    items(support, ProofNode)
+    for node in support:
+        candidate = node.selected.candidate if node.selected else None
+        if (node.owner.obligation_id in roots or node.owner.obligation_id in updates or candidate is None
+                or candidate.joint_submission_id != submission_id):
+            raise DomainError('Invalid joint supporting proof')
+        prior_node = graph.node(node.owner)
+        if replace(prior_node, selected=node.selected, review=node.review, assembly=node.assembly) != node:
+            raise DomainError('Joint supporting proof changed its binding')
+        if prior_node.selected is not None and prior_node != node:
+            raise DomainError('Joint supporting proof conflicts with current selection')
+        for dep in candidate.dependencies:
+            if dep.origin == DependencyOrigin.CLOSED_DEFINITION:
+                prior = definitions.get(dep.owner.obligation_id)
+                if prior is None or dep.certificate != prior.evidence or dep.owner != prior.candidate.owner:
+                    raise DomainError('Supporting proof uses a different definition certificate')
+        updates[node.owner.obligation_id] = node
+        all_unchanged &= prior_node == node
     if all_unchanged:
         return graph
     # A partial selection indicates a broken atomic commit, not work to silently adopt.
-    if any(graph.node(checked.candidate.owner).selected is not None for checked in checks):
+    if not roots_unchanged and any(graph.node(checked.candidate.owner).selected is not None for checked in checks):
         raise DomainError('Partially selected joint candidate')
     return replace(graph, revision=graph.revision + 1,
                    nodes=tuple(updates.get(node.owner.obligation_id, node) for node in graph.nodes))

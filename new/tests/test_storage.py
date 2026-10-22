@@ -328,8 +328,10 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.w.invocation(invocation.original_execution_id), invocation)
 
     def test_prepared_release_and_recovery_charges(self):
+        self.assertEqual(self.w.status_snapshot().active_nodes, 0)
         self.reserve('prepared', dispatch=False, bounds=Usage(20, 5, 10, 100))
         sent = self.reserve('sent', bounds=Usage(20, 5, 10, 100))
+        self.assertEqual(self.w.status_snapshot().active_nodes, 1)
         self.reopen()
         with self.w.transaction(self.w.session) as tx:
             self.assertEqual(tx.reconcile(limit=1), 1)
@@ -445,6 +447,7 @@ class StorageTests(unittest.TestCase):
         with self.w.transaction(self.w.session) as tx:
             tx.apply('retire', Changes(nodes=(NodeChange(version, replace(self.node, owner=replace(self.owner, generation=1))),), graph_revision=1))
         self.assertEqual(self.w.status_snapshot().accounting.turns, 1)
+        self.assertEqual(self.w.status_snapshot().active_nodes, 0)
         self.assertFalse(self.w.ready(0))
         self.assertEqual(self.w.executions('NOT_SENT'), (prepared.original_execution_id,))
         _, receipt = self.receive(sent)
@@ -479,6 +482,10 @@ class StorageTests(unittest.TestCase):
         with self.w.transaction(self.w.session) as tx:
             tx.apply('graph', Changes(nodes=(NodeChange(None, child), NodeChange(self.w.node(self.owner.obligation_id).version, parent)), graph_revision=1))
         self.assertEqual(self.w.consumers(child_owner.obligation_id), (self.owner.obligation_id,))
+        with patch('midas.storage.codec.unnode', side_effect=AssertionError('proof decode')):
+            first = self.w.display_nodes(limit=1)
+            second = self.w.display_nodes(after=first[-1].owner.obligation_id, limit=1)
+            self.assertEqual({n.owner for n in (*first, *second)}, {self.owner, child_owner})
         version = self.w.node(child_owner.obligation_id).version
         with self.w.transaction(self.w.session) as tx:
             with self.assertRaises(Conflict):
@@ -671,6 +678,10 @@ class StorageTests(unittest.TestCase):
         self.w.validate()
         first = self.w.nodes(limit=1000)
         second = self.w.nodes(after=first[-1].version.owner.obligation_id, limit=1000)
+        self.assertEqual((len(first), len(second)), (1000, 101))
+        first = self.w.display_nodes(extra_roots=(child.owner.obligation_id,), limit=1000)
+        second = self.w.display_nodes(extra_roots=(child.owner.obligation_id,),
+                                      after=first[-1].owner.obligation_id, limit=1000)
         self.assertEqual((len(first), len(second)), (1000, 101))
 
 

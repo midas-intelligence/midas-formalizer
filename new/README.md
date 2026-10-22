@@ -302,7 +302,11 @@ the saved reason. Unknown usage remains null, with known totals and unknown-repo
 counts shown separately.
 
 Run progress uses the same status projection, is throttled to once per second,
-and goes to stderr. A single pending frame is replaced when output is slow;
+and goes to stderr. Terminal output shows time, turns, cost and resource usage,
+then separate `completed`, `conditional`, `active` and `waiting` node counts.
+Active nodes are distinct unresolved owners of running work; waiting nodes are
+the remaining unresolved nodes. Routine stage flags and `active_workers` reasons
+are omitted. A single pending frame is replaced when output is slow;
 a blocked or broken progress sink cannot delay controller admission or draining.
 `--quiet` suppresses progress. Final output goes to stdout. Status/query success
 exits 0; run results retain policy exit codes (0 verified, 1 incomplete/blocked,
@@ -462,6 +466,7 @@ suite's executable-path checks):
 ../.venv/bin/python -B -m tests.benchmark_application
 # Requires permission for Lean/bubblewrap under the root AGENTS.md:
 ../.venv/bin/python -B -m tests.check_application_lean /absolute/path/to/toolchain/bin/lean
+../.venv/bin/python -B -m tests.check_joint_lean /absolute/path/to/toolchain/bin/lean
 ```
 
 The application benchmark compares warm inspection commands and idle
@@ -890,8 +895,14 @@ child dependency cycles are rejected by domain/checker boundaries; candidate
 check order visits dependencies first. Unproved children receive binding checks
 only. Definitions remain named declarations with bodies, never assumed facts.
 Joint definition/property candidates require every preceding selected definition
-as an explicit dependency and retain the direct-attempt classification. Their
-proofs enter domain's atomic `accept_joint` path.
+as an explicit dependency and may include supporting lemma entries. Lemmas use
+`scope_target` to name the selected declaration supplying their source context;
+targets leave that field null. Supporting obligations use the ordinary recursive
+decomposition, review and assembly workflow. A definition depending on lemmas is
+assembled into a closed proof before its value is replayed in later targets.
+Reviewed joint proofs remain private while that work runs, and required roots
+enter domain's atomic `accept_joint` path together. Candidates with only closed
+definition dependencies retain the direct-attempt classification.
 
 `Draft` saves the binary submission and separate English guidance. Exact named
 fragment edits apply sequentially on private values and either produce a complete

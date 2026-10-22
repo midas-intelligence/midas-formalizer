@@ -1,13 +1,13 @@
 """Closed source composition and integration over admitted, versioned proofs."""
 from hashlib import sha256
-import re
 
 from ..checker import evidence as ev
+from ..checker.proofs import prefix_proof as _prefix_proof
 from ..checker.requests import read
 from ..domain import ByteSpan, DependencyOrigin, ProofReference, ProofState, Signature
 from ..domain import encoding as codec
 from ..source import (CheckedDeclaration, Edit, GeneratedSource, RenderPolicy, RootReplacement, SourceFile,
-                      add_imports, apply_edits, code_only, declarations, integrate, lean_name, merge_imports,
+                      add_imports, apply_edits, declarations, integrate, lean_name, merge_imports,
                       parse_identifier, proof_application)
 from .protocol import NodeSnapshot
 
@@ -45,50 +45,6 @@ def name_key(name):
         parts.append((name[0], name[2]))
         name = name[1]
     return tuple(parts)
-
-
-def _prefix_proof(proof, namespace):
-    """Relocate reserved proof names while preserving sharing and authored strings."""
-    def rename(name):
-        parts, current = [], name
-        while current != ev.ROOT and current != ['anonymous']:
-            parts.append((current[0], current[2]))
-            current = current[1]
-        if current != ev.ROOT:
-            return name
-        result = ['str', ['anonymous'], namespace]
-        for tag, part in reversed(parts):
-            result = [tag, result, part]
-        return result
-    memo = {}
-    def expression(value):
-        pending = [(value, False)]
-        while pending:
-            item, done = pending.pop()
-            if not isinstance(item, (list, dict)) or id(item) in memo:
-                continue
-            if not done:
-                pending.append((item, True))
-                pending.extend((v, False) for v in (item.values() if isinstance(item, dict) else item))
-            elif isinstance(item, dict):
-                memo[id(item)] = {k: memo.get(id(v), v) for k, v in item.items()}
-            else:
-                result = [memo.get(id(v), v) for v in item]
-                if result and result[0] in ('const', 'proj'):
-                    result[1] = rename(item[1])
-                memo[id(item)] = result
-        return memo.get(id(value), value)
-    pattern = re.compile(r"(?<![\w'«])(?:«MidasCandidateResult»|MidasCandidateResult)(?![\w'»])")
-    result = []
-    for row in proof['declarations']:
-        text, parts, offset = row['source'], [], 0
-        for match in pattern.finditer(code_only(text)):
-            parts.extend((text[offset:match.start()], '«' + namespace + '»'))
-            offset = match.end()
-        parts.append(text[offset:])
-        result.append(CheckedDeclaration(codec.encode(rename(row['name'])), ev.closed(expression(row['signature'])),
-            SourceFile(namespace, ''.join(parts).encode()), tuple(codec.encode(rename(n)) for n in row['requires'])))
-    return tuple(result), codec.encode(['str', ['anonymous'], namespace])
 
 
 def bind_peers(selection, graph, candidate, packet, reader, *, available):

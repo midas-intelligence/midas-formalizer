@@ -130,8 +130,24 @@ def _base(selection, index, imports, available):
 
 
 def prepare_binding(selection, index, owner, *, statement=None, parameters=(),
-                    context=None, imports=(), available=frozenset(), subject_owner=None):
+                    context=None, imports=(), available=frozenset(), subject_owner=None,
+                    closed_definitions=(), reader=None):
     packet = _base(selection, index, imports, available)
+    if type(closed_definitions) is not tuple or len(closed_definitions) > 13:
+        raise ValueError('Expected at most 13 immutable definition bindings')
+    refs, bindings = [], []
+    for dependency, identity, admitted in closed_definitions:
+        validate_identity(identity)
+        interface = codec.decode(read(reader, dependency.interface, TERM_BYTES))
+        if (identity.id != dependency.owner.obligation_id or identity.environment_id != selection.environment_id
+                or codec.encode(interface['signature']) != codec.encode(signature(identity))):
+            raise ValueError('Binding definition differs from its checked identity')
+        certificate = codec.decode(read(reader, dependency.certificate))
+        bindings.append((dependency, identity, certificate, admitted, interface))
+        refs.extend((dependency.interface, dependency.certificate))
+    if bindings:
+        from .proofs import bind_definitions
+        bind_definitions(selection, index, bindings, packet, available=available)
     if owner.obligation_id != selection.identities[index].id:
         raise ValueError('Binding job must be scoped to the selected parent')
     if type(parameters) is not tuple or len(parameters) > 128:
@@ -154,7 +170,7 @@ def prepare_binding(selection, index, owner, *, statement=None, parameters=(),
             statement_protocol='elaborated-statements-v1', statement_context=context, declaration_context=context)
         for key in ('parameters', 'binding_protocol', 'interface'):
             packet['interface'].pop(key)
-    return _request('binding', selection, owner, packet)
+    return _request('binding', selection, owner, packet, inputs=refs)
 
 
 def prepare_proof(selection, index, candidate, reader, *, identity=None, statement=None,

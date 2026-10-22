@@ -38,6 +38,10 @@ class StatusTests(unittest.TestCase):
                 self.assertEqual(view.progress.export_verification, Stage.VERIFIED)
                 self.assertNotIn('package', record(view))
                 self.assertNotIn('toolchain', record(view))
+                text = terminal(view)
+                self.assertIn('completed: 1 | conditional: 0 | active: 0 | waiting: 0', text)
+                self.assertNotIn('integration:', text)
+                self.assertNotIn('verification:', text)
 
     def test_summary_reads_do_not_decode_proofs_and_pages_are_filtered(self):
         with self.fixture.start() as run:
@@ -48,7 +52,11 @@ class StatusTests(unittest.TestCase):
                 tx.apply('nodes', Changes(nodes=nodes, graph_revision=run.writer.status_snapshot().graph_revision))
             with patch('midas.storage.codec.unnode', side_effect=AssertionError('proof decode')):
                 inspector = inspection.Inspector()
-                self.assertEqual(sum(dict(inspector.inspect(self.root/'run').status.nodes).values()), 6)
+                view = inspector.inspect(self.root/'run')
+                self.assertEqual(sum(dict(view.status.nodes).values()), 6)
+                self.assertEqual(record(view)['nodes'], {'UNRESOLVED': 1})
+                self.assertEqual(record(view)['discarded_nodes'], 5)
+                self.assertIn('waiting: 1 | discarded: 5', terminal(view))
                 page = inspection.nodes(self.root/'run', limit=2, state='UNRESOLVED')
                 self.assertEqual(len(page.items), 2)
                 second = inspection.nodes(self.root/'run', limit=2, after=page.after)
@@ -63,16 +71,56 @@ class StatusTests(unittest.TestCase):
         with self.fixture.start():
             view = inspection.Inspector().inspect(self.root/'run')
         accounting = replace(view.status.accounting, known=Usage(10, 0, 4, 1500000), unknown=Usage(1, 0, 0, 1))
-        view = replace(view, status=replace(view.status, accounting=accounting),
-                       completion=replace(view.completion, reasons=('bad\x1b[2J\ntext\u202e',)))
+        view = replace(view, node_counts=None, status=replace(view.status, accounting=accounting,
+                       nodes=(('VERIFIED', 2), ('CONDITIONAL', 3), ('UNRESOLVED', 5)), active_nodes=2),
+                       completion=replace(view.completion, reasons=('active_workers', 'bad\x1b[2J\ntext\u202e')))
         value = record(view)
         self.assertIsNone(value['usage']['input_tokens'])
         self.assertIsNone(value['usage']['cost_microusd'])
         self.assertEqual(value['known_usage']['input_tokens'], 10)
         text = terminal(view)
         self.assertIn('$1.500000 + unknown', text)
+        self.assertIn('completed: 2 | conditional: 3 | active: 2 | waiting: 3', text)
+        self.assertEqual(len(text.splitlines()), 2)
+        self.assertNotIn('active_workers', text)
+        self.assertIn('reasons: bad', text)
         self.assertNotIn('\x1b', text)
         self.assertNotIn('\u202e', text)
+
+    def test_pending_submission_nodes_stay_current_and_failed_leftovers_are_discarded(self):
+        from midas.application import records as r
+        from midas.application.service import commit
+        with self.fixture.start() as run:
+            reader = run.writer
+            root = self.fixture.selected.identities[0].id
+            _, state = r.owner_state(reader, root)
+            interface = reader.node(root).node.interface
+            owners = tuple('obl_'+f'{i:064x}' for i in range(4))
+            with reader.transaction(reader.session) as tx:
+                tx.apply('helpers', Changes(nodes=tuple(NodeChange(None, ProofNode(OwnerVersion(owner, 0),
+                    self.fixture.selected.environment_id, interface)) for owner in owners),
+                    graph_revision=reader.status_snapshot().graph_revision))
+            commit(reader, 'submissions', r.merge(
+                r.save_owner(reader, root, replace(state, submission='current')),
+                r.save_owner(reader, owners[0], replace(state, submission='nested')),
+                r.record(reader, 'application.submissions', 'current',
+                         dict(phase='binding', rows={str(i): dict(owner=owner) for i, owner in enumerate(owners[:2])})),
+                r.record(reader, 'application.submissions', 'nested',
+                         dict(phase='proof', rows={'leaf': dict(owner=owners[2])})),
+                r.record(reader, 'application.submissions', 'failed',
+                         dict(phase='failed', rows={str(i): dict(owner=owner) for i, owner in enumerate(owners)}))))
+            inspector = inspection.Inspector()
+            with patch('midas.storage.codec.unnode', side_effect=AssertionError('proof decode')):
+                view = inspector.inspect(self.root/'run')
+                self.assertEqual(record(view)['nodes'], {'UNRESOLVED': 4})
+                self.assertEqual(record(view)['discarded_nodes'], 1)
+                self.assertIn('waiting: 4 | discarded: 1', terminal(view))
+                # Reusing a helper from a failed submission keeps it current; abandoning
+                # the current submission removes its entire unattached subtree.
+                commit(reader, 'abandon', r.save_owner(reader, root, state))
+                view = inspector.inspect(self.root/'run')
+                self.assertEqual(record(view)['nodes'], {'UNRESOLVED': 1})
+                self.assertEqual(record(view)['discarded_nodes'], 4)
 
     def test_worst_case_reasons_stay_within_json_metadata_limit(self):
         from midas.status import write_json

@@ -90,11 +90,12 @@ class Workflow:
         archives = advertised(reader, owner)
         displayed = set(state.evidence)
         return Snapshot(Version(owner, saved.revision, state.context, memory.version, len(state.evidence)),
-            context, self.selection.environment_id, self.graph(reader), memory,
+            context, self.selection.environment_id, self.work_graph(reader)[0], memory,
             owner_usage(reader, owner), RunUsage(turns=a.turns, backtracks=reader.counter(r.SCOPE, 'backtracks'),
                 intents=sum(n for _, n in reader.status_snapshot().intents)), self.services, self.mode,
             Draft.load(r.read(reader, state.base, 17*1024**2)) if state.base else None,
-            attempt, busy=pending is not None, stopped=state.stopped,
+            attempt, busy=pending is not None,
+            stopped=state.stopped and not (attempt and attempt.candidate.joint_submission_id),
             forbidden_names=tuple(t.selector for t in self.selection.selected.targets),
             allowed_pins=tuple(a.id for a in archives),
             cursors=tuple(f'{a.id}:{i}' for a in archives for i in range(1, min(len(a.pages), 128))
@@ -302,21 +303,30 @@ class Workflow:
             self._stages[name] = cached
         return cached[1]
 
+    def work_graph(self, reader):
+        revision = reader.status_snapshot().revision
+        cached = getattr(self, '_work_graph_cache', None)
+        if cached is None or cached[0] != revision:
+            cached = revision, candidates.pending_graph(self, reader)
+            self._work_graph_cache = cached
+        return cached[1]
+
     def parent_request(self, reader, owner):
-        node = self.graph(reader).node(owner)
+        node = self.work_graph(reader)[0].node(owner)
         invocation = reader.invocation(node.selected.receipt.original_execution_id)
         return CompilerRequest(r.read(reader, invocation.request.operation_payload, r.DATA))
 
     def export_inputs(self, reader, invocation):
         result = dict(selection=self.selection, graph=self.graph(reader))
         if invocation.request.job.kind == JobKind.ASSEMBLE:
+            result['graph'] = self.work_graph(reader)[0]
             result['parent_request'] = self.parent_request(reader, invocation.request.job.owner)
         elif invocation.request.job.kind == JobKind.EXPORT_VERIFY:
             result['integration'] = self.stage(reader, 'integration')
         return result
 
     def export_plan(self, reader):
-        graph = self.graph(reader)
+        graph, pending = self.work_graph(reader)
         profile = 'library' if self.library else 'source'
         integration, verification = self.stage(reader, 'integration'), self.stage(reader, 'verification')
         work = self.export.plan(self.selection, graph, profile=profile, integration=integration,
@@ -324,6 +334,8 @@ class Workflow:
         if not work:
             return None
         work = work[0]
+        if pending and work.kind != JobKind.ASSEMBLE:
+            return None
         name = 'assembly:'+work.owner.obligation_id if work.kind == JobKind.ASSEMBLE else (
             'integration' if work.kind == JobKind.INTEGRATE else 'verification')
         prior = r.value(reader, 'application.export', name)
@@ -398,7 +410,7 @@ class Workflow:
                             break
                     if count >= limit:
                         return
-            reachable = self.graph(reader).reachable()
+            reachable = self.work_graph(reader)[0].reachable()
             for node in self.graph(reader).nodes:
                 if node.owner.obligation_id not in reachable or node.state != ProofState.UNRESOLVED:
                     continue
@@ -544,7 +556,10 @@ class Workflow:
             effects.extend((r.save_owner(reader, owner.obligation_id, state),
                             begin(self, reader, turn, proposal.helper, proposal.artifacts, parent=binding[2])))
         elif binding[2]:
-            if proposal.graph:
+            if proposal.attempt and proposal.attempt.review:
+                effects.append(candidates.activate(self, reader, key, saved, entry_key,
+                    proposal.attempt.checked, proposal.attempt.review))
+            elif proposal.graph:
                 # Strategy has performed the independent review decision.
                 effects.extend((r.graph_changes(reader, snapshot.graph, proposal.graph),
                     candidates._row(reader, key, saved, entry_key, dict(saved['rows'][entry_key], done=True))))
@@ -571,6 +586,14 @@ class Workflow:
         if accepted.failure:
             return r.record(reader, 'application.export', name, ['failed', accepted.failure.value, epoch, graph.revision])
         if invocation.request.job.kind == JobKind.ASSEMBLE:
+            _, pending = self.work_graph(reader)
+            location = pending.get(accepted.value.candidate.owner.obligation_id)
+            if location:
+                key, entry_key = location
+                saved = candidates.submission(reader, key)
+                row = dict(saved['rows'][entry_key], assembly=r.check(accepted.value))
+                return r.merge(candidates._row(reader, key, saved, entry_key, row),
+                    r.record(reader, 'application.export', name, ['done', graph.revision]))
             effect = r.graph_changes(reader, graph, accept_assembly(graph, accepted.value))
             return r.merge(effect, r.record(reader, 'application.export', name, ['done', graph.revision]))
         stage = accepted.value

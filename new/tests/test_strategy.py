@@ -246,6 +246,31 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(Draft.load(draft.payload), draft)
         self.assertEqual(draft.checks(), (('witness', 'proof'), ('property', 'proof')))
 
+    def test_joint_definition_allows_supporting_obligations(self):
+        ctx = Context(context().selection_id, (Subject('target', 'witness'), Subject('target', 'property')),
+                      definition_targets=('witness',))
+        helper = dict(key='exists', kind='lemma', name='exists_witness', scope_target='witness',
+                      statement='∃ n : Nat, n = n', proof_body=None, proof='Use zero.', dependencies=[])
+        witness = dict(key='witness', kind='target', name='witness', scope_target=None, statement=None,
+                       proof_body='Classical.choose h', proof='Choose the witness.',
+                       dependencies=[dict(parameter='h', submission='current', key='exists')])
+        prop = dict(key='property', kind='target', name='property', scope_target=None, statement=None,
+                    proof_body='by rfl', proof='Reflexivity.',
+                    dependencies=[dict(parameter='witness', submission='current', key='witness')])
+        action = dict(mode='candidate', rationale='Choose a supported witness.', entries=[helper, witness, prop],
+                      proof='Prove existence, choose, and verify.', proof_departures='', definitions=[], imports=[])
+        draft = expand(action, ctx, uid('joint-supported'))
+        self.assertEqual(draft.mode, 'decomposition')
+        self.assertEqual(draft.checks(), (('exists', 'binding'), ('witness', 'proof'), ('property', 'proof')))
+        self.assertEqual(child_context(draft, 'exists', ctx).subjects[0].scope_target, 'witness')
+        self.assertEqual(Draft.load(draft.payload), draft)
+        prop['dependencies'] = []
+        with self.assertRaisesRegex(ValueError, 'preceding selected definitions'):
+            expand(action, ctx, uid('missing-definition'))
+        helper['scope_target'] = None
+        with self.assertRaisesRegex(ValueError, 'Supporting lemmas require scope_target'):
+            expand(action, ctx, uid('missing-scope'))
+
     def test_malformed_binary_records_and_changed_selection_are_rejected(self):
         draft = expand(proof(), context(), uid('draft'))
         for payload in (draft.payload[:-1], draft.payload + b'x', b'MIDASDRAFT\x01' + b'\xff'*8):
