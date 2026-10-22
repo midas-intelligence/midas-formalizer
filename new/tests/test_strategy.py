@@ -190,6 +190,37 @@ class ProtocolTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         interpret(response(dict(action, **extra)), role='prover', contract='prover-action-v2')
 
+    def test_retrieval_ignores_non_string_queries_without_coercing_them(self):
+        backend = dict(name='leanexplore', prefixes=[])
+        action = dict(mode='retrieve', rationale='Find addition.', names=[], backends=[backend],
+                      queries=[{'query': 'not a search string'}, 'addition', None, 1, True, ['nested']])
+        parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+        self.assertEqual(parsed.value['queries'], ['addition'])
+        self.assertEqual(parsed.value['backends'], [backend])
+        for queries in ('addition', {'query': 'addition'}, ['a', 'b', 'c', 'd'], ['x'*2049]):
+            with self.subTest(queries=queries), self.assertRaises(ValueError):
+                interpret(response(dict(action, queries=queries)), role='prover', contract='prover-action-v2')
+        # Other string arrays remain strict.
+        with self.assertRaises(ValueError):
+            interpret(response(dict(action, names=[{'name': 'Nat.add'}])), role='prover', contract='prover-action-v2')
+
+    def test_retrieval_deduplicates_names_in_first_occurrence_order(self):
+        action = dict(mode='retrieve', rationale='Inspect addition.', queries=[], backends=[],
+                      names=['Nat.add_comm', 'Nat.add', 'Nat.add_comm', 'Nat.add_assoc', 'Nat.add'])
+        parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+        self.assertEqual(parsed.value['names'], ['Nat.add_comm', 'Nat.add', 'Nat.add_assoc'])
+        for names in (['Nat.add'] * 13, ['Nat.add', {'name': 'Nat.add'}]):
+            with self.subTest(names=names), self.assertRaises(ValueError):
+                interpret(response(dict(action, names=names)), role='prover', contract='prover-action-v2')
+
+    def test_retrieval_keeps_names_when_all_queries_are_discarded(self):
+        action = dict(mode='retrieve', rationale='Inspect addition.', names=['Nat.add'],
+                      backends=[dict(name='leanexplore', prefixes=[])], queries=[{'dummy': ''}])
+        parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+        self.assertEqual(parsed.value['queries'], [])
+        self.assertEqual(parsed.value['backends'], [])
+        self.assertEqual(parsed.value['names'], ['Nat.add'])
+
     def test_search_and_lookup_responses_are_rejected(self):
         actions = (dict(mode='search', rationale='Find addition.', query='addition',
                         backend=dict(name='leanexplore', prefixes=[])),
@@ -213,6 +244,31 @@ class ProtocolTests(unittest.TestCase):
 
 
 class CandidateTests(unittest.TestCase):
+    def test_candidate_infers_existing_subject_and_new_lemma_scope(self):
+        for required in (Subject('target', 'goal'), Subject('lemma', 'goal', 'Root.target', 'True')):
+            with self.subTest(kind=required.kind):
+                ctx = Context(context().selection_id, (required,))
+                helper = dict(key='helper', name='helper', scope_target=None, statement='True',
+                              proof_body=None, proof='Use the constructor.', dependencies=[])
+                parent = dict(key='parent', name='goal', scope_target=None, statement=None,
+                              proof_body='by exact h', proof='Use the helper.',
+                              dependencies=[dict(parameter='h', submission='current', key='helper')])
+                action = dict(mode='candidate', rationale='Compose the proof.', entries=[helper, parent],
+                              proof='Use the helper.', proof_departures='', definitions=[], imports=[])
+                parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+                for scope, statement in ((None, None), ('Wrong.scope', 'False')):
+                    # Existing subjects always retain their exact saved proposition.
+                    parsed.value['entries'][1].update(scope_target=scope, statement=statement)
+                    draft = expand(parsed.value, ctx, uid('inferred-'+required.kind))
+                    entries = load_submission(draft.submission)['entries']
+                    self.assertEqual(entries[1]['subject'], required.value())
+                    self.assertEqual(entries[0]['subject'],
+                        Subject('lemma', 'helper', required.scope_target or required.name, 'True').value())
+                    self.assertEqual(child_context(draft, 'helper', ctx).subjects[0].statement, 'True')
+                parent['kind'] = required.kind
+                with self.assertRaisesRegex(ValueError, 'Response fields differ'):
+                    interpret(response(action), role='prover', contract='prover-action-v2')
+
     def test_recursive_children_use_flat_context_and_inherit_imports(self):
         ctx = replace(context(), imports=('Mathlib',))
         action = decomposition()
@@ -233,7 +289,7 @@ class CandidateTests(unittest.TestCase):
     def test_joint_definition_dependencies_use_direct_allowance_and_roundtrip(self):
         ctx = Context(context().selection_id, (Subject('target', 'witness'), Subject('target', 'property')),
                       definition_targets=('witness',))
-        row = lambda name: dict(key=name, kind='target', name=name, scope_target=None, statement=None,
+        row = lambda name: dict(key=name, name=name, scope_target=None, statement=None,
                                proof_body='by trivial', proof='A construction.', dependencies=[])
         action = dict(mode='candidate', rationale='Supply a witness and its property.', entries=[row('witness'), row('property')],
                       proof='Construct then verify.', proof_departures='', definitions=[], imports=[])
@@ -249,12 +305,12 @@ class CandidateTests(unittest.TestCase):
     def test_joint_definition_allows_supporting_obligations(self):
         ctx = Context(context().selection_id, (Subject('target', 'witness'), Subject('target', 'property')),
                       definition_targets=('witness',))
-        helper = dict(key='exists', kind='lemma', name='exists_witness', scope_target='witness',
+        helper = dict(key='exists', name='exists_witness', scope_target='witness',
                       statement='∃ n : Nat, n = n', proof_body=None, proof='Use zero.', dependencies=[])
-        witness = dict(key='witness', kind='target', name='witness', scope_target=None, statement=None,
+        witness = dict(key='witness', name='witness', scope_target=None, statement=None,
                        proof_body='Classical.choose h', proof='Choose the witness.',
                        dependencies=[dict(parameter='h', submission='current', key='exists')])
-        prop = dict(key='property', kind='target', name='property', scope_target=None, statement=None,
+        prop = dict(key='property', name='property', scope_target=None, statement=None,
                     proof_body='by rfl', proof='Reflexivity.',
                     dependencies=[dict(parameter='witness', submission='current', key='witness')])
         action = dict(mode='candidate', rationale='Choose a supported witness.', entries=[helper, witness, prop],
@@ -361,7 +417,7 @@ class CandidateTests(unittest.TestCase):
     def test_candidate_target_order_imports_and_external_references(self):
         ctx = Context(context().selection_id, (Subject('target', 'a'), Subject('target', 'b')),
                       references=(Reference('previous', 'lemma', uid('previous')),), imports=('Mathlib',))
-        row = lambda name: dict(key=name, kind='target', name=name, scope_target=None, statement=None,
+        row = lambda name: dict(key=name, name=name, scope_target=None, statement=None,
                                proof_body='by trivial', proof='Trivial.', dependencies=[])
         value = dict(mode='candidate', rationale='Joint proof.', entries=[row('a'), row('b')],
                      proof='Prove both.', proof_departures='', definitions=[], imports=['Mathlib'])
@@ -588,6 +644,32 @@ class StateTests(unittest.TestCase):
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action)), artifacts)
         self.assertEqual(changes.helper.request.action.names, ('Nat.Prime',))
+
+    def test_empty_retrieval_disables_only_retrieval(self):
+        artifacts, snapshot = fixture()
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        for queries in ([], [{'dummy': ''}]):
+            action = dict(mode='retrieve', rationale='No lookup needed.', names=[], queries=queries,
+                          backends=[dict(name='leanexplore', prefixes=[])])
+            changes = self.strategy.on_model(snapshot, self.policy, dispatched,
+                admitted(artifacts, dispatched, response(action)), artifacts)
+            self.assertTrue(changes.disable_retrieval)
+            self.assertIsNone(changes.helper)
+            self.assertIsNone(changes.revision_charge)
+            self.assertEqual(changes.work[0].operation, dispatched.turn.operation)
+        disabled = replace(snapshot, usage=replace(snapshot.usage, retrieval_disabled=True))
+        _, prepared, _ = dispatch(disabled, artifacts)
+        wire = decode(prepared.wire.wire, limit=8*1024**2)
+        capabilities = wire['input'][-1]['text']
+        helpers = capabilities.split('Helper modes: ', 1)[1].split('\n', 1)[0]
+        self.assertNotIn('retrieve', helpers)
+        self.assertIn('retrieve: disabled', capabilities)
+        self.assertTrue(self.policy.helper('probe', disabled.usage, disabled.services).allowed)
+        action = dict(mode='retrieve', rationale='Try again.', names=['Nat.add'], queries=[], backends=[])
+        dispatched, _, _ = dispatch(disabled, artifacts)
+        with self.assertRaisesRegex(ValueError, 'retrieval_disabled'):
+            self.strategy.on_model(disabled, self.policy, dispatched,
+                admitted(artifacts, dispatched, response(action)), artifacts)
 
     def test_stop_waits_for_review_and_only_approval_reports_objections(self):
         artifacts, snapshot = fixture()

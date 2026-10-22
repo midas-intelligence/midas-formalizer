@@ -35,14 +35,14 @@ def main():
         dep = lambda name, key: dict(parameter=name, submission='current', key=key)
         action = dict(mode='candidate', rationale='Choose and verify a supported witness.', definitions=[], imports=[],
             proof='Prove existence, choose a value, then verify its specification.', proof_departures='',
-            entries=[dict(key='exists', kind='lemma', name='exists_zero', scope_target='value',
+            entries=[dict(key='exists', name='exists_zero', scope_target='value',
                           statement='∃ n : Nat, n = 0', proof_body=None, proof='Choose zero.', dependencies=[]),
-                     dict(key='value', kind='target', name='value', scope_target=None, statement=None,
+                     dict(key='value', name='value', scope_target=None, statement=None,
                           proof_body='Classical.choose h', proof='Choose the witness.', dependencies=[dep('h', 'exists')]),
-                     dict(key='spec', kind='lemma', name='chosen_spec', scope_target='property',
+                     dict(key='spec', name='chosen_spec', scope_target='property',
                           statement='value = 0 ∧ True', proof_body=None, proof='Use the chosen witness specification.',
                           dependencies=[dep('value', 'value'), dep('h', 'exists')]),
-                     dict(key='property', kind='target', name='property', scope_target=None, statement=None,
+                     dict(key='property', name='property', scope_target=None, statement=None,
                           proof_body='by exact hp.1', proof='Use its specification.',
                           dependencies=[dep('value', 'value'), dep('hp', 'spec')])])
         child = dict(proof(), mode='decomposition', proof_body='by exact ⟨0, zero⟩',

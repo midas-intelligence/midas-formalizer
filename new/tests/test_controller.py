@@ -149,6 +149,49 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(tuple(self.executor.directory.iterdir()))
         self.writer.validate()
 
+    def test_turn_limit_exits_despite_unfinished_submission_readiness(self):
+        self.policy = Policy(replace(self.policy.config, run=replace(self.policy.config.run, turns=1)))
+        c = self.build(planner=lambda *args: ())
+        self.publish(self.planned('first'))
+        c.step()
+        self.executor.finish()
+        c.step()
+        self.publish(self.planned('next'))
+        frames = []
+        def observe(view, completion):
+            frames.append(completion)
+            if len(frames) > 3:
+                self.fail('Controller idled after exhausting the turn budget')
+        result = c.run(lambda reader: Progress(roots=1, verified_roots=0, ready=2),
+                       poll_interval=.001, observe=observe)
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.outcome, 'search_blocked')
+        self.assertIn('model_turn_budget', result.reasons)
+        self.assertEqual(len(self.executor.started), 1)
+        self.assertEqual(self.writer.intent_state('next')[0], 'PENDING')
+
+    def test_exhausted_planner_does_not_idle_on_local_readiness_hint(self):
+        c = self.build(planner=lambda *args: ())
+        def observe(view, completion):
+            self.assertIsNotNone(completion.exit_code)
+        result = c.run(lambda reader: Progress(roots=1, verified_roots=0, ready=1), observe=observe)
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn('no_ready_work', result.reasons)
+
+    def test_partial_planner_batch_keeps_local_work_alive(self):
+        def planner(reader, policy, limit):
+            while reader.counter('test', 'local') < 3:
+                before = reader.counter('test', 'local')
+                yield 'local:'+str(before), Effect(Changes(counters=(CounterChange('test', 'local', before, before+1),)))
+        c = self.build(planner=planner, batch=1)
+        def progress(reader):
+            done = reader.counter('test', 'local') == 3
+            return Progress(roots=1, verified_roots=int(done), ready=1,
+                            integration=Stage.VERIFIED if done else Stage.PENDING,
+                            export_verification=Stage.VERIFIED if done else Stage.PENDING)
+        self.assertEqual(c.run(progress, poll_interval=.001).exit_code, 0)
+        self.assertEqual(self.writer.counter('test', 'local'), 3)
+
     def test_atomic_downstream_work_and_prerequisites(self):
         def reduce(reader, invocation, accepted):
             if invocation.request.job.semantic_key == 'first':

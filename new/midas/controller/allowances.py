@@ -22,7 +22,7 @@ def scope(owner):
 
 
 def owner_usage(reader, owner):
-    flags = ('pending_candidate', 'repair_open', 'repair_suspended')
+    flags = ('pending_candidate', 'repair_open', 'repair_suspended', 'retrieval_disabled')
     return OwnerUsage(**{f.name: bool(value) if f.name in flags else value for f in fields(OwnerUsage)
                         for value in (reader.counter(scope(owner), f.name),)})
 

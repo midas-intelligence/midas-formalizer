@@ -574,6 +574,12 @@ class Workflow:
                 state, extra = page_effect(self, reader, snapshot, turn, proposal.work[0], state)
                 effects.append(extra)
             effects.append(r.save_owner(reader, owner.obligation_id, state))
+            if proposal.disable_retrieval:
+                from ..storage import CounterChange
+                scope = 'owner:'+owner.obligation_id
+                before = reader.counter(scope, 'retrieval_disabled')
+                if not before:
+                    effects.append(Effect(Changes(counters=(CounterChange(scope, 'retrieval_disabled', before, 1),))))
             if proposal.revision_charge or proposal.stop_charge:
                 from ..storage import CounterChange
                 scope, name = 'owner:'+owner.obligation_id, proposal.revision_charge or 'stop_requests'

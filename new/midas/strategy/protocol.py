@@ -86,9 +86,21 @@ def interpret(payload, *, role, contract):
     if CONTRACTS.get(role) != contract:
         raise DomainError('No interpreter for dispatched response contract')
     value = decode_object(payload, limit=RESPONSE_BYTES)
+    discarded_queries = False
+    action = value.get('action')
+    if role == 'prover' and type(action) is dict and action.get('mode') == 'retrieve':
+        queries = action.get('queries')
+        if type(queries) is list:
+            action['queries'] = [query for query in queries if type(query) is str]
+            discarded_queries = len(action['queries']) != len(queries)
     _default(role)(value)
     if role == 'prover':
         action = value['action']
+        if action['mode'] == 'retrieve':
+            action['names'] = list(dict.fromkeys(action['names']))
+        # With no usable search queries, retain a valid names-only lookup.
+        if discarded_queries and not action['queries'] and action['names']:
+            action['backends'] = []
         text(action['rationale'])
         return Response(action['mode'], action, Update.from_value(value['memory_update']))
     verdict = value['verdict']

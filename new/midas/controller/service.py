@@ -609,6 +609,12 @@ class Controller:
             self.step()
             view = progress(self.writer)
             state = self.executor.state()
+            committed = self.writer.status_snapshot()
+            if self.planner is not None and self._planned_revision == committed.revision:
+                # The planner exhausted this exact state. Application readiness
+                # hints (such as unfinished submissions) cannot imply more local
+                # work until something changes; only queued jobs remain ready.
+                view = replace(view, ready=min(view.ready, dict(committed.intents).get('PENDING', 0)))
             if not state.running and view.ready and self._waiting_reasons:
                 self._waiting_reasons = {key: reason for key, reason in self._waiting_reasons.items()
                     if (self.writer.intent_state(key) or (None,))[0] == 'PENDING'}

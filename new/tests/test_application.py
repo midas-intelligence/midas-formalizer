@@ -408,7 +408,7 @@ class Contracts(unittest.TestCase):
         def transport(request, raw, *args):
             calls.append(raw)
             self.assertNotIn(b'Action rejected:', raw)
-            action = (dict(mode='retrieve', rationale='Inspect addition.', queries=[{'dummy': ''}],
+            action = (dict(mode='retrieve', rationale='Inspect addition.', queries=['addition'],
                            names=[], backends=[]) if len(calls) <= 3 else proof())
             return ModelOutput(raw=response(action), usage=Usage(0, 0, 0, 0))
         self.app.transports = {Route.from_config(route).scope: transport}
@@ -568,6 +568,15 @@ class Contracts(unittest.TestCase):
             new_inputs = [record for record in reader.records('application.prompt_inputs')
                           if record.key != 'previous-research']
             self.assertEqual(len(new_inputs), 3)
+
+    def test_final_allowed_model_turn_still_finishes_compiler_checks_and_export(self):
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        config = replace(Config(), prover=route, run=replace(Config().run, turns=1))
+        with self.start(workflow='scripted', config=config, script=(('prover', response(proof())),)) as run:
+            result = run.run(poll_interval=.001)
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(run.writer.status_snapshot().accounting.turns, 1)
+            self.assertEqual(Compiler.calls, ['binding', 'proof', 'integrate', 'audit'])
 
     def test_finite_budget_with_unknown_projection_returns_blocked(self):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
@@ -1014,6 +1023,46 @@ class Contracts(unittest.TestCase):
             self.assertEqual(len(evidence), 25)
             for section, archive in zip(evidence, archives):
                 self.assertIn(f'Result ID: {archive.id}'.encode(), section.text)
+
+    def test_empty_retrieval_disables_node_retrieval_without_protocol_charge(self):
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        for index, queries in enumerate(([], [{'dummy': ''}])):
+            with self.subTest(queries=queries):
+                actions = iter((dict(mode='retrieve', rationale='No lookup needed.', queries=queries,
+                                     names=[], backends=[]), proof()))
+                self.app.transports = {Route.from_config(route).scope:
+                    lambda *args: ModelOutput(raw=response(next(actions)), usage=Usage(0, 0, 0, 0))}
+                name = 'empty-retrieve-'+str(index)
+                with self.start(name=name, workflow='live', config=replace(Config(), prover=route)) as run:
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    owner = run.workflow.graph(run.writer).nodes[0].owner
+                    scope = 'owner:'+owner.obligation_id
+                    self.assertEqual(run.writer.counter(scope, 'retrieval_disabled'), 1)
+                    self.assertEqual(run.writer.counter(scope, 'retrieval'), 0)
+                    self.assertEqual(run.writer.counter(scope, 'protocol'), 0)
+                    snapshot = run.workflow.snapshot(run.writer, owner)
+                    self.assertTrue(snapshot.usage.retrieval_disabled)
+                    self.assertNotIn('retrieve', run.workflow.policy.capabilities(
+                        snapshot.usage, snapshot.services).available_modes)
+                with self.app.resume(self.root/name) as run:
+                    snapshot = run.workflow.snapshot(run.writer, owner)
+                    self.assertTrue(snapshot.usage.retrieval_disabled)
+                    self.assertFalse(run.workflow.policy.helper('retrieve', snapshot.usage, snapshot.services).allowed)
+
+    def test_retrieval_with_object_queries_and_duplicate_names_executes_one_lookup(self):
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        actions = iter((dict(mode='retrieve', rationale='Inspect addition.', queries=[{'dummy': ''}],
+                             names=['Nat.add', 'Nat.add'], backends=[dict(name='leanexplore', prefixes=[])]), proof()))
+        self.app.transports = {Route.from_config(route).scope:
+            lambda *args: ModelOutput(raw=response(next(actions)), usage=Usage(0, 0, 0, 0))}
+        with self.start(workflow='live', config=replace(Config(), prover=route)) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(Compiler.calls.count('lookup'), 1)
+            scope = 'owner:'+self.selected.identities[0].id
+            self.assertEqual(run.writer.counter(scope, 'retrieval'), 1)
+            self.assertEqual(run.writer.counter(scope, 'protocol'), 0)
 
     def test_retrieval_search_lookup_and_research_resume_the_prover(self):
         from midas.application import helpers, records as r

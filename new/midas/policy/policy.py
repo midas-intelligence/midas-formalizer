@@ -50,9 +50,10 @@ class OwnerUsage:
     repair_open: bool = False
     repair_suspended: bool = False
     repair_remaining: int = 0
+    retrieval_disabled: bool = False
 
     def __post_init__(self):
-        _counts(self, flags=('pending_candidate', 'repair_open', 'repair_suspended'))
+        _counts(self, flags=('pending_candidate', 'repair_open', 'repair_suspended', 'retrieval_disabled'))
         if not self.repair_open and (self.repair_remaining or self.repair_suspended):
             raise DomainError('Repair capacity requires an open grant')
 
@@ -388,6 +389,8 @@ class Policy:
             return Decision()
         if mode not in ('research', 'retrieve', 'probe'):
             raise DomainError('Unknown helper mode')
+        if mode == 'retrieve' and owner.retrieval_disabled:
+            return Decision('retrieval_disabled')
         if mode in ('retrieve', 'probe') and not services.compiler:
             return Decision('compiler_not_configured')
         if mode == 'research' and (not services.research or not min(
@@ -406,7 +409,7 @@ class Policy:
             max(0, self.config.mathematics.direct - owner.direct),
             max(0, self.config.mathematics.decomposition - owner.decomposition), repair,
             max(0, self.config.helpers.research - owner.research),
-            max(0, self.config.helpers.retrieval - owner.retrieval),
+            0 if owner.retrieval_disabled else max(0, self.config.helpers.retrieval - owner.retrieval),
             max(0, self.config.helpers.probe - owner.probe),
             min(services.research_web_calls, self.config.helpers.web_calls) if services.research else 0)
 

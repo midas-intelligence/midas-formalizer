@@ -347,6 +347,10 @@ If the package moved, pass `--package /new/path/to/package` with the same
 environment identity. `MIDAS_SHARED_TOOLCHAIN` can relocate the matching installed
 toolchain.
 
+When no further work can run because the model-turn budget is exhausted, the
+controller exits with `search_blocked / model_turn_budget` instead of idling.
+Running work and remaining compiler/export checks can finish before that exit.
+
 To increase allowances, save `increase.json` using new total limits:
 
 ```json

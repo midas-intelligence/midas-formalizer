@@ -117,6 +117,8 @@ class Strategy:
                 availability.append('revise: available')
             if not capabilities.web_calls:
                 availability.append('research: disabled')
+            if snapshot.usage.retrieval_disabled:
+                availability.append('retrieve: disabled (previous request had no usable queries or names)')
             if not snapshot.cursors:
                 availability.append('page: unavailable (no additional pages outside this prompt)')
             details = ('Candidate modes: ' + ', '.join(modes) + '\nHelper modes: ' +
@@ -208,6 +210,8 @@ class Strategy:
                     if objection is not None else None)
                 result = Changes(snapshot.version, (_work(snapshot, 'review_stop'),),
                                  reason='stop_review_pending', stop_request=request, stop_charge=True)
+        elif mode == 'retrieve' and not action['queries'] and not action['names']:
+            result = Changes(snapshot.version, _resume(snapshot, dispatch.turn), disable_retrieval=True)
         elif mode in ('retrieve', 'probe', 'research'):
             result = self._helper(snapshot, policy, dispatch.turn, mode, action)
         elif mode == 'page':

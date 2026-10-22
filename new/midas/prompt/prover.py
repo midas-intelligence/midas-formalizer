@@ -63,9 +63,13 @@ unfolding during elaboration, consider local transparency control or intermediat
 equalities before repeating the same repair. A simplified probe may miss the issue.
 
 Use candidate for joint targets, with target entries in source order and any
-shared lemma entries. Use null scope_target/statement for targets. For each lemma,
-set scope_target to the exact selected target name whose source context it uses,
-and supply its statement. Unproved lemma
+shared lemma entries, or to compose a proof of the current supporting lemma.
+Identify each existing subject by its exact name in SUBJECT required-subjects; the application
+supplies its kind, source scope and immutable statement. Use null scope_target
+and statement for existing subjects. Every new name introduces a supporting lemma
+and requires its statement. Its scope_target may be null when there is only one
+source scope; otherwise select the exact target name whose source context it uses.
+Unproved lemma
 entries have null proof_body and a concrete English proof plan. Dependencies name
 explicit parameters and entries; submission is current for this action or an
 advertised reference (including base only when offered in INTERFACES). The
@@ -105,7 +109,8 @@ Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
 preference within the selected scope. Large excerpts may continue on another page.
 Queries require backends. For names-only retrieval, use "queries":[] and
-"backends":[]. Supply at least one query or name.
+"backends":[]. If both queries and names are empty, retrieval is disabled for
+this node and proof work continues without a lookup.
 For example (replace Nat.Prime with the actual name from your task):
 {"action":{"mode":"retrieve","rationale":"Inspect the definition used in the goal.","queries":[],"names":["Nat.Prime"],"backends":[]},"memory_update":null}
 Discovery alone does not certify availability.
@@ -157,8 +162,8 @@ def schema():
         'child': obj(name=string(256), statement=code, proof=text, usefulness=text,
                      depends_on=array(string(256), 128)),
         'dependency': obj(parameter=string(1024), submission=string(256), key=string(256)),
-        'entry': obj(key=string(256), kind={'type': 'string', 'enum': ['target', 'lemma']},
-                     name=string(1024), scope_target=nullable(string(1024)), statement=nullable(code),
+        'entry': obj(key=string(256), name=string(1024),
+                     scope_target=nullable(string(1024)), statement=nullable(code),
                      proof_body=nullable(code), proof=text, dependencies=array(ref('dependency'), 128)),
         'backend': obj(name={'type': 'string', 'enum': ['frozen-source', 'leanexplore']},
                        prefixes=array(string(1024), 16)),

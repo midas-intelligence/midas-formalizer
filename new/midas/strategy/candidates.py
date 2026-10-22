@@ -368,10 +368,17 @@ def expand(action, context, submission_id):
             unproved.append(name)
     elif mode == 'candidate':
         entries = []
+        subjects = {subject.name: subject for subject in context.subjects}
+        scopes = {subject.scope_target or subject.name for subject in context.subjects}
         references = {(r.label, r.key): r.submission_id for r in context.references}
         references.update(((p.reference.label, p.reference.key), p.reference.submission_id) for p in context.prerequisites)
         for row in action['entries']:
-            subject = Subject(row['kind'], row['name'], row['scope_target'], row['statement'])
+            subject = subjects.get(row['name'])
+            if subject is None:
+                scope = row['scope_target']
+                if scope is None and len(scopes) == 1:
+                    scope = next(iter(scopes))
+                subject = Subject('lemma', row['name'], scope, row['statement'])
             dependencies = []
             for dep in row['dependencies']:
                 origin = submission_id if dep['submission'] == 'current' else references.get((dep['submission'], dep['key']))
