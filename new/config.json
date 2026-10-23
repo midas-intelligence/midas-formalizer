@@ -1,7 +1,7 @@
 {
   "format": "midas-config-v1",
   "run": {
-    "turns": 400,
+    "turns": 800,
     "runtime_ms": 7200000,
     "max_intents": 10000,
     "max_input_tokens": null,
@@ -24,9 +24,9 @@
     "stop_requests": 3,
     "backtracks": 12,
     "owner_backtracks": 3,
-    "repair": 2,
+    "repair": 5,
     "timeout": 2,
-    "memory": 0,
+    "memory": 2,
     "elaboration": 2,
     "protocol": 2
   },
@@ -109,6 +109,7 @@
     "input_token_budget": 262144,
     "provider": "azure",
     "model": "gpt-6.1-sol",
+    "reasoning_effort":"high",
     "transport": "azure_responses",
     "account": "midas-azure",
     "endpoint": "https://midas-openai.services.ai.azure.com/openai/v1/responses",

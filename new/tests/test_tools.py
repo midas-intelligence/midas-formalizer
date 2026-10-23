@@ -129,10 +129,17 @@ class ToolsTests(unittest.TestCase):
             with self.subTest(names=names), self.assertRaisesRegex(ValueError, 'no allowed names'):
                 self.plan(Retrieve(names=names), forbidden=forbidden)
 
-    def test_policy_is_used_for_case_units_and_research_bounds(self):
+    def test_policy_is_used_for_request_units_and_research_bounds(self):
         request = self.request(Probe(tuple(self.a.save(pack({'id': str(n)})) for n in range(3))))
+        remaining = OwnerUsage(probe=5)
+        self.assertIn('probe', self.policy.capabilities(remaining, self.services).available_modes)
+        for count in (1, 2, 3):
+            batch = replace(request, action=Probe(request.action.cases[:count]))
+            plan = plan_helper(batch, self.policy, remaining, self.services)
+            self.assertEqual(plan.units, 1)
+            self.assertEqual(plan.stages[0].action.cases, batch.action.cases)
         with self.assertRaisesRegex(ValueError, 'probe_allowance'):
-            plan_helper(request, self.policy, OwnerUsage(probe=4), self.services)
+            plan_helper(request, self.policy, OwnerUsage(probe=6), self.services)
         research = plan_helper(self.request(Research('q')), self.policy, OwnerUsage(),
                                replace(self.services, research_web_calls=2))
         self.assertEqual(research.request.action.web_calls, 2)

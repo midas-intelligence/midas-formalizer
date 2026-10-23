@@ -217,6 +217,7 @@ class ModelRoute:
     prompt_cache: str | None = None
     prices: Prices | None = None
     input_token_budget: int | None = None
+    reasoning_effort: str | None = None
 
     def __post_init__(self):
         for field in fields(self):
@@ -242,8 +243,14 @@ class ModelRoute:
             natural(self.input_token_budget, 'input_token_budget', positive=True)
         if self.prompt_cache not in (None, 'explicit', 'disabled'):
             raise DomainError('prompt_cache must be explicit or disabled')
+        if self.reasoning_effort not in (None, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            raise DomainError('Invalid reasoning_effort')
+        if self.reasoning_effort is not None and (self.transport == 'codex' or
+                self.transport is None and self.provider == 'openai'):
+            raise DomainError('Codex reasoning effort belongs to its pinned configuration')
         if not self.configured and any(getattr(self, name) is not None for name in (
-                'transport', 'account', 'endpoint', 'credential_env', 'prompt_cache', 'prices', 'input_token_budget')):
+                'transport', 'account', 'endpoint', 'credential_env', 'prompt_cache', 'prices', 'input_token_budget',
+                'reasoning_effort')):
             raise DomainError('Model route settings require provider and model')
         if self.credential_env is not None and not _ENV_NAME.fullmatch(self.credential_env):
             raise DomainError('credential_env must name an environment variable')

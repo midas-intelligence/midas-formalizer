@@ -47,9 +47,8 @@ class Plan:
             raise ValueError('Plan stages differ from helper')
         if self.charge not in (None, action_value(self.request.action)[0]):
             raise ValueError('Helper charge differs from request')
-        expected = len(self.request.action.cases) if isinstance(self.request.action, Probe) else 1
-        if type(self.units) is not int or self.units != expected:
-            raise ValueError('Helper units differ from request')
+        if type(self.units) is not int or self.units != 1:
+            raise ValueError('Each helper request consumes one allowance unit')
 
     def admission(self, ordinal, limits):
         """Charge only the initial stage; controller reserves initial stages atomically.
@@ -79,8 +78,7 @@ def search_stages(request):
 def plan_helper(request, policy, usage, services):
     """Policy remains the single owner of helper allowances and service availability."""
     mode = action_value(request.action)[0]
-    units = len(request.action.cases) if isinstance(request.action, Probe) else 1
-    decision = policy.helper(mode, usage, services, units=units)
+    decision = policy.helper(mode, usage, services)
     if not decision.allowed:
         raise ValueError(decision.reason)
     if isinstance(request.action, Research):
@@ -94,7 +92,7 @@ def plan_helper(request, policy, usage, services):
                 raise ValueError('Retrieval contains no allowed names')
     else:
         stages = _stages(request, (request.action,))
-    return Plan(request, stages, mode, units)
+    return Plan(request, stages, mode)
 
 
 @dataclass(frozen=True, slots=True)

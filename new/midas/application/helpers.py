@@ -136,7 +136,7 @@ def reduce(flow, reader, invocation, accepted, binding):
     if len(results) != len(stages):
         return r.merge(*extra, r.record(reader, 'application.helpers', key, saved))
     overlay = flow.overlay(reader, tuple(a for e in extra for a in e.artifacts))
-    plan = Plan(request, stages, None, len(request.action.cases) if isinstance(request.action, Probe) else 1)
+    plan = Plan(request, stages, None)
     searches = tuple(SearchResult.load(r.read(overlay, r.unref(v))) for v in saved['searches'])
     if isinstance(request.action, Retrieve) and stages and all(isinstance(s.action, Search) for s in stages):
         searches = tuple(SearchResult.load(r.read(overlay, _load_evidence(results[str(s.ordinal)], s).artifacts[0])) for s in stages)

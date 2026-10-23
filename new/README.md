@@ -1193,10 +1193,12 @@ toolchain or package inventory is embedded in requests. Model probe bodies are
 expanded once by `expand_probe_bodies` into internal binary case records containing
 `id`, generated `code`, `operation='tactic'`, empty `setup` and null `expected`.
 Probe actions hold artifact references to these records; the checker owns their
-Lean validation. Continuations retain the batch's case count without another charge.
+Lean validation. Continuations retain the complete batch without another charge.
 
-`plan_helper` uses `Policy.helper` for allowance and service checks, charges probe
-cases individually, and freezes the research web-call bound. Plans describe work;
+`plan_helper` uses `Policy.helper` for allowance and service checks, charges each
+probe request once for its complete batch of one to three cases, and freezes the
+research web-call bound. An advertised probe can use any valid batch size, including
+when only one request remains. Plans describe work;
 they never invoke a checker/model, open SQLite, start a private pool, or retry.
 `Plan.admission` places the logical helper charge on the first initial stage.
 The controller must reserve that allowance and the initial stage intents atomically.
@@ -1399,7 +1401,7 @@ with open("config.json", "rb") as source:
 
 `prover`, `reviewer` and `research` each have a `ModelRoute` section with
 `provider`, `model`, `transport`, `account`, `endpoint`, `credential_env`,
-`prompt_cache` and `prices`. The checked-in example configures the prover and
+`prompt_cache`, `reasoning_effort` and `prices`. The checked-in example configures the prover and
 reviewer from the supplied `live.json`; research remains unconfigured. `Config()`
 and omitted roles remain unconfigured by default. Set both `provider` and `model`
 to configure a role; the other fields are optional. Identifiers are preserved
@@ -1435,6 +1437,13 @@ example); there are no separate top-level price sections. `prompt_cache` may be
 `explicit`, `disabled` or null. Route and price changes affect the config identity
 and cannot be applied through
 `increase`, which only permits the existing prospective limit changes.
+
+For Responses routes, set `prover.reasoning_effort` and
+`reviewer.reasoning_effort` to select the effort sent in each request (for example,
+`"high"`). An omitted or null value uses the deployment's default. The model must
+support the selected level. Codex routes use their pinned Codex configuration
+instead and reject this field. Effort is saved in the run configuration and wire
+request and participates in the prompt cache key.
 
 Omitted settings use defaults. Omitted backlog stop thresholds scale with model
 concurrency; explicit thresholds remain exact. Prices are integer **micro-USD per
@@ -1494,7 +1503,7 @@ that same `BacklogState` to each admission in the tick.
 
 Candidate and helper fields on `AdmissionRequest` reserve a logical allowance at
 its initial admission. Later jobs belonging to that already-reserved candidate or
-helper leave those fields unset. Probe units count cases. Research requests that
+helper leave those fields unset. Probe units count requests, not individual cases. Research requests that
 were sent or have uncertain delivery remain charged; never-sent abandoned
 requests can release their logical reservation. Storage owns those lifetime
 totals and atomically records candidate decisions using `mathematical_charge`.

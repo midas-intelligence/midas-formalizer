@@ -90,6 +90,7 @@ def cache_probe(application, directory, *, config, cancellation=None):
         display = Snapshot((Section('subject', 'goal', '\n'.join(f'{goal}: reference fact {i}' for i in range(180)).encode()),
                             Section('feedback', 'feedback', str(feedback).encode())))
         specs.append(build(display, Options(route.transport, route.model, max_output_tokens=256,
+            reasoning=config.prover.reasoning_effort,
             prompt_cache=route.prompt_cache, cache_scope=route.scope if route.prompt_cache == 'explicit' else None),
             renderer=lambda s: Prompt('prover', 'cache-diagnostic', 'cache-diagnostic-v1', instructions, schema, s.sections)))
     with create(directory) as writer:

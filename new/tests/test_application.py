@@ -225,6 +225,27 @@ class Contracts(unittest.TestCase):
                 with self.app.resume(self.root/verdict) as resumed:
                     self.assertEqual(self.finish(resumed).exit_code, 1 if verdict == 'accept' else 0)
 
+    def test_role_reasoning_effort_reaches_provider(self):
+        from midas.provider import ModelOutput, Route
+        from midas.domain.wire import decode
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        calls = []
+        def transport(request, raw, *args):
+            calls.append((request.role, decode(raw, limit=8*1024**2).get('reasoning')))
+            reply = (response(dict(mode='stop', rationale='No proof found.', objection=None))
+                     if request.role == 'prover' else model_json(dict(
+                         verdict='accept', rationale='The request is justified.', findings=[], question='', urls=[])))
+            return ModelOutput(raw=reply, usage=Usage(0, 0, 0, 0))
+        self.app.transports = {Route.from_config(route).scope: transport}
+        config = replace(Config(), prover=replace(route, reasoning_effort='high'),
+                         reviewer=replace(route, reasoning_effort='xhigh'))
+        with self.start(workflow='live', config=config) as run:
+            self.assertEqual(self.finish(run).exit_code, 1)
+            self.assertEqual(calls, [('prover', {'effort': 'high'}), ('reviewer', {'effort': 'xhigh'})])
+        with self.app.resume(self.root/'run') as run:
+            self.assertEqual(run.workflow.policy.config.prover.reasoning_effort, 'high')
+            self.assertEqual(run.workflow.policy.config.reviewer.reasoning_effort, 'xhigh')
+
     def test_pending_stop_and_review_receipt_survive_resume(self):
         from midas.application import records as r
         from midas.application.inspection import node_details
@@ -816,12 +837,14 @@ class Contracts(unittest.TestCase):
             dict(id='second', code='Lean.Elab.Tactic.evalTactic (← `(tactic| exact True.intro))')])
         action = proof()
         action['proof_body'] = 'by trivial'
-        with self.start(workflow='scripted', config=replace(Config(), prover=route, reviewer=route),
+        config = replace(Config(), prover=route, reviewer=route, helpers=replace(Config().helpers, probe=1))
+        with self.start(workflow='scripted', config=config,
             script=tuple(('prover', response(a)) for a in (retrieve, probe, action))) as run:
             self.assertEqual(self.finish(run).exit_code, 0)
             scope = 'owner:'+self.selected.identities[0].id
             self.assertEqual(run.writer.counter(scope, 'retrieval'), 1)
-            self.assertEqual(run.writer.counter(scope, 'probe'), 2)
+            self.assertEqual(run.writer.counter(scope, 'probe'), 1)
+            self.assertEqual(run.writer.counter(scope, 'protocol'), 0)
             self.assertEqual(run.writer.status_snapshot().accounting.turns, 3)
             self.assertEqual(Compiler.calls.count('lookup'), 1)
             owner = run.workflow.graph(run.writer).nodes[0].owner

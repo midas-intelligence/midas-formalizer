@@ -244,9 +244,11 @@ class Workflow:
 
     def model_job(self, reader, snapshot, work, *, binding=None):
         role = 'reviewer' if work.operation in ('review', 'review_stop') else 'prover'
-        route = Route.from_config(getattr(self.policy.config, role))
+        setting = getattr(self.policy.config, role)
+        route = Route.from_config(setting)
         options = Options(route.transport, route.model, **({} if route.transport == 'codex' else
-            dict(prompt_cache=route.prompt_cache, cache_scope=route.scope if route.prompt_cache == 'explicit' else None)))
+            dict(reasoning=setting.reasoning_effort, prompt_cache=route.prompt_cache,
+                 cache_scope=route.scope if route.prompt_cache == 'explicit' else None)))
         renderer = None
         if role in self.instructions:
             from ..prompt import prover, reviewer

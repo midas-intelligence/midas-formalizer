@@ -1005,7 +1005,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(resumed.work[0].operation, 'review')
         self.assertIsNone(result.memory)
 
-    def test_probe_cases_are_binary_artifacts_and_case_allowance_is_shared(self):
+    def test_probe_cases_are_binary_artifacts_and_share_one_request_allowance(self):
         artifacts, snapshot = fixture()
         dispatched, _, _ = dispatch(snapshot, artifacts)
         action = dict(mode='probe', rationale='Inspect the goal.', cases=[
@@ -1013,13 +1013,15 @@ class StateTests(unittest.TestCase):
             dict(id='two', code='let env ← Lean.getEnv\nLean.logInfo m!"{(env.find? `Nat.add).isSome}"')])
         output = admitted(artifacts, dispatched, response(action))
         result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
-        self.assertEqual(result.helper.units, 2)
+        self.assertEqual(result.helper.units, 1)
         self.assertEqual(load_record(result.artifacts[0].data, limit=65536), dict(id='one',
             code='run_tac do\n  '+action['cases'][0]['code'], operation='tactic', setup='', expected=None))
         self.assertEqual(load_record(result.artifacts[1].data, limit=65536)['code'],
             'run_tac do\n  let env ← Lean.getEnv\n  Lean.logInfo m!"{(env.find? `Nat.add).isSome}"')
         self.assertIsNone(result.graph)
-        depleted = replace(snapshot, usage=OwnerUsage(probe=self.policy.config.helpers.probe - 1))
+        remaining = replace(snapshot, usage=OwnerUsage(probe=self.policy.config.helpers.probe - 1))
+        self.assertEqual(self.strategy.on_model(remaining, self.policy, dispatched, output, artifacts).helper.units, 1)
+        depleted = replace(snapshot, usage=OwnerUsage(probe=self.policy.config.helpers.probe))
         with self.assertRaises(ValueError):
             self.strategy.on_model(depleted, self.policy, dispatched, output, artifacts)
 

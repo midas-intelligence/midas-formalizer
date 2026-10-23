@@ -181,7 +181,19 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(getattr(defaults, name).configured)
             self.assertEqual(set(config.record()[name]),
                              {'provider', 'model', 'transport', 'account', 'endpoint', 'credential_env',
-                              'prompt_cache', 'prices', 'input_token_budget'})
+                              'prompt_cache', 'prices', 'input_token_budget', 'reasoning_effort'})
+
+    def test_reasoning_effort_is_saved_and_validated(self):
+        config = Config(prover=ModelRoute(provider='azure', model='fixture', reasoning_effort='high'))
+        self.assertEqual(load_config(config.encode()), config)
+        self.assertNotEqual(config.id, replace(config, prover=replace(config.prover, reasoning_effort=None)).id)
+        for value in ('invalid', '', True, 5):
+            with self.subTest(value=value), self.assertRaises(DomainError):
+                ModelRoute(provider='azure', model='fixture', reasoning_effort=value)
+        with self.assertRaises(DomainError):
+            ModelRoute(reasoning_effort='high')
+        with self.assertRaises(DomainError):
+            ModelRoute(provider='openai', model='fixture', reasoning_effort='high')
 
     def test_nested_prices_preserve_unknown_free_and_frozen_rates(self):
         config = Config(prover=ModelRoute(provider='provider', model='model'))
