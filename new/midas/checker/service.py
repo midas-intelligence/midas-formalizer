@@ -36,6 +36,7 @@ class Binding:
     identity: ObligationIdentity
     parameters: tuple[bytes, ...]
     evidence: ArtifactRef
+    presentation: bytes = b''
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,7 +368,8 @@ class Checker:
             if owner.obligation_id != identity.id:
                 raise ValueError('Rebound subject identity differs from elaboration')
             admitted = AdmittedBinding(owner, value['environment'], matching[0], receipt)
-            return Binding(admitted, identity, tuple(codec.encode(n) for n in bound['parameters']), reference)
+            return Binding(admitted, identity, tuple(codec.encode(n) for n in bound['parameters']), reference,
+                           bound['presentation'].encode())
         if operation == 'lookup':
             ev.lookup_for(codec.decode(payload), packet, digest)
             if codec.encode(outputs[0]) != payload:

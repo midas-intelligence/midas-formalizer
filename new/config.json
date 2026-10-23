@@ -123,6 +123,7 @@
     }
   },
   "reviewer": {
+    "input_token_budget": 262144,
     "provider": "azure",
     "model": "gpt-6.1-sol",
     "transport": "azure_responses",

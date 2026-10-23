@@ -102,14 +102,29 @@ class Workflow:
                           if a.pages[i] not in displayed),
             stop_request=StopRequest.load(r.read(reader, state.stop_request, 65536)) if state.stop_request else None)
 
+    def displayed_signature(self, reader, identity, refs):
+        """Read compiler-produced type text without expanding its identity DAG."""
+        presentation = b''
+        saved = reader.record('application.subject', identity.id)
+        if saved:
+            presentation = r.read(reader, saved.artifact, 1024**2)
+            refs.append(saved.artifact)
+        else:
+            for target, selected in zip(self.selection.selected.targets, self.selection.identities):
+                if selected.id == identity.id:
+                    index = self.selection.declarations.index(target)
+                    presentation = self.selection.signatures[index].presentation
+                    break
+        return Signature(identity.target, identity.universes, identity.context, presentation)
+
     def display(self, reader, snapshot, *, formal_only=False, review=None, bounded_evidence=False):
         from . import presentation
         _, state = r.owner_state(reader, snapshot.version.owner.obligation_id)
         ident = candidates.identity(reader, state, self.selection.environment_id)
         target = self.selection.selected.targets[state.index]
-        sections = [Section('source', 'source-prefix', self.selection.source[:target.declaration.start]),
-            subject('goal', Signature(ident.target, ident.universes, ident.context))]
         refs = [state.context, state.identity]
+        sections = [Section('source', 'source-prefix', self.selection.source[:target.declaration.start]),
+            subject('goal', self.displayed_signature(reader, ident, refs))]
         owners = [snapshot.version.owner]
         guidance = reader.record('application.guidance', snapshot.version.owner.obligation_id)
         if guidance:
@@ -117,7 +132,7 @@ class Workflow:
             refs.append(guidance.artifact)
         for ordinal, (alias, child, child_identity) in enumerate(candidates.prerequisites(
                 reader, snapshot.context, self.selection.environment_id)):
-            signature = Signature(child_identity.target, child_identity.universes, child_identity.context)
+            signature = self.displayed_signature(reader, child_identity, refs)
             sections.append(Section('interfaces', f'inherited-{ordinal}',
                 alias.encode() + b' :\n' + subject('type', signature).text))
             refs.append(child.interface)
@@ -134,7 +149,7 @@ class Workflow:
                 continue
             index = next(i for i, t in enumerate(self.selection.selected.targets) if t.selector == required.name)
             peer = self.selection.identities[index]
-            sections.append(subject('required-'+str(index), Signature(peer.target, peer.universes, peer.context)))
+            sections.append(subject('required-'+str(index), self.displayed_signature(reader, peer, refs)))
             owners.append(reader.node(peer.id).node.owner)
         sections.append(Section('subject', 'required-subjects', '\n'.join(
             f'{s.kind}: {s.name}' for s in snapshot.context.subjects).encode()))
@@ -181,7 +196,7 @@ class Workflow:
             for ordinal, dep in enumerate(candidate.dependencies):
                 _, child_state = r.owner_state(reader, dep.owner.obligation_id)
                 child = candidates.identity(reader, child_state, self.selection.environment_id)
-                signature = Signature(child.target, child.universes, child.context)
+                signature = self.displayed_signature(reader, child, refs)
                 sections.append(Section('interfaces', f'dependency-{ordinal}',
                     dep.alias.encode() + b' :\n' + subject('type', signature).text))
                 refs.append(dep.interface)

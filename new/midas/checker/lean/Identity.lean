@@ -6,6 +6,19 @@ Only kernel-irrelevant expression metadata is erased. -/
 namespace Midas.Identity
 open Lean Elab Command
 
+-- Advisory text travels separately from the exact identity graph. Produce it
+-- while the checked type and its declaration context are already in memory.
+def present (type : Expr) : MetaM String := do
+  withOptions (fun opts => pp.maxSteps.set (opts.setBool `pp.all false |>.setBool `pp.explicit false
+      |>.setBool `pp.universes false |>.setBool `pp.fullNames false
+      |>.setBool `pp.funBinderTypes true |>.setBool `pp.piBinderTypes true
+      |>.setBool `pp.letVarTypes true
+      |>.setBool `pp.deepTerms true) 1000000) do
+    let text := (← Meta.ppExpr type).pretty
+    if text.utf8ByteSize > 1048576 then
+      throwError "type presentation exceeds byte limit"
+    return text
+
 def node (tag : String) (args : Array Json := #[]) : Json :=
   Json.arr (#[toJson tag] ++ args)
 

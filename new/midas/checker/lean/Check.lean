@@ -975,9 +975,16 @@ def checkBindings (packet : Json) (original : Environment) : CommandElabM Json :
     unless (interface.getObjValAs? String "statement_protocol").toOption == some "elaborated-statements-v1" do
       throwError "missing elaborated statement protocol"
     check interface original
-  return Json.mkObj [("format", toJson "midas-binding-result-v2"),
+  let sig ← if certificate == Json.null then checked (field packet "signature")
+    else checked (field certificate "signature")
+  let context ← checked (field sig "context")
+  importDeclarationContext context
+  let type ← checked (readExpr (← checked (field sig "target")))
+  let presentation ← withDeclarationContext context <| liftTermElabM <| Midas.Identity.present type
+  return Json.mkObj [("format", toJson "midas-binding-result-v3"),
     ("request", ← checked (field packet "request")),
-    ("parameters", ← checked (field names "parameters")), ("certificate", certificate)]
+    ("parameters", ← checked (field names "parameters")), ("certificate", certificate),
+    ("presentation", toJson presentation)]
 
 -- Export audit starts from imports and processes the complete proposed source.
 -- It checks every source declaration, including unselected unfinished work.

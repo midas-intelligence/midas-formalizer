@@ -73,7 +73,7 @@ class Section:
 
 
 def subject(name: str, signature: Signature):
-    """Use source's exact telescope rendering, including every local hypothesis."""
+    """Use a compiler-produced type display, or source's full telescope rendering."""
     return Section('subject', name, present_subject(signature, maximum=MAX_BYTES))
 
 

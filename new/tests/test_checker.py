@@ -206,7 +206,7 @@ class Contracts(unittest.TestCase):
 
     def test_source_inventory_rejects_wrong_source_and_duplicate_declarations(self):
         declaration = self.selection.declarations[0]
-        row = {'signature': signature(self.selection.identities[0]), 'selector': 'target',
+        row = {'signature': signature(self.selection.identities[0]), 'presentation': '', 'selector': 'target',
                'constant': name('target'), 'kind': 'theorem', 'declaration': [0, len(self.selection.source)-1],
                'replacement': [declaration.replacement.start, declaration.replacement.end], 'unfinished': True,
                'supported': True, 'source_authored': True, 'type_references': [name('True')], 'value_references': []}

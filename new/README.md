@@ -1305,6 +1305,22 @@ schema, source, candidate, and evidence. This is separate from the cumulative
 and research routes. Set the input budget below the model's context limit to leave
 room for output.
 
+Goal and dependency types use Lean's readable display, captured during source
+inspection and checked binding. This avoids expanding implicit arguments and
+typeclass instances into large prompt expressions. Binding displays are retained
+as raw artifacts and reused for prover, reviewer, and research prompts; no extra
+compiler invocation is needed per model turn. Structural expression graphs still
+determine obligation identities, proof checking, and export. Readable text does
+not replace those graphs or serve as proof evidence.
+
+Validation on 2026-10-23: 199 focused Python tests and the real Lean checker suite
+passed. Replaying the six saved Hadwiger bindings reduced the reconstructed review
+request from 2,127,581 to 38,423 bytes (98.2%). The largest dependency display fell
+from roughly 1.21 MB to 158 bytes, retaining its existential linear-map type.
+Regression checks cover implicit and instance binders, existential binder types,
+named definition contexts, and statements expressed using tactics. This measures
+prompt bytes, not a new model invocation or an observed billing reduction.
+
 The latest known input-token usage calibrates a prompt-text byte estimate for the
 same owner, role, and provider route. Cached tokens are already included in input
 usage. The small sample survives resume; missing/zero usage leaves it unchanged.
@@ -1655,10 +1671,10 @@ and context namespace hashes and review digests change. Identities containing th
 contexts change as well. The job/graph records are in-memory interfaces; this work
 does not introduce or migrate a saved-run database schema.
 
-Saved selections now use **`midas-selection-v3` binary**, so selection bytes and
-selection IDs change. The format begins with `MIDASSEL` and byte `0x03`, followed by
+Saved selections now use **`midas-selection-v4` binary**, so selection bytes and
+selection IDs change. The format begins with `MIDASSEL` and byte `0x04`, followed by
 flat fields prefixed with unsigned little-endian 64-bit byte lengths. Source and
-signature data remain raw bytes, without JSON or hex expansion. Structural constant
+signature data and readable type text remain raw bytes, without JSON or hex expansion. Structural constant
 names retain bounded JSON metadata (16 KiB); signature name projections are bounded
 before JSON encoding. The loader enforces the 64 MiB total limit, record counts,
 canonical fields, source authorization, and optional expected identity. JSON

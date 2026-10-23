@@ -99,6 +99,24 @@ class Contracts(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_prompt_types_use_retained_compiler_text_and_bind_its_artifact(self):
+        from midas.application import records as r
+        from midas.application.service import commit
+        selected = self.selected
+        self.selected = replace(selected, signatures=tuple(replace(s, presentation=b'True')
+                                                         for s in selected.signatures))
+        with self.start() as run:
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            with patch('midas.source.render._signature', side_effect=AssertionError('expanded identity')):
+                display = run.workflow.display(run.writer, run.workflow.snapshot(run.writer, owner))
+            self.assertEqual(next(s.text for s in display.sections if s.name == 'goal'), b'True')
+            commit(run.writer, 'type-display', r.save(run.writer, 'application.subject', owner.obligation_id, b'checked type'))
+            reference = run.writer.record('application.subject', owner.obligation_id).artifact
+            with patch('midas.source.render._signature', side_effect=AssertionError('expanded identity')):
+                display = run.workflow.display(run.writer, run.workflow.snapshot(run.writer, owner))
+            self.assertEqual(next(s.text for s in display.sections if s.name == 'goal'), b'checked type')
+            self.assertIn(reference, display.artifacts)
+
     def start(self, name='run', **kwargs):
         run = self.app.start(self.root/name, package=self.environment, selection=self.selected,
                              workflow=kwargs.pop('workflow', 'supplied'), **kwargs)
@@ -1147,6 +1165,7 @@ class Contracts(unittest.TestCase):
         child['proof_body'] = 'by trivial'
         # The existing compiler fixture returns the selected root's identity for
         # every binding. Give this derived child its distinct synthetic interface.
+        root_identity = self.selected.identities[0].id
         class ReviewCompiler(Compiler):
             def prepare(self, operation, *args, **kwargs):
                 request = super().prepare(operation, *args, **kwargs)
@@ -1158,6 +1177,12 @@ class Contracts(unittest.TestCase):
                     value['packet']['signature']['target'] = ['app', ['app', ['const', name('And'), []], truth], truth]
                     request = CompilerRequest(codec.encode(value))
                 return request
+            def admit_receipt(self, *args, **kwargs):
+                value = super().admit_receipt(*args, **kwargs)
+                if isinstance(value, Binding):
+                    text = 'True' if value.identity.id == root_identity else 'True ∧ True'
+                    return replace(value, presentation=text.encode())
+                return value
         self.app.checker_factory = ReviewCompiler
         captured = []
         original = reviewer.render
@@ -1176,6 +1201,9 @@ class Contracts(unittest.TestCase):
                 time.sleep(.001)
         self.assertEqual(len(captured), 2)
         for display in captured:
+            sections = {s.name: s.text for s in display.sections}
+            self.assertEqual(sections['goal'], b'True')
+            self.assertEqual(sections['dependency-0'], 'support :\nTrue ∧ True'.encode())
             self.assertFalse({'memory', 'history', 'feedback'} & {s.kind for s in display.sections})
             text = b'\n'.join(s.text for s in display.sections)
             for clutter in (b'Editable fragment', b'/entries/', b'missing-result', b'Probe enumeration',

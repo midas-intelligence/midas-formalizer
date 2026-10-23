@@ -16,7 +16,7 @@ def inventory(payload, request, source, inputs):
         raise ValueError('Unknown Lean inventory format')
     declarations, signatures = [], {}
     for row in value['declarations']:
-        codec.fields(row, ('signature', 'selector', 'constant', 'kind', 'declaration', 'replacement',
+        codec.fields(row, ('signature', 'presentation', 'selector', 'constant', 'kind', 'declaration', 'replacement',
                            'unfinished', 'source_authored', 'supported', 'type_references', 'value_references'))
         # Domain's structural names are explicitly capped small metadata.
         def name(value):
@@ -30,7 +30,10 @@ def inventory(payload, request, source, inputs):
             value_references=tuple(map(name, row['value_references']))))
         if constant in signatures:
             raise ValueError('Duplicate inspected declaration')
-        signatures[constant] = Signature(*(codec.encode(row['signature'][k]) for k in ('target', 'universes', 'context')))
+        if type(row['presentation']) is not str or len(row['presentation']) > 1024**2:
+            raise ValueError('Invalid inspected type presentation')
+        signatures[constant] = Signature(*(codec.encode(row['signature'][k]) for k in ('target', 'universes', 'context')),
+                                        presentation=row['presentation'].encode())
     return freeze_selection(request, source, tuple(declarations),
                             frozenset(codec.canonical(n) for n in value['imported_constants']), signatures, inputs)
 

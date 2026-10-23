@@ -69,6 +69,10 @@ def _binders(signature):
 
 def present_subject(signature: Signature, *, policy=RenderPolicy(readable=True), maximum=MAX_BYTES):
     """Present a closed telescope, retaining named-definition context separately."""
+    if signature.presentation:
+        if len(signature.presentation) > maximum:
+            raise ValueError('Rendered Lean source exceeds byte limit')
+        return signature.presentation
     value = _signature(signature)
     renderer = _Renderer(policy, maximum)
     return renderer.finish(_target(renderer, value))

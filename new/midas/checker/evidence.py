@@ -143,9 +143,10 @@ def proof_for(value, packet, digest):
 
 
 def binding_for(value, packet, digest):
-    codec.fields(value, ('format', 'request', 'parameters', 'certificate'))
-    if value['format'] != 'midas-binding-result-v2' or value['request'] != digest:
+    codec.fields(value, ('format', 'request', 'parameters', 'certificate', 'presentation'))
+    if value['format'] != 'midas-binding-result-v3' or value['request'] != digest:
         raise ValueError('Binding result differs from request')
+    bounded_text(value['presentation'], 'type presentation', 1024**2)
     from ..source import parse_identifier
     if value['parameters'] != [parse_identifier(n) for n in packet['parameters']]:
         raise ValueError('Resolved binding names differ')

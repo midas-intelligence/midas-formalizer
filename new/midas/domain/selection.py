@@ -213,8 +213,8 @@ def select_targets(request: SelectionRequest, source: bytes,
     return SelectedTargets(request, sha256(source).hexdigest(), tuple(selected), remaining)
 
 
-SELECTION_FORMAT = 'midas-selection-v3'
-SELECTION_MAGIC = b'MIDASSEL\x03'
+SELECTION_FORMAT = 'midas-selection-v4'
+SELECTION_MAGIC = b'MIDASSEL\x04'
 MAX_BYTES = 64 * 1024**2
 NAME_BYTES = 16 * 1024
 MAX_RECORDS = 1_000_000
@@ -223,15 +223,19 @@ _U64 = Struct('<Q')
 
 @dataclass(frozen=True, slots=True)
 class Signature:
-    """Flat references to canonical binary expression graphs; no decoded tree retained."""
+    """Exact binary graphs and an optional compiler-produced display of the type."""
     target: bytes
     universes: bytes
     context: bytes
+    presentation: bytes = b''
 
     def __post_init__(self):
         for value in (self.target, self.universes, self.context):
             if type(value) is not bytes or not value.startswith(codec.MAGIC) or len(value) > MAX_BYTES:
                 raise SelectionError('Signatures require bounded binary graph components')
+        if type(self.presentation) is not bytes or len(self.presentation) > 1024**2:
+            raise SelectionError('Signature presentation exceeds byte limit')
+        self.presentation.decode('utf-8')
 
 
 @dataclass(frozen=True)
@@ -387,6 +391,7 @@ def _fields(selection):
         yield signature.target
         yield signature.universes
         yield signature.context
+        yield signature.presentation
 
 
 def _encoded_parts(selection):
@@ -401,7 +406,7 @@ def _encoded_parts(selection):
 
 
 def encode_selection(selection: FrozenSelection) -> bytes:
-    """Serialize one selection to the v3 binary format at the persistence boundary."""
+    """Serialize one selection to the v4 binary format at the persistence boundary."""
     if not isinstance(selection, FrozenSelection):
         raise SelectionError('Expected frozen selection')
     return b''.join(_encoded_parts(selection))
@@ -412,7 +417,7 @@ class _Reader:
         if type(payload) is not bytes or len(payload) > MAX_BYTES:
             raise SelectionError('Expected bounded binary selection bytes')
         if not payload.startswith(SELECTION_MAGIC):
-            raise SelectionError('Expected midas-selection-v3 binary bytes')
+            raise SelectionError('Expected midas-selection-v4 binary bytes')
         self.payload = payload
         self.position = len(SELECTION_MAGIC)
 
@@ -474,7 +479,7 @@ def load_selection(payload, inputs: SelectionInputs, *, expected_id=None):
         unfinished, type_hole, synthetic, supported, authored = reader.flags(5)
         type_refs = tuple(reader.take(NAME_BYTES) for _ in range(reader.count()))
         value_refs = tuple(reader.take(NAME_BYTES) for _ in range(reader.count()))
-        signatures.append(Signature(reader.take(), reader.take(), reader.take()))
+        signatures.append(Signature(reader.take(), reader.take(), reader.take(), reader.take(1024**2)))
         declarations.append(Declaration(selector, constant, kind, declaration, replacement, unfinished,
                                         type_hole, synthetic, supported, type_refs, value_refs, authored))
     if reader.position != len(payload):

@@ -67,6 +67,7 @@ def main():
             if boot.result.status != ResultStatus.SUCCEEDED:
                 raise AssertionError(boot)
             checker, selected = state['checker'], state['selection']
+            assert selected.signatures[0].presentation == b'True'
             owner = OwnerVersion(selected.identities[0].id, 0)
             authority = SimpleNamespace(verify_receipt=lambda *a: True)
 
@@ -232,7 +233,25 @@ def main():
                          b'by run_tac Lean.Elab.Command.liftTermElabM (pure ()); trivial'):
                 bad = replace(candidate, id=str(uuid4()), source=artifacts.save(code))
                 check('proof rejection', checker.prepare('proof', selected, 0, bad, artifacts), candidate=bad, valid=False)
-            check('target binding', checker.prepare('binding', selected, 0, owner, parameters=('h',)))
+            _, displayed = check('target binding', checker.prepare('binding', selected, 0, owner, parameters=('h',)))
+            assert displayed.presentation == b'True'
+            _, displayed = check('elaborated type presentation', checker.prepare('binding', selected, 0, owner,
+                statement='by exact (∀ (n : Nat), n = n)', parameters=()))
+            assert b'n = n' in displayed.presentation and b'by exact' not in displayed.presentation
+            assert len(displayed.presentation) < 100
+            _, displayed = check('implicit type and instance binders in presentation',
+                checker.prepare('binding', selected, 0, owner,
+                    statement='∀ {α : Type} [Inhabited α] (x : α), x = x'))
+            assert 'Inhabited α' in displayed.presentation.decode() and b'x = x' in displayed.presentation
+            _, displayed = check('existential binder type in presentation',
+                checker.prepare('binding', selected, 0, owner,
+                    statement='∃ (f : Nat → Bool), ∀ n, f n = false'))
+            assert 'Nat → Bool' in displayed.presentation.decode()
+            from midas.domain.identity import make_context
+            _, displayed = check('named definition context in presentation',
+                checker.prepare('binding', selected, 0, owner, statement='D = D',
+                    context=make_context('target', [{'name': 'D', 'type': 'Nat', 'value': '7'}])))
+            assert displayed.presentation == b'D = D'
             result, _ = check('elaborated statement binding/replay',
                 checker.prepare('binding', selected, 0, owner, statement='Nat', parameters=('h',)))
             report = codec.load_record(artifacts.data[result.output.id], limit=65536)

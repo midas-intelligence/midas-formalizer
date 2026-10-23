@@ -277,6 +277,8 @@ def on_binding(flow, reader, key, saved, entry_key, bound):
                          previous.node.review if previous else None,
                          previous.node.assembly if previous else None)
     effects = []
+    if bound.presentation:
+        effects.append(r.save(reader, 'application.subject', ident.id, bound.presentation))
     if previous is None or previous.node != node:
         effects.append(Effect(Changes(nodes=(NodeChange(previous.version if previous else None, node),),
             graph_revision=reader.status_snapshot().graph_revision)))

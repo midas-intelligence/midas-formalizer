@@ -76,8 +76,12 @@ partial def scan (imports : Environment) (records : Array Json := #[])
       if imports.contains ref then external := external.insert ref
     let .ok signature := Midas.Identity.signature ci
       | throw (IO.userError "unsupported declaration signature")
+    let presentation ← if simple && authored then
+      runCommandElabM <| liftTermElabM <| Midas.Identity.present ci.type
+      else pure ""
     records := records.push <| Json.mkObj [
       ("signature", signature),
+      ("presentation", toJson presentation),
       ("selector", toJson (privateToUserName n).toString),
       ("constant", name n),
       ("kind", toJson (if ci.isTheorem then "theorem" else if ci.isDefinition then "def" else "other")),

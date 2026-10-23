@@ -382,6 +382,16 @@ class SelectionConstructionTests(unittest.TestCase):
             with self.assertRaises(codec.GraphLimit):
                 self.freeze(signatures=self.signatures | {self.declarations[0].constant: signature})
 
+    def test_type_presentation_roundtrips_without_changing_obligation_identity(self):
+        signatures = tuple(replace(s, presentation=b'compiler type') for s in self.selection.signatures)
+        selected = self.freeze(signatures=dict(zip(self.signatures, signatures)))
+        with patch.object(json, 'dumps', side_effect=AssertionError('JSON projection')):
+            payload = encode_selection(selected)
+        restored = load_selection(payload, self.inputs)
+        self.assertEqual(tuple(s.presentation for s in restored.signatures), (b'compiler type',) * len(signatures))
+        self.assertEqual(restored.identities, self.selection.identities)
+        self.assertNotEqual(restored.id, self.selection.id)
+
     def test_freeze_and_load_share_source_and_signature_validation(self):
         bad_signatures = (replace(self.selection.signatures[0], target=codec.encode(['nat', 0])),
                           self.selection.signatures[1])

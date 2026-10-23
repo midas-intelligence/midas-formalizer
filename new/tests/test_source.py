@@ -33,6 +33,16 @@ def context(sig=None):
 
 
 class NameTests(unittest.TestCase):
+    def test_type_presentation_does_not_expand_or_change_compiler_source(self):
+        original = signature()
+        displayed = replace(original, presentation=b'True')
+        with patch('midas.source.render._signature', side_effect=AssertionError('expanded identity')):
+            self.assertEqual(present_subject(displayed), b'True')
+            with self.assertRaisesRegex(ValueError, 'byte limit'):
+                present_subject(displayed, maximum=3)
+        proof = SourceFile('proof', b'by trivial')
+        self.assertEqual(candidate(context(original), proof).data, candidate(context(displayed), proof).data)
+
     def test_structural_names_and_private_aliases(self):
         self.assertEqual(lean_name(name('match'), readable=True), '«match»')
         self.assertEqual(lean_name(name('α'), absolute=True, readable=True), '_root_.α')
