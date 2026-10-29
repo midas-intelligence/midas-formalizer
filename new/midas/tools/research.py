@@ -82,7 +82,7 @@ def research_evidence(stage, raw, events):
     actions = web_actions(events, limit=stage.action.web_calls)
     opened = any(a.action in ('openPage', 'findInPage') for a in actions)
     viewed = {url for a in actions for url in a.viewed_urls}
-    quoted, sources = {}, []
+    quoted, sources, warnings = {}, [], []
     for ordinal, source in enumerate(value['sources']):
         codec.fields(source, ('url', 'title', 'location', 'excerpt', 'summary', 'hypotheses', 'accessed'))
         url = public_url(source['url'])
@@ -95,14 +95,38 @@ def research_evidence(stage, raw, events):
         if quoted[url] > 25:
             raise ValueError('Research exceeds per-source quote allowance')
         if source['accessed'] and not opened and url not in viewed:
-            raise ValueError('Research claimed access without an open/find or matching document view')
+            warning = 'Research claimed access without an open/find or matching document view'
+            if warning not in warnings:
+                warnings.append(warning)
         if source['excerpt'] and not source['accessed']:
             raise ValueError('Unread research source cannot supply an exact excerpt')
         sources.append(dict(source, id=f'{stage.helper_id}S{ordinal+1}'))
     return pack({'format': 'midas-research-evidence-v1', 'stage': stage.sha256,
         'answer': value['answer'], 'sources': sources, 'unresolved': value['unresolved'],
+        'warnings': warnings,
         'actions': [[a.id, a.action, list(a.viewed_urls)] for a in actions],
         'authority': 'advisory', 'provenance': 'Access and quotations are provider-reported.'}, RESEARCH_BYTES)
+
+
+def research_summary(payload):
+    """Present research content before paging; web actions stay in saved evidence."""
+    value = codec.load_record(payload, limit=RESEARCH_BYTES)
+    if value['format'] != 'midas-research-evidence-v1':
+        raise ValueError('Expected admitted research evidence')
+    parts = ['Warning: '+warning for warning in value['warnings']]
+    parts.append('Research answer (advisory):\n'+value['answer'])
+    for ordinal, source in enumerate(value['sources'], 1):
+        parts.append('\n'.join((
+            f"Source {ordinal}: {source['title']}",
+            'URL: '+source['url'],
+            'Location: '+source['location'],
+            'Accessed (researcher-reported): '+str(source['accessed']),
+            'Excerpt: '+source['excerpt'],
+            'Summary: '+source['summary'],
+            'Hypotheses: '+source['hypotheses'])))
+    if value['unresolved']:
+        parts.append('Unresolved questions:\n'+'\n'.join(value['unresolved']))
+    return '\n\n'.join(parts)
 
 
 def admit_research(stage, admitted, reader):

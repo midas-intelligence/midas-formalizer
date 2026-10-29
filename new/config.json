@@ -12,7 +12,7 @@
     "model_concurrency": 25,
     "network_concurrency": 10,
     "compiler_concurrency": 15,
-    "compiler_memory_mib": 8192,
+    "compiler_memory_mib": 122880,
     "backlog_low": 4,
     "backlog_new_stop": 52,
     "backlog_all_stop": 72,
@@ -37,7 +37,7 @@
     "web_calls": 12
   },
   "checker": {
-    "wall_ms": 90000,
+    "wall_ms": 600000,
     "memory_mib": 8192,
     "output_bytes": 8388608,
     "evidence_bytes": 67108864,
@@ -53,7 +53,7 @@
     "max_rec_depth": 4096
   },
   "export": {
-    "timeout_ms": 90000,
+    "timeout_ms": 600000,
     "comparator_timeout_ms": 1800000,
     "deadline_ms": 7200000,
     "memory_mib": 8192,
@@ -139,13 +139,18 @@
     }
   },
   "research": {
-    "provider": null,
-    "model": null,
-    "transport": null,
+    "provider": "openai",
+    "model": "gpt-6.1-sol",
+    "transport": "codex",
     "account": null,
     "endpoint": null,
     "credential_env": null,
     "prompt_cache": null,
-    "prices": null
+    "prices": {
+      "input": 2000000,
+      "cached_input": 100000,
+      "output": 10000000,
+      "cache_write": null
+    }
   }
 }

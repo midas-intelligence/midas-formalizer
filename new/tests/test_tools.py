@@ -20,7 +20,7 @@ from midas.source import SourceFile
 from midas.tools import (Archive, Backend, HelperRequest, Lookup, Match, Probe, Research, Retrieve,
     Scope, Search, SearchResult, SearchService, SourceEntry, SourceIndex, Stage, StageEvidence,
     admit_checked, continue_retrieval, execute_search, finish_helper, fuse, lookup_sources, plan_helper,
-    prepare_archive, probe_summary, read_page, research_evidence, search_stages, search_summary, source_excerpt, web_actions)
+    prepare_archive, probe_summary, read_page, research_evidence, research_summary, search_stages, search_summary, source_excerpt, web_actions)
 from midas.tools.protocol import pack
 from midas.tools.search import hosted, worker_payload
 
@@ -582,14 +582,61 @@ class ToolsTests(unittest.TestCase):
             result = codec.load_record(research_evidence(stage, raw, events(event)), limit=131072)
         self.assertEqual(result['authority'], 'advisory')
         self.assertEqual(result['stage'], stage.sha256)
-        with self.assertRaisesRegex(ValueError, 'claimed access'):
-            research_evidence(stage, raw, events(dict(event, action={'type':'search'})))
+        self.assertEqual(result['warnings'], [])
+        warned = codec.load_record(research_evidence(stage, raw,
+            events(dict(event, action={'type':'search'}))), limit=131072)
+        self.assertEqual(warned['warnings'], [
+            'Research claimed access without an open/find or matching document view'])
+        for field in ('answer', 'sources', 'unresolved'):
+            self.assertEqual(warned[field], result[field])
         viewed = dict(event, action={'type':'other', 'results':[{'type':'text_result', 'ref_id':'turn1view0', 'url':value['sources'][0]['url']}]})
-        research_evidence(stage, raw, events(viewed))
+        matched = codec.load_record(research_evidence(stage, raw, events(viewed)), limit=131072)
+        self.assertEqual(matched['warnings'], [])
         value['sources'] *= 6
         value['sources'][0]['excerpt'] = 'one two three four five'
         with self.assertRaisesRegex(ValueError, 'quote allowance'):
             research_evidence(stage, json.dumps(value).encode(), events(event))
+
+    def test_research_pages_lead_with_warning_and_preserve_all_response_text(self):
+        from midas.application.helpers import page_text
+        stage = self.stage(Research('question'))
+        value = self.research_value()
+        value['answer'] = 'First mathematical step.\n' + 'αβγ proof detail\n' * 1200 + 'Last mathematical step.'
+        value['unresolved'] = ['Check the boundary case.', 'Find the exact declaration.']
+        # Build the large wire from bounded pieces, without a whole-document JSON operation.
+        from midas.prompt.wire import _Writer
+        wire = _Writer(131072)
+        wire.add(b'{"answer":')
+        wire.string((value['answer'].encode(),))
+        wire.add(b',"sources":'+json.dumps(value['sources']).encode())
+        wire.add(b',"unresolved":'+json.dumps(value['unresolved']).encode()+b'}')
+        recorded = events({'type':'webSearch', 'id':'private-web-action', 'action':{'type':'search'}})
+        with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
+            evidence = research_evidence(stage, wire.finish(), recorded)
+            text = research_summary(evidence)
+            archive = prepare_archive(self.scope, stage.helper_id, (text,), (self.a.save(evidence),), self.a)
+            pages = [read_page(archive, self.scope, self.a, cursor=f'{archive.id}:{i}')
+                     for i in range(len(archive.pages))]
+            displays = [page_text(page.payload).decode() for page in pages]
+        self.assertGreater(len(pages), 1)
+        self.assertTrue(displays[0].startswith('Warning: Research claimed access'))
+        self.assertIn('First mathematical step.', displays[0])
+        self.assertLess(displays[0].index('Warning:'), displays[0].index('Research answer'))
+        # Page framing is separate from the source text: reconstruct exact UTF-8 fragments.
+        restored = ''.join(row[4] for page in pages
+                           for row in codec.load_record(page.payload, limit=16000)[4])
+        self.assertEqual(restored, text)
+        self.assertIn(value['answer'], restored)
+        for field, content in value['sources'][0].items():
+            self.assertIn(str(content), restored)
+        for question in value['unresolved']:
+            self.assertIn(question, restored)
+        for clutter in ('0/actions', 'private-web-action', 'midas-research-evidence-v1', self.scope.environment_id):
+            self.assertNotIn(clutter, ''.join(displays))
+        saved = codec.load_record(evidence, limit=131072)
+        self.assertEqual(saved['actions'][0], ['private-web-action', 'search', []])
+        self.assertIn('Source 1: Paper', restored)
+        self.assertNotIn(saved['sources'][0]['id'], restored)
 
     def test_research_web_limits_duplicates_and_malformed_response(self):
         event = {'type':'webSearch', 'id':'w1', 'action':{'type':'search'}}

@@ -12,7 +12,7 @@ from ..source import CheckedAlias, SourceFile
 from ..strategy import Context
 from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retrieve, Search,
     SearchResult, SourceIndex, Stage, StageEvidence, admit_checked, admit_research, continue_retrieval,
-    lookup_sources, prepare_archive, probe_summary, search_stages, search_summary)
+    lookup_sources, prepare_archive, probe_summary, research_summary, search_stages, search_summary)
 from . import records as r, token_usage
 
 
@@ -166,6 +166,9 @@ def reduce(flow, reader, invocation, accepted, binding):
         provenance.extend(item.artifacts)
         for reference in item.artifacts:
             data = r.read(overlay, reference, 4*1024**2)
+            if isinstance(item.stage.action, Research) and item.status == ResultStatus.SUCCEEDED:
+                rows.append(research_summary(data))
+                continue
             if isinstance(item.stage.action, Probe) and item.status == ResultStatus.SUCCEEDED:
                 remaining = 4*1024**2-len(data)
                 for case, raw in zip(item.stage.action.cases, codec.load_record(data, limit=65536)):

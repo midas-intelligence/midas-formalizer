@@ -569,6 +569,53 @@ class Contracts(unittest.TestCase):
             self.assertEqual(token_usage.sample(run.writer, owner, 'prover', provider_route), (1000, 500))
             self.assertEqual(r.owner_state(run.writer, owner.obligation_id)[1].evidence, evidence)
 
+    def test_research_handoff_preserves_answer_with_access_warning_and_hides_actions(self):
+        from midas.application import helpers, records as r
+        from midas.provider import ModelOutput, Route
+        from tests.test_tools import events
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        research_route = ModelRoute(provider='openai', model='fixture')
+        research = dict(mode='research', rationale='Find supporting mathematics.', question='Why True?', urls=[])
+        answer = model_json(dict(answer='Use True.intro to finish the proof.', sources=[dict(
+            url='https://example.test/proof', title='Supporting proof', location='Lemma 1',
+            excerpt='True has a constructor.', summary='Apply the constructor.',
+            hypotheses='No extra assumptions.', accessed=True)], unresolved=['Check the declaration name.']))
+        for action in ('search', 'openPage'):
+            with self.subTest(action=action):
+                prompts = []
+                replies = iter((response(research), response(proof())))
+                def transport(request, raw, *args):
+                    if request.role == 'research':
+                        return ModelOutput(raw=answer, events=events(dict(type='webSearch',
+                            id='private-web-action', action=dict(type=action))), usage=Usage(1, 0, 1, 0))
+                    prompts.append(raw)
+                    return ModelOutput(raw=next(replies), usage=Usage(1, 0, 1, 0))
+                self.app.transports = {Route.from_config(setting).scope: transport
+                                       for setting in (route, research_route)}
+                with self.start(name=action, workflow='live', config=replace(
+                        Config(), prover=route, research=research_route)) as run:
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    self.assertEqual(len(prompts), 2)
+                    after = prompts[1]
+                    for content in (b'Use True.intro to finish the proof.', b'https://example.test/proof',
+                                    b'Supporting proof', b'Check the declaration name.'):
+                        self.assertIn(content, after)
+                    for clutter in (b'0/actions', b'private-web-action', b'0/answer', b'0/status',
+                                    b'midas-research-evidence-v1'):
+                        self.assertNotIn(clutter, after)
+                    warning = b'Warning: Research claimed access without an open/find or matching document view'
+                    if action == 'search':
+                        self.assertLess(after.index(warning), after.index(b'Research answer (advisory):'))
+                    else:
+                        self.assertNotIn(warning, after)
+                    owner = run.workflow.graph(run.writer).nodes[0].owner
+                    archive, = helpers.advertised(run.writer, owner)
+                    self.assertEqual(len(archive.pages), 1)
+                    evidence = codec.load_record(r.read(run.writer, archive.provenance[0]), limit=131072)
+                    self.assertEqual(evidence['actions'], [['private-web-action', action, []]])
+                    self.assertIn(b'Source 1: Supporting proof', after)
+                    self.assertNotIn(evidence['sources'][0]['id'].encode(), after)
+
     def test_research_usage_does_not_calibrate_prompts_but_remains_charged(self):
         from midas.application import records as r, token_usage
         from midas.application.service import commit

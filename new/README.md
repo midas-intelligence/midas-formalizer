@@ -1273,16 +1273,21 @@ payload hash; it checks lookup queries and probe case IDs/operations. The contro
 must first bind that compiler request to the planned stage. Checker retains the
 per-case start/completion protocol. `admit_research` similarly consumes an admitted
 provider result bound by the controller to the research stage. Research accepts only
-bounded structured evidence and recorded web actions. It preserves the existing
-open/find or matching-document-view access semantics and cumulative 25-word quote
-bound per URL. Access and quotations remain provider-reported. None of these tools
-creates proof authority.
+bounded structured evidence and recorded web actions. Access claims without an
+open/find or matching document view produce a warning before the answer, while
+preserving the response, sources and unresolved questions. The cumulative 25-word
+quote bound per URL still applies. Access and quotations remain provider-reported.
+None of these tools creates proof authority.
 
 Requests, results and archives use shallow binary records. The bounded external
 wire decoder is shared in `domain/wire.py`; provider imports that same decoder.
 Search/research wire parsing and large source/evidence handling make no JSON-library
 calls. `prepare_archive` stages fixed pages of at most 16,000 bytes and a bounded
-index. Search and probe records are projected to plain text before paging, so the
+index. Research is projected to plain text before paging, with access warnings
+first, then the answer, sources and unresolved questions. Sources use numbered
+labels; source IDs and web-action metadata stay in the original evidence and are
+not presented in prompts. Search and probe records
+are also projected to plain text before paging, so the
 model sees declaration names, authored excerpts and source locations, or case IDs,
 generated code, diagnostics, goals and exploratory status. Combined retrieval keeps
 the search excerpts and failures alongside checked lookup results. Original
