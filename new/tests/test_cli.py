@@ -119,6 +119,8 @@ class CliTests(unittest.TestCase):
             return original(value, **kwargs)
         with patch('json.loads', side_effect=bounded):
             self.assertEqual(files.script(manifest), (('prover', response.read_bytes()),))
+            manifest.write_text('[{"role":"research","file":"reply"},{"role":"web_search","file":"reply"}]')
+            self.assertEqual(tuple(role for role, _ in files.script(manifest)), ('research', 'web_search'))
         oversized = self.root/'oversized'
         oversized.write_bytes(b' '*16385)
         with patch('json.loads', side_effect=AssertionError('large JSON')), self.assertRaises(ValueError):
@@ -127,6 +129,14 @@ class CliTests(unittest.TestCase):
             manifest.write_bytes(bad)
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 files.document(manifest)
+
+    def test_helper_instruction_roles_are_distinct(self):
+        from midas.cli.service import instructions
+        research, web = self.root/'research', self.root/'web'
+        research.write_text('Answer questions.')
+        web.write_text('Find references.')
+        self.assertEqual(instructions((f'researcher={research}', f'web-searcher={web}')),
+                         (('researcher', b'Answer questions.'), ('web-searcher', b'Find references.')))
 
     def test_invalid_candidates_and_conflicting_modes_do_not_create_runs(self):
         candidate = self.root/'invalid'

@@ -23,7 +23,7 @@ def fork(application, parent, directory, *, config=None, package=None, workflow=
         if script is None:
             script = []
             if workflow == 'scripted':
-                for role in ('prover', 'reviewer', 'research'):
+                for role in ('prover', 'reviewer', 'research', 'web_search'):
                     index = reader.counter('application.script', role)
                     while saved := reader.record('application.script:'+role, str(index)):
                         script.append((role, r.read(reader, saved.artifact, 4*1024**2)))

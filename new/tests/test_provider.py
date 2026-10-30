@@ -100,7 +100,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(ModelRequest.load(req.payload), req)
         self.assertLess(len(req.payload), META_BYTES)
         self.assertNotIn(b'env_', req.payload)
-        for config in (cfg.model, cfg.research_model):
+        for config in (cfg.model, cfg.research_model, cfg.web_search_model):
             limits = Limits.from_config(replace(config, request_max_retries=3, stream_max_retries=1))
             self.assertEqual((limits.request_max_retries, limits.stream_max_retries), (3, 1))
             saved = replace(req, limits=limits)
@@ -121,9 +121,13 @@ class ProviderTests(unittest.TestCase):
                        {'credential_env':'a-b'}, {'model':'m\n'}, {'model':None}, {'model':' m'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 replace(ROUTE, **change)
-        for change in ({'role':'research'}, {'limits':replace(LIMITS, web_calls=1)}):
+        for change in ({'role':'web_search'}, {'limits':replace(LIMITS, web_calls=1)}):
             with self.assertRaises(ValueError):
                 replace(self.request, **change)
+        research = replace(self.request, role='research')
+        self.assertEqual(ModelRequest.load(research.payload), research)
+        with self.assertRaisesRegex(ValueError, 'Only web search'):
+            replace(research, limits=replace(LIMITS, web_calls=1))
 
     def test_request_reservation_binding(self):
         inv = issue(self.a, self.request)
@@ -418,7 +422,7 @@ class CodexTests(unittest.TestCase):
         route = Route(provider,'model','codex')
         raw = prepared.wire if prepared else b'{"input":[{"type":"text","text":"JSON proof"}]}'
         setup = prepared.setup if prepared else b'{"baseInstructions":"Return a proof."}'
-        role = prepared.provider_role if prepared else 'research' if web_calls else 'prover'
+        role = prepared.provider_role if prepared else 'web_search' if web_calls else 'prover'
         req = ModelRequest(route, role, replace(limits,web_calls=web_calls), a.save(raw), a.save(setup))
         validate_wire(req, raw, setup)
         executable = str(Path(sys.executable).resolve())
@@ -449,15 +453,15 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(out.termination,Termination.TERMINATED)
 
     def test_role_schemas_in_instructions_allow_native_text_turn(self):
-        from midas.prompt import Options, Section, Snapshot, build, prover, reviewer, researcher
+        from midas.prompt import Options, Section, Snapshot, build, prover, reviewer, researcher, web_searcher
         snapshot = Snapshot((Section('subject', 'goal', b'True'),
                              Section('candidate', 'proof', b'by trivial'),
                              Section('question', 'question', b'Find a reference.'),
                              Section('capabilities', 'allowance', b'web_calls=1')))
-        for renderer in (prover.render, reviewer.render, researcher.render):
+        for renderer in (prover.render, reviewer.render, researcher.render, web_searcher.render):
             prepared = build(snapshot, Options('codex', 'model'), renderer=renderer)
             with self.subTest(role=prepared.role):
-                out, calls = self.invoke(prepared=prepared, web_calls=int(prepared.role == 'researcher'))
+                out, calls = self.invoke(prepared=prepared, web_calls=int(prepared.role == 'web-searcher'))
                 self.assertIsNone(out.error)
                 self.assertEqual(calls.count('turn/start'), 1)
 
@@ -509,7 +513,7 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(out.termination,Termination.TERMINATED)
         self.assertEqual(calls.count('turn/start'),1)
 
-    def test_tools_rejected_and_research_web_evidence_retained(self):
+    def test_tools_rejected_and_web_search_evidence_retained(self):
         out,_ = self.invoke('tool')
         self.assertEqual(out.error,'configuration')
         out,_ = self.invoke('web',web_calls=1)

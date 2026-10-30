@@ -39,6 +39,7 @@ class OwnerUsage:
     decomposition: int = 0
     stop_requests: int = 0
     research: int = 0
+    web_search: int = 0
     retrieval: int = 0
     probe: int = 0
     backtracks: int = 0
@@ -76,10 +77,11 @@ class RunUsage:
 class Services:
     compiler: bool = True
     research: bool = False
-    research_web_calls: int = 0
+    web_search: bool = False
+    web_calls: int = 0
 
     def __post_init__(self):
-        _counts(self, flags=('compiler', 'research'))
+        _counts(self, flags=('compiler', 'research', 'web_search'))
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,12 +137,13 @@ class AdmissionRequest:
                 skip=('job', 'bounds', 'candidate_mode', 'helper'))
         if self.candidate_mode not in (None, 'direct', 'decomposition'):
             raise DomainError('Unknown candidate mode')
-        if self.helper not in (None, 'research', 'retrieve', 'probe'):
+        if self.helper not in (None, 'research', 'web_search', 'retrieve', 'probe'):
             raise DomainError('Unknown helper mode')
         if self.helper_units == 0:
             raise DomainError('Helper units must be positive')
         if self.helper is not None:
             kinds = {'research': (JobKind.MODEL,),
+                     'web_search': (JobKind.MODEL,),
                      'retrieve': (JobKind.SEARCH, JobKind.NETWORK_SEARCH, JobKind.LOOKUP),
                      'probe': (JobKind.PROBE,)}
             if self.job.kind not in kinds[self.helper]:
@@ -180,6 +183,7 @@ class Capabilities:
     decomposition_remaining: int
     repair_remaining: int
     research_remaining: int
+    web_search_remaining: int
     retrieval_remaining: int
     probe_remaining: int
     web_calls: int
@@ -387,31 +391,34 @@ class Policy:
         natural(units, 'helper units', positive=True)
         if mode == 'page':
             return Decision()
-        if mode not in ('research', 'retrieve', 'probe'):
+        if mode not in ('research', 'web_search', 'retrieve', 'probe'):
             raise DomainError('Unknown helper mode')
         if mode == 'retrieve' and owner.retrieval_disabled:
             return Decision('retrieval_disabled')
         if mode in ('retrieve', 'probe') and not services.compiler:
             return Decision('compiler_not_configured')
-        if mode == 'research' and (not services.research or not min(
-                services.research_web_calls, self.config.helpers.web_calls)):
+        if mode == 'research' and not services.research:
             return Decision('missing_research_configuration')
+        if mode == 'web_search' and (not services.web_search or not min(
+                services.web_calls, self.config.helpers.web_calls)):
+            return Decision('missing_web_search_configuration')
         field = 'retrieval' if mode == 'retrieve' else mode
         if getattr(owner, field) + units > getattr(self.config.helpers, field):
             return Decision(field + '_allowance_exhausted')
         return Decision()
 
     def capabilities(self, owner: OwnerUsage, services: Services) -> Capabilities:
-        modes = tuple(mode for mode in ('research', 'retrieve', 'probe', 'page')
+        modes = tuple(mode for mode in ('research', 'web_search', 'retrieve', 'probe', 'page')
                       if self.helper(mode, owner, services).allowed)
         repair = owner.repair_remaining if owner.repair_open and not owner.repair_suspended else 0
         return Capabilities(modes,
             max(0, self.config.mathematics.direct - owner.direct),
             max(0, self.config.mathematics.decomposition - owner.decomposition), repair,
             max(0, self.config.helpers.research - owner.research),
+            max(0, self.config.helpers.web_search - owner.web_search),
             0 if owner.retrieval_disabled else max(0, self.config.helpers.retrieval - owner.retrieval),
             max(0, self.config.helpers.probe - owner.probe),
-            min(services.research_web_calls, self.config.helpers.web_calls) if services.research else 0)
+            min(services.web_calls, self.config.helpers.web_calls) if services.web_search else 0)
 
     def backtrack(self, owner: OwnerUsage, run: RunUsage) -> Decision:
         if owner.repair_open:
@@ -481,7 +488,8 @@ class Policy:
             if not decision.allowed:
                 return decision
         if job.kind == JobKind.MODEL:
-            model = self.config.research_model if request.helper == 'research' else self.config.model
+            model = (getattr(self.config, request.helper+'_model')
+                     if request.helper in ('research', 'web_search') else self.config.model)
             if (job.limits.wall_ms > model.invocation_ms or job.limits.output_bytes > model.output_bytes
                     or job.limits.evidence_bytes > model.event_bytes + 16384):
                 return Decision('model_resource_limit')

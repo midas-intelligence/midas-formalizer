@@ -52,7 +52,8 @@ class Workflow:
         self.export_only, self.allow_sorry, self.library = export_only, allow_sorry, library
         self.strategy = strategy or Strategy()
         self.services = Services(research=provider is not None and policy.config.research.configured,
-            research_web_calls=12 if policy.config.research.configured else 0)
+            web_search=provider is not None and policy.config.web_search.configured,
+            web_calls=12 if policy.config.web_search.configured else 0)
         self._graph = None
         self._stages = {}
         self._progress_cache = None

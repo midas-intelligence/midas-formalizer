@@ -159,8 +159,15 @@ A smaller `live.json` can omit settings that should use defaults:
 }
 ```
 
-Configure a reviewer for independent review of decompositions and node stop requests. Research is
-disabled when the `research` route is omitted or unconfigured.
+Configure a reviewer for independent review of decompositions and node stop requests. The prover and reviewer can call either helper directly:
+
+- `research`: mathematical guidance, proof strategies and answers to questions, without browsing.
+- `web_search`: resources and references, with bounded web search and source access checks.
+
+Each helper is disabled when its route is omitted or unconfigured. The researcher
+supports the same transports as the prover; the web-searcher requires OpenAI Codex.
+`helpers.research` and `helpers.web_search` set independent request allowances;
+`helpers.web_calls` bounds web operations per web-search request.
 
 A prover can return `stop` with a rationale and a nullable statement objection.
 The node stays active while the reviewer decides. Acceptance stops the node;
@@ -180,7 +187,7 @@ without spending a proof or decomposition attempt.
 | `openai` | `codex` | Configured app-server executable supplied with `--codex /absolute/path/to/codex`. |
 
 For an app-server route, set `provider`, `model`, and `transport`; omit `endpoint`
-and `prompt_cache`. Research requires this transport. Pass `--codex` again when
+and `prompt_cache`. Web search requires this transport. Pass `--codex` again when
 resuming a run that uses it. `PATH`, `HOME`, and `CODEX_HOME` are passed to the
 process; repeat `--codex-env NAME` for additional required environment variables.
 
@@ -205,7 +212,7 @@ per line. Successful runs independently verify their export even without
 `--output`; supplying `--output` also publishes the bundle to that directory.
 
 Custom role instructions use repeatable `--instructions ROLE=FILE`, with roles
-`prover`, `reviewer`, and `researcher`. Each file must be UTF-8 and at most 16 KiB.
+`prover`, `reviewer`, `researcher`, and `web-searcher`. Each file must be UTF-8 and at most 16 KiB.
 Instructions and configuration are saved with the run.
 
 Live retrieval can query the public LeanExplore service. It sends search queries;
@@ -299,7 +306,7 @@ python -B -m midas start scripted-run --package package --selection selection.bi
 
 A configured prover route is still required, but replies come from the files
 without model credentials or model API calls. Manifest roles are `prover`,
-`reviewer`, and `research`. Replies are consumed in order within each role;
+`reviewer`, `research`, and `web_search`. Replies are consumed in order within each role;
 retries reuse the saved reply. The manifest is capped at 16 KiB and 512 entries;
 reply files are capped at 4 MiB each and 64 MiB combined. The configured model
 output limit also applies (128 KiB by default).
@@ -429,10 +436,10 @@ settings use defaults; unknown fields and duplicate keys are rejected. See
 | --- | --- |
 | `run` | Model turns, runtime, intent count, optional token and cost budgets. |
 | `scheduling` | Model concurrency, shared compiler/search CPU slots, LeanExplore request concurrency, compiler memory pool, backlog thresholds. |
-| `mathematics`, `helpers` | Proof attempts, repairs, backtracks, research, retrieval, and probes. |
+| `mathematics`, `helpers` | Proof attempts, repairs, backtracks, research, web search, retrieval, and probes. |
 | `checker`, `local`, `export` | Wall time, memory, byte limits; checker/export heartbeats and recursion depth. |
-| `model`, `research_model`, `recovery` | Invocation/transport limits and retry policy. |
-| `prover`, `reviewer`, `research` | Model routes and optional prices. |
+| `model`, `research_model`, `web_search_model`, `recovery` | Invocation/transport limits and retry policy. |
+| `prover`, `reviewer`, `research`, `web_search` | Model routes and optional prices. |
 
 Durations use milliseconds; memory uses MiB. Prices are integer micro-USD per
 million tokens; `run.max_cost_microusd` is a total micro-USD budget. Model calls

@@ -82,6 +82,6 @@ def reserve_helper(reader, policy, owner, plan, services):
     decision = policy.helper(plan.charge, owner_usage(reader, owner), services, units=plan.units)
     if not decision.allowed:
         raise ValueError(decision.reason)
-    counter = 'research' if plan.charge == 'research' else 'probe' if plan.charge == 'probe' else 'retrieval'
+    counter = 'retrieval' if plan.charge == 'retrieve' else plan.charge
     return Effect(Changes(expected=(owner,), counters=_changes(reader, owner, **{counter: plan.units}),
         records=(RecordChange(scope(owner), key, None, data.reference),)), artifacts=(data,))

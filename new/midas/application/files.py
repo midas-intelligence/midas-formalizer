@@ -31,7 +31,7 @@ def script(path):
     result, total = [], 0
     for row in values:
         if (type(row) is not dict or set(row) != {'role', 'file'}
-                or row['role'] not in ('prover', 'reviewer', 'research') or type(row['file']) is not str):
+                or row['role'] not in ('prover', 'reviewer', 'research', 'web_search') or type(row['file']) is not str):
             raise ValueError('Expected script entries with role and file')
         payload = read(Path(path).resolve().parent/row['file'], min(4*1024**2, 64*1024**2-total))
         total += len(payload)

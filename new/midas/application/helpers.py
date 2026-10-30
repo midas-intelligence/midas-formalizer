@@ -6,13 +6,13 @@ from ..checker import ProbeCase
 from ..controller import Effect, artifact, reserve_helper
 from ..domain import ArtifactRef, JobKind, ResourceLimits, ResultStatus, Signature
 from ..domain import encoding as codec
-from ..prompt import Options, Section, build, researcher
+from ..prompt import Options, Section, build, researcher, web_searcher
 from ..provider import Limits, ModelRequest, Route
 from ..source import CheckedAlias, SourceFile
 from ..strategy import Context
-from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retrieve, Search,
-    SearchResult, SourceIndex, Stage, StageEvidence, admit_checked, admit_research, continue_retrieval,
-    lookup_sources, prepare_archive, probe_summary, research_summary, search_stages, search_summary)
+from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retrieve, Search, WebSearch,
+    SearchResult, SourceIndex, Stage, StageEvidence, admit_checked, admit_research, admit_web_search, continue_retrieval,
+    lookup_sources, prepare_archive, probe_summary, research_summary, web_search_summary, search_stages, search_summary)
 from . import records as r, token_usage
 
 
@@ -28,11 +28,11 @@ def begin(flow, reader, turn, plan, artifacts=(), parent=None):
         Effect(artifacts=(*values, request, original, *stages))]
     overlay = flow.overlay(reader, values)
     for stage in plan.stages:
-        effects.append(lower(flow, reader, stage, overlay))
+        effects.append(lower(flow, reader, stage, overlay, parent=parent))
     return r.merge(*effects)
 
 
-def lower(flow, reader, stage, inputs=None):
+def lower(flow, reader, stage, inputs=None, *, parent=None):
     inputs = inputs or reader
     owner = stage.scope.owner
     _, state = r.owner_state(reader, owner.obligation_id)
@@ -43,31 +43,43 @@ def lower(flow, reader, stage, inputs=None):
             raise ValueError('Search service is unavailable')
         return r.job(reader, stage.key, stage.kind, owner, stage.scope.environment_id, stage.payload,
             stage.inputs, (owner,), flow.policy.config.local.limits(), binding)
-    if isinstance(action, Research):
-        route = Route.from_config(flow.policy.config.research)
-        limits = Limits.from_config(flow.policy.config.research_model, web_calls=action.web_calls)
-        options = Options(route.transport, route.model)
-        snapshot = flow.snapshot(reader, owner)
+    if isinstance(action, (Research, WebSearch)):
+        web = isinstance(action, WebSearch)
+        role, prompt_role, module = ('web_search', 'web-searcher', web_searcher) if web else ('research', 'researcher', researcher)
+        setting = getattr(flow.policy.config, role)
+        route = Route.from_config(setting)
+        limits = Limits.from_config(getattr(flow.policy.config, role+'_model'), web_calls=action.web_calls if web else 0)
+        options = Options(route.transport, route.model, **({} if route.transport == 'codex' else
+            dict(reasoning=setting.reasoning_effort, prompt_cache=route.prompt_cache,
+                 cache_scope=route.scope if route.prompt_cache == 'explicit' else None)))
+        attempt = None
+        if parent and not web:
+            from .candidates import submission
+            from ..strategy import Attempt
+            checked = r.uncheck(submission(reader, parent[0])['rows'][parent[1]]['checked'])
+            attempt = Attempt(checked.candidate, True, checked)
+        snapshot = flow.snapshot(reader, owner, attempt=attempt)
         if snapshot.version.context != stage.scope.context:
-            raise ValueError('Research context differs from its frozen helper scope')
-        formal = flow.display(reader, snapshot, formal_only=True)
+            raise ValueError('Model helper context differs from its frozen helper scope')
+        formal = flow.display(reader, snapshot, formal_only=web, review=parent if not web else None,
+                              bounded_evidence=setting.input_token_budget is not None)
+        extra = (Section('question', 'urls', '\n'.join(action.urls).encode()),
+                 Section('capabilities', 'web-allowance', f'At most {action.web_calls} web calls.'.encode())) if web else ()
         display = replace(formal, sections=(*formal.sections,
-            Section('question', 'question', action.question.encode()),
-            Section('question', 'urls', '\n'.join(action.urls).encode()),
-            Section('capabilities', 'web-allowance', f'At most {action.web_calls} web calls.'.encode())))
-        renderer = (lambda snapshot: replace(researcher.render(snapshot),
-            instructions=flow.instructions['researcher'])) if 'researcher' in flow.instructions else researcher.render
+            Section('question', 'question', action.question.encode()), *extra))
+        renderer = (lambda snapshot: replace(module.render(snapshot),
+            instructions=flow.instructions[prompt_role])) if prompt_role in flow.instructions else module.render
         rendered = build(display, options, renderer=renderer,
-            input_token_budget=flow.policy.config.research.input_token_budget,
-            token_sample=token_usage.sample(reader, owner, 'research', route))
+            input_token_budget=setting.input_token_budget,
+            token_sample=token_usage.sample(reader, owner, role, route))
         wire = r.wire_artifact(rendered.wire, stage.key)
         setup = artifact(rendered.setup) if rendered.setup else None
-        request = ModelRequest(route, 'research', limits, wire.reference, setup.reference if setup else None)
+        request = ModelRequest(route, role, limits, wire.reference, setup.reference if setup else None)
         result = r.merge(r.job(reader, stage.key, JobKind.MODEL, owner, stage.scope.environment_id,
             request.payload, request.inputs, display.owners,
             ResourceLimits(limits.invocation_ms, flow.policy.config.local.memory_mib,
-                           limits.output_bytes, limits.event_bytes+16384), binding, helper='research'),
-            token_usage.prepare(reader, stage.key, owner, 'research', route, rendered),
+                           limits.output_bytes, limits.event_bytes+16384), binding, helper=role),
+            token_usage.prepare(reader, stage.key, owner, role, route, rendered),
             Effect(artifacts=tuple(a for a in (wire, setup) if a)))
         return r.merge(result, flow.script.bind(reader, request)) if flow.script else result
     context = Context.load(r.read(reader, state.context, 8*1024**2))
@@ -121,9 +133,10 @@ def reduce(flow, reader, invocation, accepted, binding):
     elif accepted.failure:
         evidence = StageEvidence(stage, invocation.request.request_hash, receipt, ResultStatus.FAILED,
                                  (receipt.result_ref,), error=accepted.failure.value)
-    elif isinstance(stage.action, Research):
+    elif isinstance(stage.action, (Research, WebSearch)):
         try:
-            data = artifact(admit_research(stage, accepted.value, reader))
+            admit = admit_web_search if isinstance(stage.action, WebSearch) else admit_research
+            data = artifact(admit(stage, accepted.value, reader))
             extra.append(Effect(artifacts=(data,)))
             evidence = StageEvidence(stage, invocation.request.request_hash, receipt, ResultStatus.SUCCEEDED, (data.reference,))
         except ValueError as error:
@@ -166,8 +179,9 @@ def reduce(flow, reader, invocation, accepted, binding):
         provenance.extend(item.artifacts)
         for reference in item.artifacts:
             data = r.read(overlay, reference, 4*1024**2)
-            if isinstance(item.stage.action, Research) and item.status == ResultStatus.SUCCEEDED:
-                rows.append(research_summary(data))
+            if isinstance(item.stage.action, (Research, WebSearch)) and item.status == ResultStatus.SUCCEEDED:
+                summary = web_search_summary if isinstance(item.stage.action, WebSearch) else research_summary
+                rows.append(summary(data))
                 continue
             if isinstance(item.stage.action, Probe) and item.status == ResultStatus.SUCCEEDED:
                 remaining = 4*1024**2-len(data)
@@ -265,7 +279,7 @@ def review_evidence(reader, snapshot, review, sections, displayed):
             continue
         request = HelperRequest.load(r.read(reader, r.unref(saved['request'])))
         records = None
-        if isinstance(request.action, Research):
+        if isinstance(request.action, (Research, WebSearch)):
             if saved['parent'] != list(review):
                 continue
             turn = Turn.load(r.read(reader, r.unref(saved['turn'])))
@@ -296,7 +310,9 @@ def review_evidence(reader, snapshot, review, sections, displayed):
             if not text:
                 continue
             header = f'Result ID: {archive.id}\nPage {ordinal+1} of {len(archive.pages)}. '
-            header += 'Selected checked declaration excerpts.\n\n' if records is not None else 'Review research (advisory).\n\n'
+            header += ('Selected checked declaration excerpts.\n\n' if records is not None else
+                       'Review web search (advisory).\n\n' if isinstance(request.action, WebSearch) else
+                       'Review research (advisory).\n\n')
             yield ref, header.encode() + text
 
 

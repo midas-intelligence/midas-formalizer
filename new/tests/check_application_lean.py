@@ -77,7 +77,7 @@ def main():
         review = b'{"verdict":"accept","rationale":"The glue uses its stated premise.","findings":[],"question":"","urls":[]}'
         investigate = model_json(dict(verdict='research', rationale='Check the supporting argument.', findings=[],
             question='What proves reflexivity?', urls=[]))
-        researched = model_json(dict(answer='Reflexivity follows from rfl.', sources=[], unresolved=[]))
+        researched = model_json(dict(answer='Reflexivity follows from rfl.', unresolved=[]))
         research_config = replace(config, research=ModelRoute(provider='openai', model='fixture'))
         with app.start(root/'decomposition', package=package, selection=selected, config=research_config, workflow='scripted',
             script=(('prover', response(decompose)), ('prover', response(proof())),

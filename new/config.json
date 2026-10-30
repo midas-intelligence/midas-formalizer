@@ -32,6 +32,7 @@
   },
   "helpers": {
     "research": 7,
+    "web_search": 7,
     "retrieval": 10,
     "probe": 6,
     "web_calls": 12
@@ -93,6 +94,21 @@
     "request_max_retries": 0,
     "stream_max_retries": 0
   },
+  "web_search_model": {
+    "invocation_ms": 300000,
+    "preparation_ms": 10000,
+    "connect_ms": 30000,
+    "write_ms": 30000,
+    "read_ms": 60000,
+    "pool_ms": 10000,
+    "startup_ms": 30000,
+    "shutdown_ms": 3000,
+    "output_bytes": 8388608,
+    "frame_bytes": 16777216,
+    "event_bytes": 67108864,
+    "request_max_retries": 0,
+    "stream_max_retries": 0
+  },
   "recovery": {
     "transport_retries": 2,
     "unknown_retries": 0,
@@ -109,7 +125,7 @@
     "input_token_budget": 262144,
     "provider": "azure",
     "model": "gpt-6.1-sol",
-    "reasoning_effort":"high",
+    "reasoning_effort": "high",
     "transport": "azure_responses",
     "account": "midas-azure",
     "endpoint": "https://midas-openai.services.ai.azure.com/openai/v1/responses",
@@ -139,6 +155,21 @@
     }
   },
   "research": {
+    "provider": "openai",
+    "model": "gpt-6.1-sol",
+    "transport": "codex",
+    "account": null,
+    "endpoint": null,
+    "credential_env": null,
+    "prompt_cache": null,
+    "prices": {
+      "input": 2000000,
+      "cached_input": 100000,
+      "output": 10000000,
+      "cache_write": null
+    }
+  },
+  "web_search": {
     "provider": "openai",
     "model": "gpt-6.1-sol",
     "transport": "codex",

@@ -53,7 +53,7 @@ def _priced(transport, prices):
     return invoke
 
 
-def construct(config, *, transports=None, script=None, codex=None, roles=('prover', 'reviewer', 'research')):
+def construct(config, *, transports=None, script=None, codex=None, roles=('prover', 'reviewer', 'research', 'web_search')):
     prices = {role: getattr(config, role).prices for role in roles}
     bindings = {}
     for role in roles:
@@ -61,8 +61,8 @@ def construct(config, *, transports=None, script=None, codex=None, roles=('prove
         if not setting.configured:
             continue
         route = Route.from_config(setting)
-        if role == 'research' and route.transport != 'codex':
-            raise ValueError('Research requires the app-server transport')
+        if role == 'web_search' and (route.transport, route.provider) != ('codex', 'openai'):
+            raise ValueError('Web search requires the OpenAI app-server transport')
         if route.scope in bindings:
             continue
         transport = script or (transports or {}).get(route.scope)

@@ -106,7 +106,7 @@ class WireRequest:
 
     @property
     def provider_role(self):
-        return 'research' if self.role == 'researcher' else self.role
+        return {'researcher': 'research', 'web-searcher': 'web_search'}.get(self.role, self.role)
 
 
 def _section(section):
@@ -190,8 +190,8 @@ def build(snapshot: Snapshot, options: Options, *, renderer: Renderer,
         raise DomainError('Renderer must return a nonempty Prompt')
     from .budget import input_bytes, window
     prompt = window(prompt, input_token_budget, token_sample)
-    if prompt.role == 'researcher' and options.transport != 'codex':
-        raise DomainError('Research requires the app-server transport')
+    if prompt.role == 'web-searcher' and options.transport != 'codex':
+        raise DomainError('Web search requires the app-server transport')
     writer, setup = _Writer(options.max_bytes), None
     prefix = _prefix(prompt.role, prompt.renderer, prompt.contract, prompt.instructions, prompt.schema, options)
     if options.transport == 'codex':

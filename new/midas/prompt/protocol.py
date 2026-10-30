@@ -116,7 +116,7 @@ class Prompt:
     sections: tuple[Section, ...]
 
     def __post_init__(self):
-        if self.role not in ('prover', 'reviewer', 'researcher'):
+        if self.role not in ('prover', 'reviewer', 'researcher', 'web-searcher'):
             raise DomainError('Unknown prompt role')
         label(self.renderer)
         label(self.contract)

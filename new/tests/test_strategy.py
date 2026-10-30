@@ -102,7 +102,7 @@ def fixture(*, workflow='live', conditional=False):
     graph = ProofGraph(0, (parent.owner.obligation_id,), (parent, child))
     ctx = context()
     snapshot = Snapshot(Version(parent.owner, 0, artifacts.save(ctx.payload)), ctx, parent.environment_id,
-                        graph, workflow=workflow, services=Services(research=True, research_web_calls=3))
+                        graph, workflow=workflow, services=Services(research=True, web_search=True, web_calls=3))
     if conditional:
         value = candidate(parent, (child,))
         snapshot = replace(snapshot, attempt=Attempt(value, True, check(value)))
@@ -241,6 +241,8 @@ class ProtocolTests(unittest.TestCase):
             parse(dict(value, findings=[finding]))
         with self.assertRaises(ValueError):
             parse(dict(value, question='Hidden research'))
+        with self.assertRaisesRegex(ValueError, 'does not accept URLs'):
+            parse(dict(value, verdict='research', question='Explain this.', urls=['https://example.test']))
 
 
 class CandidateTests(unittest.TestCase):
@@ -469,10 +471,10 @@ class StateTests(unittest.TestCase):
         cases = (
             (Services(), OwnerUsage(), (), (), {'retrieve', 'probe'}),
             (Services(), OwnerUsage(), ('result-1',), (), {'retrieve', 'probe'}),
-            (Services(research=True, research_web_calls=0), OwnerUsage(), (), (), {'retrieve', 'probe'}),
-            (Services(research=True, research_web_calls=3), OwnerUsage(), ('result-1',), ('result-1:1',),
+            (Services(research=True, web_search=True, web_calls=0), OwnerUsage(), (), (), {'research', 'retrieve', 'probe'}),
+            (Services(research=True, web_search=True, web_calls=3), OwnerUsage(), ('result-1',), ('result-1:1',),
              set(prover.HELPER_MODES)),
-            (Services(research=True, research_web_calls=3), OwnerUsage(research=7, retrieval=10, probe=6),
+            (Services(research=True, web_search=True, web_calls=3), OwnerUsage(research=7, web_search=7, retrieval=10, probe=6),
              (), (), set()),
             (Services(compiler=False), OwnerUsage(), (), (), set()),
         )
@@ -485,8 +487,9 @@ class StateTests(unittest.TestCase):
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
                 schema = response_schema(prepared)
                 actions = {a['properties']['mode']['enum'][0] for a in schema['properties']['action']['anyOf']}
-                research_enabled = services.research and services.research_web_calls > 0
-                expected_helpers = set(prover.HELPER_MODES) - (set() if research_enabled else {'research'})
+                research_enabled = services.research
+                web_enabled = services.web_search and services.web_calls > 0
+                expected_helpers = set(prover.HELPER_MODES) - (set() if research_enabled else {'research'}) - (set() if web_enabled else {'web_search'})
                 self.assertEqual(actions & set(prover.HELPER_MODES), expected_helpers)
                 self.assertEqual(actions - set(prover.HELPER_MODES),
                                  {'proof', 'decomposition', 'candidate', 'revise', 'stop'})
@@ -503,7 +506,7 @@ class StateTests(unittest.TestCase):
                     self.assertIn('research: disabled', capabilities)
                 for removed in ('_remaining:', 'web_calls:', 'Stop mode:', 'reviewed requests'):
                     self.assertNotIn(removed, capabilities)
-                expected_schema = prover.action_schema(research_enabled)
+                expected_schema = prover.action_schema(research_enabled, web_enabled)
                 self.assertEqual(schema, decode(expected_schema, limit=16384))
                 self.assertEqual(prepared.turn.schema_hash, sha256(expected_schema).hexdigest())
 
@@ -575,7 +578,7 @@ class StateTests(unittest.TestCase):
         options = Options('azure_responses', 'model', prompt_cache='explicit', cache_scope='a'*64)
         wires = []
         for changed in (snapshot, replace(snapshot, usage=OwnerUsage(retrieval=1, probe=1)),
-                        replace(snapshot, usage=OwnerUsage(research=7, retrieval=10, probe=6)),
+                        replace(snapshot, usage=OwnerUsage(research=7, web_search=7, retrieval=10, probe=6)),
                         replace(snapshot, services=replace(snapshot.services, compiler=False)),
                         replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct)),
                         replace(snapshot, usage=OwnerUsage(decomposition=self.policy.config.mathematics.decomposition))):
@@ -602,13 +605,15 @@ class StateTests(unittest.TestCase):
             work = self.strategy.plan(current, policy).work[0]
             prepared = self.strategy.prepare_model(current, policy, work, display, options)
             wire = decode(prepared.wire.wire, limit=8*1024**2)
-            self.assertEqual(prepared.turn.schema_hash, sha256(prover.action_schema(False)).hexdigest())
+            self.assertEqual(prepared.turn.schema_hash, sha256(prover.action_schema(current.services.research, False)).hexdigest())
             self.assertNotEqual(first['prompt_cache_key'], wire['prompt_cache_key'])
-            self.assertIn('research: disabled', wire['input'][-1]['content'])
+            self.assertIn('web_search: disabled', wire['input'][-1]['content'])
 
     def test_reviewer_schema_removes_unavailable_research(self):
         for services, expected in ((Services(), {'accept', 'reject'}),
-                (Services(research=True, research_web_calls=3), {'accept', 'reject', 'research'})):
+                (Services(research=True), {'accept', 'reject', 'research'}),
+                (Services(web_search=True, web_calls=3), {'accept', 'reject', 'web_search'}),
+                (Services(research=True, web_search=True, web_calls=3), {'accept', 'reject', 'research', 'web_search'})):
             with self.subTest(services=services):
                 artifacts, snapshot = fixture(conditional=True)
                 snapshot = replace(snapshot, services=services, cursors=('unused-cursor',),
@@ -632,7 +637,7 @@ class StateTests(unittest.TestCase):
             dict(mode='stop', objection=None, rationale=''),
             dict(mode='recall', rationale='Read the source.', result_id='source-prefix'),
             dict(mode='recall', rationale='Read a result.', result_id=''),
-            dict(mode='research', rationale='Find a reference.', question='Which theorem applies?', urls=[]),
+            dict(mode='research', rationale='Find an approach.', question='Which theorem applies?'),
             dict(mode='page', rationale='Read more.', cursor='unavailable:1'),
         )
         for action in invalid:
@@ -749,24 +754,26 @@ class StateTests(unittest.TestCase):
         self.assertIsNone(result.decision)
         self.assertIn(finding['suggested_revision'], result.memory.observations[-1].messages)
 
-    def test_stop_review_research_preserves_the_exact_pending_request(self):
-        artifacts, snapshot = fixture()
-        request = StopRequest(snapshot.version.owner, 'No construction is possible.', artifact('stop'))
-        snapshot = replace(snapshot, stop_request=request)
-        dispatched, _, _ = dispatch(snapshot, artifacts)
-        raw = model_json(dict(verdict='research', rationale='Check the construction.', findings=[],
-                              question='Which construction applies?', urls=[]))
-        result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
-        stage = result.helper.stages[0]
-        evidence = StageEvidence(stage, receipt('research').request_ref.sha256, receipt('research'),
-                                 ResultStatus.SUCCEEDED, (artifact('research'),))
-        resumed = self.strategy.on_helper(snapshot, dispatched.turn, result.helper, (evidence,))
-        self.assertEqual(resumed.work[0].operation, 'review_stop')
-        self.assertIsNone(result.stopped)
-        self.assertIsNone(result.objection)
-        exhausted = replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct,
-                            decomposition=self.policy.config.mathematics.decomposition))
-        self.assertEqual(self.strategy.plan(exhausted, self.policy).work[0].operation, 'review_stop')
+    def test_stop_review_helpers_preserves_the_exact_pending_request(self):
+        for helper in ('research', 'web_search'):
+            artifacts, snapshot = fixture()
+            request = StopRequest(snapshot.version.owner, 'No construction is possible.', artifact('stop'))
+            snapshot = replace(snapshot, stop_request=request)
+            dispatched, _, _ = dispatch(snapshot, artifacts)
+            raw = model_json(dict(verdict=helper, rationale='Check the construction.', findings=[],
+                                  question='Which construction applies?', urls=[]))
+            result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
+            stage = result.helper.stages[0]
+            evidence = StageEvidence(stage, receipt('research').request_ref.sha256, receipt('research'),
+                                     ResultStatus.SUCCEEDED, (artifact('research'),))
+            resumed = self.strategy.on_helper(snapshot, dispatched.turn, result.helper, (evidence,))
+            self.assertEqual(resumed.work[0].operation, 'review_stop')
+            self.assertIsNone(result.stopped)
+            self.assertIsNone(result.objection)
+            exhausted = replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct,
+                                decomposition=self.policy.config.mathematics.decomposition))
+            self.assertEqual(self.strategy.plan(exhausted, self.policy).work[0].operation, 'review_stop')
+
 
     def test_retrieve_accepts_morley_subscript_names(self):
         artifacts, snapshot = fixture()
@@ -991,19 +998,23 @@ class StateTests(unittest.TestCase):
             self.strategy.on_helper(snapshot, dispatched.turn, replace(plan, request=replace(plan.request, continuation='other')),
                                     (admitted_stage,))
 
-    def test_reviewer_research_resumes_review(self):
-        artifacts, snapshot = fixture(conditional=True)
-        dispatched, _, _ = dispatch(snapshot, artifacts)
-        raw = model_json(dict(verdict='research', rationale='Check the endpoint.', findings=[],
-                              question='Does the estimate include zero?', urls=[]))
-        result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
-        self.assertEqual(result.helper.request.action.web_calls, 3)
-        stage = result.helper.stages[0]
-        evidence = StageEvidence(stage, receipt('research').request_ref.sha256, receipt('research'),
-                                 ResultStatus.SUCCEEDED, (artifact('research'),))
-        resumed = self.strategy.on_helper(snapshot, dispatched.turn, result.helper, (evidence,))
-        self.assertEqual(resumed.work[0].operation, 'review')
-        self.assertIsNone(result.memory)
+    def test_reviewer_helpers_resumes_review(self):
+        for helper in ('research', 'web_search'):
+            artifacts, snapshot = fixture(conditional=True)
+            dispatched, _, _ = dispatch(snapshot, artifacts)
+            raw = model_json(dict(verdict=helper, rationale='Check the endpoint.', findings=[],
+                                  question='Does the estimate include zero?', urls=[]))
+            result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
+            self.assertEqual(result.helper.charge, helper)
+            if helper == 'web_search':
+                self.assertEqual(result.helper.request.action.web_calls, 3)
+            stage = result.helper.stages[0]
+            evidence = StageEvidence(stage, receipt('research').request_ref.sha256, receipt('research'),
+                                     ResultStatus.SUCCEEDED, (artifact('research'),))
+            resumed = self.strategy.on_helper(snapshot, dispatched.turn, result.helper, (evidence,))
+            self.assertEqual(resumed.work[0].operation, 'review')
+            self.assertIsNone(result.memory)
+
 
     def test_probe_cases_are_binary_artifacts_and_share_one_request_allowance(self):
         artifacts, snapshot = fixture()

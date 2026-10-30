@@ -8,7 +8,7 @@ from ..domain import encoding as codec
 from ..domain.records import identifier, instance, items, natural
 from ..policy import AdmissionRequest
 from ..source import lean_name, parse_identifier
-from .protocol import (HelperRequest, Lookup, Probe, Research, Retrieve, Scope, Search, Stage,
+from .protocol import (HelperRequest, Lookup, Probe, WebSearch, Retrieve, Scope, Search, Stage,
                        REQUEST_BYTES, RESULT_BYTES, action_value, read, text)
 from .search import SearchResult
 
@@ -81,7 +81,7 @@ def plan_helper(request, policy, usage, services):
     decision = policy.helper(mode, usage, services)
     if not decision.allowed:
         raise ValueError(decision.reason)
-    if isinstance(request.action, Research):
+    if isinstance(request.action, WebSearch):
         bound = min(request.action.web_calls, policy.capabilities(usage, services).web_calls)
         request = replace(request, action=replace(request.action, web_calls=bound))
     if isinstance(request.action, Retrieve):

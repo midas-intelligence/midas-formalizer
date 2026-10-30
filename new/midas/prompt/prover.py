@@ -22,8 +22,8 @@ Choose one action using the CAPABILITIES section before filling its fields.
 Tool result sections identify the result ID and pages already displayed; use their
 contents directly. Delivered evidence is retained, subject to the configured
 input-token budget. Omission notices identify when older pages are outside this
-prompt. If research is disabled, choose an enabled local helper or work on the
-proof directly.
+prompt. If a helper is disabled, choose an enabled helper or work on the proof
+directly.
 Every action needs a nonempty rationale explaining what it will accomplish.
 Give a concise actionable reason, not a reasoning transcript.
 
@@ -129,8 +129,11 @@ tactic syntax, for example Lean.Elab.Tactic.evalTactic (← `(tactic| intro C)).
 The generated code, including wrapper and indentation, must fit 16000 UTF-8 bytes.
 Each case starts independently at the closed goal: introduce target binders
 explicitly when needed. Diagnostics refer to generated code (body starts at line 2).
-Use research only when enabled in Helper modes, for a mathematical question and
-at most six public source URLs.
+Use research when enabled for mathematical guidance, proof strategies, explanations
+or diagnosing an obstacle. Supply a precise question; the researcher does not browse.
+Use web_search when enabled to find resources and references, with a question and
+at most six public source URLs. Its results include source locations and hypotheses.
+Use returned references in your reasoning or ask the researcher how to apply them.
 Use page only with an offered cursor to read an additional page outside this prompt.
 
 Use stop when you believe this exact node cannot be proved. Explain why in
@@ -187,26 +190,28 @@ def schema():
                backends=array(ref('backend'), 2)),
         action('probe', cases=dict(array(obj(id=string(48), code=dict(string(16000),
                description='Only the TacticM do-block body after run_tac do; omit the wrapper.')), 3), minItems=1)),
-        action('research', question=string(8000), urls=array(string(8000), 6)),
+        action('research', question=string(8000)),
+        action('web_search', question=string(8000), urls=array(string(8000), 6)),
         action('page', cursor=string(4096)),
     ]
     return dict(obj(action={'anyOf': actions}, memory_update=nullable(ref('memory'))), **{'$defs': definitions})
 
 
-HELPER_MODES = ('retrieve', 'probe', 'research', 'page')
+HELPER_MODES = ('retrieve', 'probe', 'research', 'web_search', 'page')
 SCHEMA = schema_bytes(schema())
 
 
-@lru_cache(maxsize=2)
-def action_schema(research):
-    """Research configuration selects the schema; turn allowances do not."""
-    if type(research) is not bool:
-        raise DomainError('Expected research configuration')
-    if research:
+@lru_cache(maxsize=4)
+def action_schema(research, web_search):
+    """Helper configuration selects the schema; turn allowances do not."""
+    if type(research) is not bool or type(web_search) is not bool:
+        raise DomainError('Expected research and web-search configuration')
+    if research and web_search:
         return SCHEMA
     value = schema()
+    disabled = {name for name, enabled in (('research', research), ('web_search', web_search)) if not enabled}
     value['properties']['action']['anyOf'] = [action for action in value['properties']['action']['anyOf']
-        if action['properties']['mode']['enum'][0] != 'research']
+        if action['properties']['mode']['enum'][0] not in disabled]
     return schema_bytes(value)
 
 
@@ -227,4 +232,4 @@ def render(snapshot):
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
         b'Use the enabled helpers to obtain missing context. '
         b'Return the action JSON now.'))),)
-    return Prompt('prover', 'prover-v6', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('prover', 'prover-v7', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)

@@ -368,7 +368,7 @@ class Contracts(unittest.TestCase):
         research_route = ModelRoute(provider='openai', model='fixture')
         action = dict(mode='stop', rationale='No route found.', objection=None)
         research = model_json(dict(verdict='research', rationale='Investigate.', findings=[], question='Which constructor?', urls=[]))
-        answer = model_json(dict(answer='Use True.intro as the proof.', sources=[], unresolved=[]))
+        answer = model_json(dict(answer='Use True.intro as the proof.', unresolved=[]))
         finding = dict(category='progress', location='goal', issue='There is a constructor.', suggested_revision='')
         malformed = dict(verdict='reject', rationale='Use the constructor.', findings=[finding], question='', urls=[])
         rejected = dict(malformed, findings=[dict(finding, suggested_revision='Apply True.intro.')])
@@ -387,9 +387,8 @@ class Contracts(unittest.TestCase):
                 self.assertEqual(next(s.text for s in display.sections if s.name == 'stop-request'),
                     next(s.text for s in captured[0].sections if s.name == 'stop-request'))
             evidence = b'\n'.join(s.text for s in captured[1].sections if s.kind == 'evidence')
-            # Scripted research has no web events; its admitted failure still
-            # returns to this review instead of resuming the prover.
-            self.assertIn(b'Research performed no recorded web action', evidence)
+            # Guidance returns to this review without requiring web activity.
+            self.assertIn(b'Use True.intro as the proof.', evidence)
             _, state = r.owner_state(run.writer, self.selected.identities[0].id)
             self.assertFalse(state.stopped)
             self.assertIsNone(state.stop_request)
@@ -407,7 +406,7 @@ class Contracts(unittest.TestCase):
         invalid = (
             ('recall', dict(mode='recall', rationale='Inspect the definition.', result_id='Nat.add'),
              b'Unknown strategy action'),
-            ('research', dict(mode='research', rationale='Find the definition.', question='What is Nat.add?', urls=[]),
+            ('research', dict(mode='research', rationale='Find the definition.', question='What is Nat.add?'),
              b'missing_research_configuration'),
             ('page', dict(mode='page', rationale='Read the next page.', cursor='missing:1'),
              b'page requires an advertised cursor'),
@@ -569,13 +568,72 @@ class Contracts(unittest.TestCase):
             self.assertEqual(token_usage.sample(run.writer, owner, 'prover', provider_route), (1000, 500))
             self.assertEqual(r.owner_state(run.writer, owner.obligation_id)[1].evidence, evidence)
 
-    def test_research_handoff_preserves_answer_with_access_warning_and_hides_actions(self):
+    def test_callers_use_web_references_then_research_guidance_with_separate_routes(self):
+        from midas.application import token_usage
+        from midas.provider import ModelOutput, Route
+        from tests.test_tools import events
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        research_route = replace(route, reasoning_effort='high', prompt_cache='explicit', input_token_budget=10000)
+        web_route = ModelRoute(provider='openai', model='fixture')
+        web_answer = model_json(dict(answer='Reference on True.intro.', sources=[dict(
+            url='https://example.test/true', title='True constructors', location='Section 1',
+            excerpt='', summary='True.intro constructs True.', hypotheses='None.', accessed=True)], unresolved=[]))
+        guidance = model_json(dict(answer='Apply True.intro to the exact goal.', unresolved=[]))
+        for caller in ('prover', 'reviewer'):
+            with self.subTest(caller=caller):
+                def ask(helper):
+                    fields = dict(rationale='Find the next step.', question='How does True.intro apply?')
+                    if caller == 'reviewer':
+                        return model_json(dict(verdict=helper, findings=[], urls=[], **fields))
+                    return response(dict(mode=helper, **fields, **({'urls': []} if helper == 'web_search' else {})))
+                rejected = model_json(dict(verdict='reject', rationale='The node has a proof.', question='', urls=[],
+                    findings=[dict(category='progress', location='goal', issue='True has a constructor.',
+                                   suggested_revision='Apply True.intro.')]))
+                final = rejected if caller == 'reviewer' else response(proof())
+                caller_replies = iter((ask('web_search'), ask('research'), final))
+                prover_replies = iter((response(dict(mode='stop', rationale='Need a construction.', objection=None)),
+                                       response(proof())))
+                calls = []
+                def transport(request, raw, setup, *args):
+                    calls.append((request.role, raw))
+                    if request.role == 'web_search':
+                        self.assertEqual(request.limits.web_calls, 2)
+                        self.assertIn(b'Find references only.', setup)
+                        return ModelOutput(raw=web_answer, usage=Usage(100, 0, 10, 0),
+                            events=events(dict(type='webSearch', id='open', action=dict(type='openPage'))))
+                    if request.role == 'research':
+                        self.assertEqual(request.limits.web_calls, 0)
+                        self.assertIsNone(setup)
+                        self.assertIn(b'Reference on True.intro.', raw)
+                        self.assertIn(b'Give mathematical guidance.', raw)
+                        self.assertIn(b'"reasoning":{"effort":"high"}', raw)
+                        self.assertIn(b'prompt_cache_breakpoint', raw)
+                        return ModelOutput(raw=guidance, usage=Usage(200, 0, 20, 0))
+                    reply = next(caller_replies if request.role == caller else prover_replies)
+                    return ModelOutput(raw=reply, usage=Usage(100, 0, 10, 0))
+                self.app.transports = {Route.from_config(setting).scope: transport for setting in (research_route, route, web_route)}
+                config = replace(Config(), prover=route, reviewer=route, research=research_route, web_search=web_route,
+                                 helpers=replace(Config().helpers, research=1, web_search=1, web_calls=2))
+                with self.start(name=caller, workflow='live', config=config,
+                        instructions=(('researcher', b'Give mathematical guidance.'),
+                                      ('web-searcher', b'Find references only.'))) as run:
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    owner = run.workflow.graph(run.writer).nodes[0].owner
+                    for helper in ('research', 'web_search'):
+                        self.assertEqual(run.writer.counter('owner:'+owner.obligation_id, helper), 1)
+                        self.assertEqual(sum(role == helper for role, _ in calls), 1)
+                    self.assertEqual(token_usage.sample(run.writer, owner, 'research', Route.from_config(research_route))[1], 200)
+                    self.assertIsNone(token_usage.sample(run.writer, owner, 'web_search', Route.from_config(web_route)))
+                    last_caller = [raw for role, raw in calls if role == caller][-1]
+                    self.assertIn(b'Apply True.intro to the exact goal.', last_caller)
+
+    def test_web_search_handoff_preserves_answer_with_access_warning_and_hides_actions(self):
         from midas.application import helpers, records as r
         from midas.provider import ModelOutput, Route
         from tests.test_tools import events
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        research_route = ModelRoute(provider='openai', model='fixture')
-        research = dict(mode='research', rationale='Find supporting mathematics.', question='Why True?', urls=[])
+        web_search_route = ModelRoute(provider='openai', model='fixture')
+        web_search = dict(mode='web_search', rationale='Find supporting mathematics.', question='Why True?', urls=[])
         answer = model_json(dict(answer='Use True.intro to finish the proof.', sources=[dict(
             url='https://example.test/proof', title='Supporting proof', location='Lemma 1',
             excerpt='True has a constructor.', summary='Apply the constructor.',
@@ -583,17 +641,17 @@ class Contracts(unittest.TestCase):
         for action in ('search', 'openPage'):
             with self.subTest(action=action):
                 prompts = []
-                replies = iter((response(research), response(proof())))
+                replies = iter((response(web_search), response(proof())))
                 def transport(request, raw, *args):
-                    if request.role == 'research':
+                    if request.role == 'web_search':
                         return ModelOutput(raw=answer, events=events(dict(type='webSearch',
                             id='private-web-action', action=dict(type=action))), usage=Usage(1, 0, 1, 0))
                     prompts.append(raw)
                     return ModelOutput(raw=next(replies), usage=Usage(1, 0, 1, 0))
                 self.app.transports = {Route.from_config(setting).scope: transport
-                                       for setting in (route, research_route)}
+                                       for setting in (route, web_search_route)}
                 with self.start(name=action, workflow='live', config=replace(
-                        Config(), prover=route, research=research_route)) as run:
+                        Config(), prover=route, web_search=web_search_route)) as run:
                     self.assertEqual(self.finish(run).exit_code, 0)
                     self.assertEqual(len(prompts), 2)
                     after = prompts[1]
@@ -601,11 +659,11 @@ class Contracts(unittest.TestCase):
                                     b'Supporting proof', b'Check the declaration name.'):
                         self.assertIn(content, after)
                     for clutter in (b'0/actions', b'private-web-action', b'0/answer', b'0/status',
-                                    b'midas-research-evidence-v1'):
+                                    b'midas-web-search-evidence-v1'):
                         self.assertNotIn(clutter, after)
-                    warning = b'Warning: Research claimed access without an open/find or matching document view'
+                    warning = b'Warning: Web search claimed access without an open/find or matching document view'
                     if action == 'search':
-                        self.assertLess(after.index(warning), after.index(b'Research answer (advisory):'))
+                        self.assertLess(after.index(warning), after.index(b'Web-search results (advisory):'))
                     else:
                         self.assertNotIn(warning, after)
                     owner = run.workflow.graph(run.writer).nodes[0].owner
@@ -616,43 +674,43 @@ class Contracts(unittest.TestCase):
                     self.assertIn(b'Source 1: Supporting proof', after)
                     self.assertNotIn(evidence['sources'][0]['id'].encode(), after)
 
-    def test_research_usage_does_not_calibrate_prompts_but_remains_charged(self):
+    def test_web_search_usage_does_not_calibrate_prompts_but_remains_charged(self):
         from midas.application import records as r, token_usage
         from midas.application.service import commit
         from midas.provider import ModelOutput, Route
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        research_route = ModelRoute(provider='openai', model='fixture', input_token_budget=262144)
-        research = dict(mode='research', rationale='Read supporting context.', question='What proves True?', urls=[])
-        replies = iter((response(research), response(research), response(proof())))
-        research_calls = []
+        web_search_route = ModelRoute(provider='openai', model='fixture', input_token_budget=262144)
+        web_search = dict(mode='web_search', rationale='Read supporting context.', question='What proves True?', urls=[])
+        replies = iter((response(web_search), response(web_search), response(proof())))
+        web_search_calls = []
         def transport(request, raw, *args):
-            if request.role == 'research':
-                research_calls.append(raw)
+            if request.role == 'web_search':
+                web_search_calls.append(raw)
                 return ModelOutput(raw=model_json(dict(answer='Use True.intro.', sources=[], unresolved=[])),
                                    usage=Usage(332725, 263040, 5283, 100))
             return ModelOutput(raw=next(replies), usage=Usage(100, 0, 10, 0))
-        self.app.transports = {Route.from_config(setting).scope: transport for setting in (route, research_route)}
-        with self.start(workflow='live', config=replace(Config(), prover=route, research=research_route)) as run:
+        self.app.transports = {Route.from_config(setting).scope: transport for setting in (route, web_search_route)}
+        with self.start(workflow='live', config=replace(Config(), prover=route, web_search=web_search_route)) as run:
             reader = run.writer
             owner = run.workflow.graph(reader).nodes[0].owner
-            key = owner.obligation_id+':research'
-            saved_sample = [Route.from_config(research_route).scope, 1, 332725]
-            commit(reader, 'previous-research-sample', r.merge(
+            key = owner.obligation_id+':web_search'
+            saved_sample = [Route.from_config(web_search_route).scope, 1, 332725]
+            commit(reader, 'previous-web_search-sample', r.merge(
                 r.record(reader, 'application.prompt_usage', key, saved_sample),
-                r.record(reader, 'application.prompt_inputs', 'previous-research',
+                r.record(reader, 'application.prompt_inputs', 'previous-web_search',
                          [key, saved_sample[0], 7042])))
-            # A resumed, already-prepared research call must not update calibration either.
-            commit(reader, 'previous-research-observation', token_usage.observe(reader,
-                SimpleNamespace(request=SimpleNamespace(job=SimpleNamespace(semantic_key='previous-research'))),
+            # A resumed, already-prepared web_search call must not update calibration either.
+            commit(reader, 'previous-web_search-observation', token_usage.observe(reader,
+                SimpleNamespace(request=SimpleNamespace(job=SimpleNamespace(semantic_key='previous-web_search'))),
                 SimpleNamespace(status=ResultStatus.SUCCEEDED, usage=Usage(400000, 0, 0, 0))))
             self.assertEqual(self.finish(run).exit_code, 0)
-            self.assertEqual(len(research_calls), 2)
+            self.assertEqual(len(web_search_calls), 2)
             self.assertEqual(reader.status_snapshot().accounting.actual, Usage(665750, 526080, 10596, 200))
-            self.assertIsNone(token_usage.sample(reader, owner, 'research', Route.from_config(research_route)))
+            self.assertIsNone(token_usage.sample(reader, owner, 'web_search', Route.from_config(web_search_route)))
             self.assertEqual(r.value(reader, 'application.prompt_usage', key), saved_sample)
             self.assertEqual(token_usage.sample(reader, owner, 'prover', Route.from_config(route))[1], 100)
             new_inputs = [record for record in reader.records('application.prompt_inputs')
-                          if record.key != 'previous-research']
+                          if record.key != 'previous-web_search']
             self.assertEqual(len(new_inputs), 3)
 
     def test_final_allowed_model_turn_still_finishes_compiler_checks_and_export(self):
@@ -1160,10 +1218,10 @@ class Contracts(unittest.TestCase):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         retrieve = dict(mode='retrieve', rationale='Check a discovered name.', queries=['addition'], names=[],
             backends=[dict(name='leanexplore', prefixes=[])])
-        research = dict(mode='research', rationale='Read supporting context.', question='What proves True?', urls=[])
+        research = dict(mode='research', rationale='Read supporting context.', question='What proves True?')
         action = proof()
         action['proof_body'] = 'by trivial'
-        answer = model_json(dict(answer='Use True.intro.', sources=[], unresolved=[]))
+        answer = model_json(dict(answer='Use True.intro.', unresolved=[]))
         research_route = ModelRoute(provider='openai', model='fixture')
         with patch('midas.application.helpers.build', wraps=build) as research_prompt, self.start(
             workflow='scripted', config=replace(Config(), prover=route, reviewer=route, research=research_route),
@@ -1188,7 +1246,7 @@ class Contracts(unittest.TestCase):
             self.assertIn('goal', sections)
             self.assertIn('source-prefix', sections)
             self.assertIn(b'target:', sections['required-subjects'].text)
-            self.assertFalse({'memory', 'history', 'evidence', 'candidate'} & {s.kind for s in display.sections})
+            self.assertIn('evidence', {s.kind for s in display.sections})
             self.assertNotIn(self.environment.id.encode(), b'\n'.join(s.text for s in display.sections))
 
     def test_review_uses_read_only_candidate_relevant_lookups_and_its_own_research(self):
@@ -1207,7 +1265,7 @@ class Contracts(unittest.TestCase):
         research = model_json(dict(verdict='research', rationale='Check the plan.', findings=[],
                                   question='Can the child use the constructor?', urls=[]))
         accept = model_json(dict(verdict='accept', rationale='The constructor suffices.', findings=[], question='', urls=[]))
-        answer = model_json(dict(answer='Review-specific supporting answer.', sources=[], unresolved=[]))
+        answer = model_json(dict(answer='Review-specific supporting answer.', unresolved=[]))
         child = proof()
         child['proof_body'] = 'by trivial'
         # The existing compiler fixture returns the selected root's identity for
@@ -1261,8 +1319,7 @@ class Contracts(unittest.TestCase):
             self.assertIn(b'English proof plan:', text)
         before, after = (b'\n'.join(s.text for s in d.sections if s.kind == 'evidence') for d in captured)
         self.assertNotIn(b'Review-specific supporting answer', before)
-        # Scripted research has no web events; its failure still belongs to this review.
-        self.assertIn(b'Research performed no recorded web action', after)
+        self.assertIn(b'Review-specific supporting answer', after)
 
     def test_frozen_sources_resolve_starter_modules_in_their_admitted_roots(self):
         from midas.application.preparation import FrozenSources

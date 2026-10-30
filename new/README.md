@@ -33,7 +33,7 @@ checked lookup; queries run searches and automatically check the selected result
 Search and lookup remain internal stages, with one helper charge for the whole
 retrieval request.
 
-`midas/prompt` implements independent, replaceable prover, reviewer and researcher
+`midas/prompt` implements independent, replaceable prover, reviewer, researcher and web-searcher
 renderers, bounded readable context, and exact frozen wire construction. It imports
 only domain and source.
 
@@ -255,7 +255,7 @@ configured environment variable. App-server routes require `--codex /path/to/cod
 the executable is resolved and hashed before dispatch. PATH, HOME and CODEX_HOME
 are passed to it; additional required variable names use repeatable `--codex-env`.
 Credential values are not written to run artifacts. `--instructions ROLE=FILE`
-accepts prover, reviewer and researcher instruction files, each at most 16 KiB.
+accepts prover, reviewer, researcher and web-searcher instruction files, each at most 16 KiB.
 
 A script is a **16 KiB maximum** ordinary JSON manifest pointing to raw reply files:
 
@@ -263,7 +263,7 @@ A script is a **16 KiB maximum** ordinary JSON manifest pointing to raw reply fi
 [{"role": "prover", "file": "reply.txt"}, {"role": "reviewer", "file": "review.txt"}]
 ```
 
-Paths resolve relative to the manifest. Roles are prover, reviewer and research;
+Paths resolve relative to the manifest. Roles are prover, reviewer, research and web_search;
 there are at most 512 replies, each at most 4 MiB, and 64 MiB combined. Replies,
 candidate submissions, saved selections, source and evidence remain binary/raw
 payloads and never pass through CLI JSON serialization.
@@ -345,7 +345,7 @@ assembly, integration and independent export verification.
 | `records.py` | Shallow binary metadata, artifact pointers and complete frozen job envelopes |
 | `workflow.py` | Controller planning/reduction, prompt snapshots, completion and cumulative export accounting |
 | `candidates.py` | Dependency-ordered binding/proof stages, review and joint acceptance |
-| `helpers.py` | Search/lookup/probe/research, retrieval continuations and advisory pages |
+| `helpers.py` | Search/lookup/probe/research/web search, retrieval continuations and advisory pages |
 | `repairs.py` | Objections, direct-consumer retirement, cancellation and repair grants |
 | `forking.py` | Pinned checkpoints, authenticated evidence reuse and fresh local budgets |
 | `diagnostics.py` | Standalone bundle verification and explicit provider-cache diagnostics |
@@ -376,11 +376,11 @@ rechecks package bytes. The package locator
 lives once in the frozen inputs; jobs, contexts and receipts carry the environment
 hash. Source inventories remain behind an explicit source-reader capability.
 
-Live runs use `Config.prover`, `reviewer` and optional `research` routes. Supply
+Live runs use `Config.prover`, `reviewer` and optional `research` and `web_search` routes. Supply
 pinned `CodexTransport` instances through the route-scope transport mapping;
 Responses credentials are resolved at service construction and never persisted.
-Research uses the app-server transport. Scripted runs take `(role, raw_bytes)`
-pairs, with roles `prover`, `reviewer` and `research`. Each distinct turn consumes
+Web search uses the app-server transport. Research can also use Responses transports. Scripted runs take `(role, raw_bytes)`
+pairs, with roles `prover`, `reviewer`, `research` and `web_search`. Each distinct turn consumes
 one response, even when prompt bytes match another turn. Retries reuse the same
 saved binding. Instruction bytes and exact wire/schema bytes are frozen before
 dispatch. Supplied candidates schedule no model turns; conditional submissions
@@ -396,7 +396,7 @@ submissions check closed definitions first and publish the group atomically.
 Prover `stop` actions save a pending request for the reviewer; they do not stop
 the node or report a statement objection immediately. The reviewer accepts stopping
 or rejects with actionable continuation guidance. Rejection returns its findings
-to the prover's memory without spending a mathematical attempt. Research continues
+to the prover's memory without spending a mathematical attempt. Research and web search continue
 the same stop review, and pending requests survive resume with exact request and
 owner bindings. Accepted statement objections reach current direct consumers, preserve shared reachable
 work, and enter the repaired owner's memory. Mathematical and helper reservations
@@ -649,8 +649,8 @@ interpret a raw strategy proposal. `reserve_candidate`, `settle_candidate` and
 `reserve_helper` produce allowance effects to compose with the corresponding
 checks/stages. Owner counters retain lifetime usage across generations. Candidate
 exceptions refund the reserved mathematical attempt and keep their separate
-exception charge. A helper request is charged once across its stages; research
-retains its own model resource profile after reserving its allowance.
+exception charge. A helper request is charged once across its stages; research and web search
+retain their own model resource profiles after reserving their separate allowances.
 
 `step()` drains bounded progress, receives completions, admits saved receipts,
 applies effects, plans changed state, then dispatches ready jobs. Ready and receipt
@@ -973,7 +973,7 @@ python3 -B -m tests.benchmark_strategy
 
 Each default role owns its wording, response schema, contract version and context
 layout in one file: `prompt/prover.py`, `prompt/reviewer.py`, and
-`prompt/researcher.py`. Shared `protocol.py` defines immutable display inputs;
+`prompt/researcher.py` and `prompt/web_searcher.py`. Shared `protocol.py` defines immutable display inputs;
 `wire.py` builds provider wire bytes. There is no import of the old implementation,
 database lookup, provider call, or environment inventory in this layer.
 
@@ -986,12 +986,13 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v4`, `reviewer-v3`, and `researcher-v2`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v7`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v1`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat, complete retained observation sections in saved order. No nested reference dictionary or prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
 | Current turn: memory, feedback and evidence | Strategy, named lessons, pins, evidence pages and latest feedback, followed by changing capabilities and the action request. Omitted diagnostics and evicted memory are counted. |
-| Research context and question | Readable source, exact local task, proof guidance and checked interfaces, followed by the web allowance, question and URLs. Candidate/history/evidence archives are excluded. |
+| Research context and question | Readable source, exact task, proof guidance, checked interfaces, available candidate/evidence and the question. |
+| Web-search context and question | Formal context, proof guidance, checked interfaces, web allowance, question and URLs. Candidate/history/evidence archives are excluded. |
 
 The mathematical guidance retains v2's requirements for useful decomposition,
 explicit child hypotheses, concrete next steps, consistent witnesses and joint
@@ -1050,7 +1051,7 @@ Application review prompts show the candidate without editing paths, preserving
 full definitions, statements, proofs, dependency maps and English plans. They
 omit prover memory, previous failures, search roots and prover action menus.
 Within the retained evidence window, reviews include successful lookup excerpts
-whose names appear in the formal context or candidate, plus research tied to the
+whose names appear in the formal context or candidate, plus research/web-search results tied to the
 exact review entry and candidate. General search/probe history is omitted.
 Evidence matching is lexical, not a transitive dependency analysis.
 Executor trace lines (`MIDAS_THREAD_GUARD`, `MIDAS_RUNTIME_OPEN`, `MIDAS_TRACE`)
@@ -1059,16 +1060,26 @@ failures are truncated into prover memory. Compiler errors remain intact.
 
 The default prover contract returns `{action, memory_update}`; the action covers
 proofs, decomposition, joint candidates, revisions, stop requests and helpers. The
-reviewer returns `{verdict, rationale, findings, question, urls}`. Research returns
-`{answer, sources, unresolved}`, matching tools' existing research evidence
-admission. Response interpretation, semantic validation, helper lowering and
+reviewer returns `{verdict, rationale, findings, question, urls}`. The researcher
+returns `{answer, unresolved}` for mathematical guidance. The web-searcher returns
+`{answer, sources, unresolved}` for resources and references, with source locations,
+hypotheses and access information. Response interpretation, semantic validation, helper lowering and
 budget enforcement belong to the strategy/application layer. Replacing a
 schema requires a matching interpreter there; transport never interprets actions.
-Research snapshots supply the formal context, question and frozen web-call allowance.
+Both prover and reviewer call either helper directly and resume their original turn
+when it finishes. Use action/verdict `research` for guidance and questions; use
+`web_search` to find references. Prover research actions contain `question` and no
+`urls`; reviewer research verdicts leave `urls` empty. Web-search requests accept
+up to six public URLs in addition to the question.
+Research snapshots include the formal context and available candidate/evidence,
+with the configured input budget applied. The researcher can use sources already
+found by the web-searcher. Web-search snapshots supply the formal context,
+question, URLs and frozen web-call allowance. Only the web-searcher can browse;
+it requires OpenAI Codex. Research supports Codex, Azure and Bedrock Responses.
 
 Store `request.wire` and, for Codex, `request.setup` as immutable artifacts and
 pass those references to `provider.ModelRequest` with `request.provider_role`.
-The provider calls the researcher role `research`. The prompt identity binds the
+Provider roles are `research` for the researcher and `web_search` for the web-searcher. The prompt identity binds the
 renderer/contract, exact bytes, artifact references and owner generations. The
 provider request separately binds the saved route and invocation limits. Retry
 the saved bytes; do not rebuild prompts from current state during retries.
@@ -1081,7 +1092,7 @@ instruction header count toward the input budget and cache identity.
 Model responses may contain prose or Markdown fences around a single complete
 JSON object. Extraction respects strings and escapes; multiple objects, outer
 arrays, malformed JSON, duplicate keys and schema violations remain errors.
-This applies to prover, reviewer and research responses, not provider envelopes.
+This applies to prover, reviewer, researcher and web-searcher responses, not provider envelopes.
 Default model byte budgets are 8 MiB of output, 16 MiB per transport frame and
 64 MiB of events, allowing long responses without the previous 128 KiB cutoff.
 These are byte limits, independent of the model's output-token limit.
@@ -1114,8 +1125,8 @@ so changing a draft or memory does not invalidate those evidence prefixes. Memor
 feedback, action availability and the final action request follow the cache
 boundaries. Evicting or reordering retained content still invalidates prefixes
 from the first change.
-The prover action schema has two cached variants: with research when its service
-and web calls are configured, and without research otherwise. Capabilities report
+The prover action schema has four cached variants for independent research and
+web-search availability. Research needs its service; web search also needs web calls. Capabilities report
 available mathematical and helper modes, revision availability and offered page
 cursors, without attempt counts or stop-review mechanics. Prover stop instructions
 require identifying the best next decomposition and its concrete obstacle before
@@ -1124,10 +1135,10 @@ distinguish advertised additions from the source imports and their active transi
 dependencies. Review and stop-request limits
 remain enforced internally. Unavailable helpers are omitted from the advertised
 modes. Exhausting allowances (including
-research), gaining a candidate or changing page cursors preserves the prover schema
+research and web search), gaining a candidate or changing page cursors preserves the prover schema
 and cache key. Single-subject `proof` and `decomposition` actions remain in the schema
 for joint targets, but capabilities direct the prover to use `candidate` instead.
-Reviewer schemas still omit unavailable research and cache their two schema variants.
+Reviewer schemas omit unavailable research/web search and cache their four variants.
 Strategy admission still checks every response and returns bounded rejection
 details in the next prompt so invalid replies can be corrected.
 Disabled caching emits no breakpoint annotations.
@@ -1158,14 +1169,15 @@ modules plus `__init__.py`:
 | `tools/search.py` | Frozen source selectors, bounded search projection, hosted LeanExplore transport, worker execution and search receipt admission |
 | `tools/bm25.py` | Lexical declaration extraction, frozen-corpus SQLite FTS5 cache and file-scope preference |
 | `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
-| `tools/research.py` | Structured response validation, recorded web actions, access claims, quote bounds and advisory provenance |
+| `tools/research.py` | Mathematical guidance validation and advisory evidence |
+| `tools/web_search.py` | Reference validation, recorded web actions, access claims, quote bounds and advisory provenance |
 | `tools/evidence.py` | Readable search/probe results, frozen declaration excerpts, staged binary archives, indexed pages and duplicate-delivery keys |
 
 These replace the tools responsibilities of `combined_retrieval`, `discovery`,
 `discovery_helpers`, `lookup_helpers`, `lookup_source`, `probe_helpers`,
 `research_helpers`, `research_protocol` and `retrieval_helpers`. Durable run SQL,
 publication, scheduling and model/compiler execution remain with their owning components.
-Research prompt wording and response schemas belong to `prompt/researcher.py`.
+Research prompt wording and response schemas belong to `prompt/researcher.py` and `prompt/web_searcher.py`.
 The original `midas_formalizer` files remain unchanged and are not imported.
 
 Built-in search and package index construction run in a supervised Python child.
@@ -1176,7 +1188,7 @@ index construction passes bounded source-reference/path records and verifies
 each file in the child without copying package sources. The parent retains only
 bounded result excerpts. Custom injected search transports own their isolation.
 
-`HelperRequest` freezes a retrieve, probe or research action, continuation,
+`HelperRequest` freezes a retrieve, probe, research or web-search action, continuation,
 forbidden names and `Scope`. Search and lookup are accepted only as internal
 stages; they are absent from the model schema, capabilities and action parser.
 For direct inspection, use `retrieve` with `names` and empty `queries` and
@@ -1197,7 +1209,7 @@ Lean validation. Continuations retain the complete batch without another charge.
 
 `plan_helper` uses `Policy.helper` for allowance and service checks, charges each
 probe request once for its complete batch of one to three cases, and freezes the
-research web-call bound. An advertised probe can use any valid batch size, including
+web-search call bound. An advertised probe can use any valid batch size, including
 when only one request remains. Plans describe work;
 they never invoke a checker/model, open SQLite, start a private pool, or retry.
 `Plan.admission` places the logical helper charge on the first initial stage.
@@ -1271,9 +1283,10 @@ callback and authenticates saved request/result bytes and receipt seals.
 `admit_checked` consumes a checker-admitted advisory handoff and its exact compiler
 payload hash; it checks lookup queries and probe case IDs/operations. The controller
 must first bind that compiler request to the planned stage. Checker retains the
-per-case start/completion protocol. `admit_research` similarly consumes an admitted
-provider result bound by the controller to the research stage. Research accepts only
-bounded structured evidence and recorded web actions. Access claims without an
+per-case start/completion protocol. `admit_research` and `admit_web_search` consume
+admitted provider results bound by the controller to their respective stages.
+Research accepts bounded answers and unresolved questions without web events.
+Web search additionally requires recorded web actions and validates sources. Access claims without an
 open/find or matching document view produce a warning before the answer, while
 preserving the response, sources and unresolved questions. The cumulative 25-word
 quote bound per URL still applies. Access and quotations remain provider-reported.
@@ -1283,7 +1296,7 @@ Requests, results and archives use shallow binary records. The bounded external
 wire decoder is shared in `domain/wire.py`; provider imports that same decoder.
 Search/research wire parsing and large source/evidence handling make no JSON-library
 calls. `prepare_archive` stages fixed pages of at most 16,000 bytes and a bounded
-index. Research is projected to plain text before paging, with access warnings
+index. Guidance is projected to plain text before paging. Web-search results have access warnings
 first, then the answer, sources and unresolved questions. Sources use numbered
 labels; source IDs and web-action metadata stay in the original evidence and are
 not presented in prompts. Search and probe records
@@ -1307,13 +1320,13 @@ window. Its default `null` includes all delivered pages; a positive integer such
 as `100000` targets that many input tokens per request, including instructions,
 schema, source, candidate, and evidence. This is separate from the cumulative
 `run.max_input_tokens` budget. The equivalent setting is available on reviewer
-and research routes. Set the input budget below the model's context limit to leave
+and research/web-search routes. Set the input budget below the model's context limit to leave
 room for output.
 
 Goal and dependency types use Lean's readable display, captured during source
 inspection and checked binding. This avoids expanding implicit arguments and
 typeclass instances into large prompt expressions. Binding displays are retained
-as raw artifacts and reused for prover, reviewer, and research prompts; no extra
+as raw artifacts and reused for all four role prompts; no extra
 compiler invocation is needed per model turn. Structural expression graphs still
 determine obligation identities, proof checking, and export. Readable text does
 not replace those graphs or serve as proof evidence.
@@ -1420,10 +1433,10 @@ with open("config.json", "rb") as source:
     policy = Policy(load_config(source.read(MAX_CONFIG_BYTES + 1)))
 ```
 
-`prover`, `reviewer` and `research` each have a `ModelRoute` section with
+`prover`, `reviewer`, `research` and `web_search` each have a `ModelRoute` section with
 `provider`, `model`, `transport`, `account`, `endpoint`, `credential_env`,
 `prompt_cache`, `reasoning_effort` and `prices`. The checked-in example configures the prover and
-reviewer from the supplied `live.json`; research remains unconfigured. `Config()`
+reviewer with Azure Responses and both helper roles with OpenAI Codex. `Config()`
 and omitted roles remain unconfigured by default. Set both `provider` and `model`
 to configure a role; the other fields are optional. Identifiers are preserved
 exactly. For example, the reviewer settings are:
@@ -1452,7 +1465,7 @@ exactly. For example, the reviewer settings are:
 `credential_env` stores the environment variable **name**; config loading does
 not read credentials or contact the provider. Endpoints accept HTTP(S) URLs
 without embedded credentials, queries or fragments; the provider may enforce
-stricter transport requirements. The `model` and `research_model` sections still
+stricter transport requirements. The `model`, `research_model` and `web_search_model` sections still
 hold invocation limits. Each role owns its prices (`config.reviewer.prices`, for
 example); there are no separate top-level price sections. `prompt_cache` may be
 `explicit`, `disabled` or null. Route and price changes affect the config identity
@@ -1524,7 +1537,7 @@ that same `BacklogState` to each admission in the tick.
 
 Candidate and helper fields on `AdmissionRequest` reserve a logical allowance at
 its initial admission. Later jobs belonging to that already-reserved candidate or
-helper leave those fields unset. Probe units count requests, not individual cases. Research requests that
+helper leave those fields unset. Probe units count requests, not individual cases. Research and web-search requests that
 were sent or have uncertain delivery remain charged; never-sent abandoned
 requests can release their logical reservation. Storage owns those lifetime
 totals and atomically records candidate decisions using `mathematical_charge`.
@@ -2440,14 +2453,14 @@ For Codex, `wire` contains the frozen `turn/start` `input` text blocks without
 the response schema. Provider adds only thread/model/protocol controls, preserving
 the saved prompt bytes.
 See the [official app-server turn contract](https://learn.chatgpt.com/docs/app-server#start-a-turn).
-Policy's `model` and
-`research_model` sections define `request_max_retries` and `stream_max_retries`,
+Policy's `model`,
+`research_model` and `web_search_model` sections define `request_max_retries` and `stream_max_retries`,
 both defaulting to zero. These are frozen through `Limits.from_config(...)` and
 control retries within one Codex turn; `recovery.transport_retries` separately
 limits retries of whole invocations. The internal limits apply only to Codex;
 Responses transports continue to make one HTTP attempt. Codex verifies that its
 effective request/stream retry settings match the saved limits before inference,
-disables local tools, and admits bounded web operations only for OpenAI research.
+disables local tools, and admits bounded web operations only for the OpenAI web-searcher.
 Usage notifications before the
 turn acknowledgement and before the final thread-read acknowledgement are kept.
 The subprocess is terminated and reaped before reporting termination.

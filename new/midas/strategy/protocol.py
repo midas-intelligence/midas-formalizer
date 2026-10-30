@@ -111,9 +111,11 @@ def interpret(payload, *, role, contract):
         for finding in value['findings']:
             text(finding['issue'])
     elif value['findings']:
-        raise DomainError('Accept/research review requires empty findings')
-    if verdict == 'research':
+        raise DomainError('Accept/helper review requires empty findings')
+    if verdict in ('research', 'web_search'):
         text(value['question'])
+        if verdict == 'research' and value['urls']:
+            raise DomainError('Research does not accept URLs; use web_search for references')
     elif value['question'] or value['urls']:
-        raise DomainError('Research fields require a research verdict')
+        raise DomainError('Helper fields require a research or web_search verdict')
     return Response('review', value)

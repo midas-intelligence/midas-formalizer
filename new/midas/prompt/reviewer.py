@@ -41,8 +41,10 @@ Use review_precondition for malformed or incomplete review material. Never inven
 a compiler success or silently change an interface.
 
 Return verdict accept with empty findings, or reject with at least one finding.
-Use verdict research only when enabled, with a question and source URLs and empty
-findings. For other verdicts use an empty question and URLs. Research continues
+Use verdict research when enabled for mathematical guidance or answers, with a
+question, empty URLs and empty findings. Use verdict web_search when enabled to
+find resources and references, with a question, up to six source URLs and empty
+findings. For accept/reject use an empty question and URLs. Both helpers continue
 this review. Source access claims and quotations are advisory; check their exact
 hypotheses and applicability. Review does not update prover memory.
 Return exactly one JSON object matching the supplied output schema.
@@ -53,7 +55,7 @@ Only explicit hypotheses and checked dependency interfaces are premises.
 Unproved dependencies remain obligations; checked conditional composition
 does not establish their provability. Named definitions have bodies, not assumed
 properties. This is a read-only review of the displayed candidate.
-Research is available only when the supplied review capabilities permit it.
+Helpers are available only when the supplied review capabilities permit them.
 """
 
 
@@ -62,7 +64,7 @@ def schema():
     finding = obj(category={'type': 'string', 'enum': ['mathematical', 'missing_assumption',
         'circularity', 'context_mismatch', 'progress', 'proof_fidelity', 'review_precondition']},
         location=string(1024), issue=text, suggested_revision=text)
-    return obj(verdict={'type': 'string', 'enum': ['accept', 'reject', 'research']},
+    return obj(verdict={'type': 'string', 'enum': ['accept', 'reject', 'research', 'web_search']},
                rationale=text, findings=array(finding, 32), question=text, urls=array(string(8000), 6))
 
 
@@ -87,8 +89,10 @@ continue. At least one finding must have a nonempty suggested_revision describin
 a concrete next approach, useful lemma, construction or investigation. This
 feedback returns to the prover; rejection keeps the node active.
 
-Use verdict research only when enabled, with a question, source URLs and empty
-findings. Research continues this same stop review. Other verdicts require an
+Use verdict research when enabled for mathematical guidance or answers, with a
+question, empty URLs and empty findings. Use verdict web_search when enabled to
+find resources and references, with a question, up to six source URLs and empty
+findings. Both helpers continue this same stop review. Accept/reject require an
 empty question and URLs. Return exactly one JSON object matching the supplied
 schema. Do not submit candidates or update prover memory.
 Every request starts a fresh session. The supplied sections are the complete
@@ -105,14 +109,15 @@ INSTRUCTIONS = (b'Review the exact displayed material independently. When a CAND
     b'\nDecomposition review instructions (only without a stop request):\n' + DECOMPOSITION_INSTRUCTIONS)
 
 
-@lru_cache(maxsize=2)
-def verdict_schema(research):
-    if type(research) is not bool:
-        raise DomainError('Expected research availability')
-    if research:
+@lru_cache(maxsize=4)
+def verdict_schema(research, web_search):
+    if type(research) is not bool or type(web_search) is not bool:
+        raise DomainError('Expected research and web-search availability')
+    if research and web_search:
         return SCHEMA
     value = schema()
-    value['properties']['verdict']['enum'] = ['accept', 'reject']
+    value['properties']['verdict']['enum'] = ['accept', 'reject'] + [
+        name for name, enabled in (('research', research), ('web_search', web_search)) if enabled]
     return schema_bytes(value)
 
 
@@ -121,4 +126,4 @@ def render(snapshot):
         raise DomainError('Reviewer requires an exact subject and candidate')
     sections = display(snapshot, ('source', 'definitions', 'subject', 'interfaces', 'evidence',
                        'history', 'candidate', 'memory', 'feedback', 'capabilities', 'question'))
-    return Prompt('reviewer', 'reviewer-v3', 'review-verdict-v1', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('reviewer', 'reviewer-v4', 'review-verdict-v1', INSTRUCTIONS, SCHEMA, sections)

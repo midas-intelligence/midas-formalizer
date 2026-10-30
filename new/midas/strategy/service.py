@@ -7,7 +7,7 @@ from ..domain import (AdmittedBinding, AdmittedCheck, AdmittedReview, CheckKind,
 from ..domain.records import instance
 from ..policy import Policy
 from ..prompt import Section, Snapshot as Display, build, prover, reviewer
-from ..tools import (Backend, HelperRequest, Probe, Research, Retrieve, Scope,
+from ..tools import (Backend, HelperRequest, Probe, Research, Retrieve, Scope, WebSearch,
                      expand_probe_bodies, finish_helper, plan_helper, read_page)
 from .candidates import expand, revise, supplied
 from .memory import Observation, pack, update_memory
@@ -99,10 +99,8 @@ class Strategy:
             if mode != 'page' or snapshot.cursors)
         if work.operation in ('review', 'review_stop'):
             details = 'Verdicts: accept, reject'
-            if 'research' in helpers:
-                details += ', research'
-            else:
-                details += '\nresearch: disabled'
+            details += ''.join(', '+mode for mode in ('research', 'web_search') if mode in helpers)
+            details += ''.join('\n'+mode+': disabled' for mode in ('research', 'web_search') if mode not in helpers)
             if work.operation == 'review_stop':
                 details += '\nReview subject: stop request; accept stops this node; reject continues proof work.'
         else:
@@ -115,8 +113,7 @@ class Strategy:
                 availability.append(f'revise: unavailable ({snapshot.base.mode} mode unavailable)')
             else:
                 availability.append('revise: available')
-            if not capabilities.web_calls:
-                availability.append('research: disabled')
+            availability.extend(mode+': disabled' for mode in ('research', 'web_search') if mode not in helpers)
             if snapshot.usage.retrieval_disabled:
                 availability.append('retrieve: disabled (previous request had no usable queries or names)')
             if not snapshot.cursors:
@@ -140,10 +137,10 @@ class Strategy:
             if prompt.contract != CONTRACTS[role] or prompt.schema != default.SCHEMA:
                 raise ValueError('Replacement schema/contract requires its matching interpreter')
             if role == 'reviewer':
-                prompt = replace(prompt, schema=reviewer.verdict_schema('research' in helpers))
+                prompt = replace(prompt, schema=reviewer.verdict_schema('research' in helpers, 'web_search' in helpers))
             else:
-                # Only research configuration changes the prover schema, not remaining allowances.
-                prompt = replace(prompt, schema=prover.action_schema(bool(capabilities.web_calls)))
+                # Only helper configuration changes the prover schema, not remaining allowances.
+                prompt = replace(prompt, schema=prover.action_schema(snapshot.services.research, bool(capabilities.web_calls)))
         wire = build(display, options, renderer=lambda _: prompt,
                      input_token_budget=getattr(policy.config, role).input_token_budget, token_sample=token_sample)
         turn = Turn(snapshot.version, work.operation, prompt.contract, sha256(prompt.schema).hexdigest(),
@@ -173,8 +170,8 @@ class Strategy:
         if dispatch.turn.role == 'reviewer':
             if response.mode != 'review' or response.memory is not None:
                 raise ValueError('Reviewer cannot submit candidates or update prover memory')
-            if response.value['verdict'] == 'research':
-                return self._helper(snapshot, policy, dispatch.turn, 'research', dict(
+            if response.value['verdict'] in ('research', 'web_search'):
+                return self._helper(snapshot, policy, dispatch.turn, response.value['verdict'], dict(
                     question=response.value['question'], urls=response.value['urls']))
             if dispatch.turn.operation == 'review_stop':
                 return self.on_stop_review(snapshot, response.value, evidence=admitted.raw)
@@ -212,7 +209,7 @@ class Strategy:
                                  reason='stop_review_pending', stop_request=request, stop_charge=True)
         elif mode == 'retrieve' and not action['queries'] and not action['names']:
             result = Changes(snapshot.version, _resume(snapshot, dispatch.turn), disable_retrieval=True)
-        elif mode in ('retrieve', 'probe', 'research'):
+        elif mode in ('retrieve', 'probe', 'research', 'web_search'):
             result = self._helper(snapshot, policy, dispatch.turn, mode, action)
         elif mode == 'page':
             decision = policy.helper(mode, snapshot.usage, snapshot.services)
@@ -260,7 +257,9 @@ class Strategy:
             helper = Retrieve(tuple(action['queries']), tuple(action['names']), tuple(
                 Backend(b['name'], tuple(b['prefixes'])) for b in action['backends']))
         elif mode == 'research':
-            helper = Research(action['question'], tuple(action['urls']))
+            helper = Research(action['question'])
+        elif mode == 'web_search':
+            helper = WebSearch(action['question'], tuple(action['urls']))
         elif mode == 'probe':
             artifacts = tuple(ArtifactData(pack(case)) for case in expand_probe_bodies(action['cases']))
             helper = Probe(tuple(a.reference for a in artifacts))

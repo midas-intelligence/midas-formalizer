@@ -9,12 +9,12 @@ from unittest.mock import patch
 
 from midas.domain import OwnerVersion
 from midas.domain.wire import decode
-from midas.prompt import Options, Prompt, Section, Snapshot, build, prover, researcher, reviewer, subject
+from midas.prompt import Options, Prompt, Section, Snapshot, build, prover, researcher, reviewer, web_searcher, subject
 from midas.prompt.protocol import MAX_BYTES, SCHEMA_INSTRUCTIONS, obj, schema_bytes
 from midas.prompt.wire import _prefix
 from midas.provider import ModelRequest, Route
 from midas.provider.wire import validate_wire
-from midas.tools import Research, Scope, Stage, research_evidence
+from midas.tools import Research, Scope, Stage, WebSearch, research_evidence, web_search_evidence
 from midas.tools.protocol import pack
 from tests.test_provider import Artifacts, LIMITS
 from tests.test_source import signature
@@ -60,9 +60,9 @@ class PromptTests(unittest.TestCase):
             Section('memory', 'strategy', b'next approach'),
             Section('evidence', 'lookup', b'exact checked type'),
             Section('feedback', 'latest-check', b'current diagnostic')))
-        for role in (prover, reviewer, researcher):
+        for role in (prover, reviewer, researcher, web_searcher):
             for transport in ('codex', 'azure_responses', 'bedrock_responses'):
-                if role is researcher and transport != 'codex':
+                if role is web_searcher and transport != 'codex':
                     continue
                 with self.subTest(role=role.__name__, transport=transport):
                     def messages(value):
@@ -189,10 +189,10 @@ class PromptTests(unittest.TestCase):
                   Route('amazon-bedrock-runtime', 'model', 'bedrock_responses',
                         endpoint='https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses'))
         artifacts = Artifacts()
-        for role in (prover, reviewer, researcher):
+        for role in (prover, reviewer, researcher, web_searcher):
             for route in routes:
                 with self.subTest(role=role.__name__, transport=route.transport):
-                    if role is researcher and route.transport != 'codex':
+                    if role is web_searcher and route.transport != 'codex':
                         with self.assertRaises(ValueError):
                             build(snapshot(), Options(route.transport, route.model), renderer=role.render)
                         continue
@@ -365,7 +365,7 @@ class PromptTests(unittest.TestCase):
             self.assertFalse({'prompt_cache_key', 'prompt_cache_options'} & wire.keys())
 
     def test_schemas_have_strict_objects_and_resolvable_local_refs(self):
-        for role in (prover, reviewer, researcher):
+        for role in (prover, reviewer, researcher, web_searcher):
             schema = decode(role.SCHEMA, limit=16384)
             pending = [schema]
             while pending:
@@ -392,15 +392,25 @@ class PromptTests(unittest.TestCase):
         self.assertIn('Lean.Elab.Tactic.evalTactic (← `(tactic| intro C))'.encode(), prover.INSTRUCTIONS)
         self.assertIn(b'body starts at line 2', prover.INSTRUCTIONS)
 
-    def test_research_schema_matches_existing_advisory_evidence_contract(self):
+    def test_research_schema_needs_only_a_question_and_no_web_allowance(self):
+        turn = Snapshot((Section('question', 'question', b'How should I approach this proof?'),))
         schema = decode(researcher.SCHEMA, limit=16384)
+        self.assertEqual(set(schema['properties']), {'answer', 'unresolved'})
+        for transport in ('codex', 'azure_responses', 'bedrock_responses'):
+            result = build(turn, Options(transport, 'model'), renderer=researcher.render)
+            self.assertEqual(result.provider_role, 'research')
+        with self.assertRaisesRegex(ValueError, 'allowance'):
+            web_searcher.render(turn)
+
+    def test_web_search_schema_matches_existing_advisory_evidence_contract(self):
+        schema = decode(web_searcher.SCHEMA, limit=16384)
         self.assertEqual(set(schema['properties']), {'answer', 'sources', 'unresolved'})
         artifacts = Artifacts()
         stage = Stage('a'*64, 0, Scope(OwnerVersion('obl_'+'b'*64, 0), 'env_'+'c'*64,
-                      artifacts.save(b'context')), Research('Find a reference.', web_calls=2))
+                      artifacts.save(b'context')), WebSearch('Find a reference.', web_calls=2))
         payload = schema_bytes(dict(answer='The question remains open.', sources=[], unresolved=['Exact bound?']))
         frame = pack(dict(type='webSearch', id='one', action=dict(type='search')))
-        evidence = research_evidence(stage, payload, len(frame).to_bytes(8, 'little') + frame)
+        evidence = web_search_evidence(stage, payload, len(frame).to_bytes(8, 'little') + frame)
         self.assertIn(b'advisory', evidence)
 
     def test_invalid_inputs_and_escaped_limits_fail_before_dispatch(self):
@@ -411,7 +421,7 @@ class PromptTests(unittest.TestCase):
             Snapshot([subject('goal', signature())])
         with self.assertRaises(ValueError):
             Snapshot((subject('goal', signature()), subject('goal', signature())))
-        for role in (prover, reviewer, researcher):
+        for role in (prover, reviewer, researcher, web_searcher):
             with self.assertRaises(ValueError):
                 role.render(Snapshot(()))
         for options in (dict(transport='unknown', model='x'),

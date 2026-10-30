@@ -584,23 +584,27 @@ class ControllerTests(unittest.TestCase):
         c.publish('continuation', reserve_helper(self.writer, self.policy, self.owner, replace(plan, charge=None), c.services))
         self.assertEqual(owner_usage(self.writer, self.owner).retrieval, 1)
 
-    def test_reserved_research_uses_its_own_resource_profile(self):
+    def test_reserved_model_helpers_use_their_own_resource_profiles(self):
         from midas.controller import owner_usage, reserve_helper
         from midas.policy import Services
-        from midas.tools import HelperRequest, Research, Scope, plan_helper
+        from midas.tools import HelperRequest, Research, Scope, WebSearch, plan_helper
         config = self.policy.config
-        self.policy = Policy(replace(config, helpers=replace(config.helpers, research=1),
+        self.policy = Policy(replace(config, helpers=replace(config.helpers, research=1, web_search=1),
             model=replace(config.model, output_bytes=10000),
-            research_model=replace(config.research_model, output_bytes=1_000_000)))
-        c = self.build(services=Services(research=True, research_web_calls=1))
-        helper = HelperRequest(Scope(self.owner, ENV, self.ref), Research('Find an approach', web_calls=1), 'prover')
-        plan = plan_helper(helper, self.policy, owner_usage(self.writer, self.owner), c.services)
-        work = self.planned()
-        work = replace(work, admission=replace(work.admission, helper='research'))
-        effect = reserve_helper(self.writer, self.policy, self.owner, plan, c.services)
-        c.publish('research', replace(effect, work=(work,)))
-        self.assertEqual(owner_usage(self.writer, self.owner).research, 1)
-        self.assertEqual(c.step().dispatched, 1)
+            research_model=replace(config.research_model, output_bytes=1_000_000),
+            web_search_model=replace(config.web_search_model, output_bytes=1_000_000)))
+        c = self.build(services=Services(research=True, web_search=True, web_calls=1))
+        for mode, action in (('research', Research('Find an approach')),
+                             ('web_search', WebSearch('Find references'))):
+            helper = HelperRequest(Scope(self.owner, ENV, self.ref), action, 'prover')
+            plan = plan_helper(helper, self.policy, owner_usage(self.writer, self.owner), c.services)
+            work = self.planned(mode)
+            work = replace(work, admission=replace(work.admission, helper=mode))
+            effect = reserve_helper(self.writer, self.policy, self.owner, plan, c.services)
+            c.publish(mode, replace(effect, work=(work,)))
+            self.assertEqual(getattr(owner_usage(self.writer, self.owner), mode), 1)
+        self.assertEqual(c.step().dispatched, 2)
+
 
     def test_scripted_provider_flows_through_real_strategy_and_atomic_publication(self):
         from midas.controller import artifact

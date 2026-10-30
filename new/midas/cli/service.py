@@ -38,8 +38,8 @@ def instructions(values):
     result = {}
     for value in values:
         role, separator, path = value.partition('=')
-        if not separator or role not in ('prover', 'reviewer', 'researcher') or role in result:
-            raise ValueError('Instructions require distinct prover/reviewer/researcher=FILE entries')
+        if not separator or role not in ('prover', 'reviewer', 'researcher', 'web-searcher') or role in result:
+            raise ValueError('Instructions require distinct prover/reviewer/researcher/web-searcher=FILE entries')
         result[role] = read(path, 16384)
     return tuple(result.items())
 

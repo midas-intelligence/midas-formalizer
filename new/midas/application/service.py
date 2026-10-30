@@ -154,8 +154,8 @@ class Application:
         instructions = tuple(instructions)
         if len({role for role, _ in instructions}) != len(instructions):
             raise ValueError('Duplicate instruction role')
-        from ..prompt import prover, reviewer, researcher
-        defaults = {'prover': prover, 'reviewer': reviewer, 'researcher': researcher}
+        from ..prompt import prover, reviewer, researcher, web_searcher
+        defaults = {'prover': prover, 'reviewer': reviewer, 'researcher': researcher, 'web-searcher': web_searcher}
         explicit = dict(instructions)
         if explicit.keys() - defaults.keys():
             raise ValueError('Unknown instruction role')
@@ -165,7 +165,7 @@ class Application:
             data.decode()
         script = tuple(script)
         for role, data in script:
-            if role not in ('prover', 'reviewer', 'research') or type(data) is not bytes or len(data) > 4*1024**2:
+            if role not in ('prover', 'reviewer', 'research', 'web_search') or type(data) is not bytes or len(data) > 4*1024**2:
                 raise ValueError('Invalid scripted response')
         if script and workflow != 'scripted':
             raise ValueError('Scripted responses require scripted workflow')

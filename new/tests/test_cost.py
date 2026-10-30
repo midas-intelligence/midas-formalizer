@@ -7,7 +7,7 @@ from unittest.mock import patch
 from midas.application.providers import construct
 from midas.domain import DeliveryCertainty, ReceiptBinding, ResultStatus, Usage
 from midas.policy import Config, ModelRoute, Prices
-from midas.prompt import Options, Section, Snapshot, build, researcher
+from midas.prompt import Options, Section, Snapshot, build, researcher, web_searcher
 from midas.provider import ModelOutput, ModelRequest, Route, worker_payload
 from tests.test_provider import Artifacts, LIMITS, ROUTE, WIRE, context, issue
 
@@ -85,18 +85,21 @@ class CostTests(unittest.TestCase):
             self.assertEqual(output.usage.cost_microusd, cost)
         self.assertEqual(calls, ['prover', 'reviewer'])
 
-    def test_research_uses_its_own_prices(self):
+    def test_model_helpers_share_transport_with_independent_prices(self):
         route = ModelRoute(provider='openai', model='model', prices=Prices(1_000_000, 100_000, 3_000_000))
-        config = replace(Config(), research=route)
-        prepared = build(Snapshot((Section('question', 'question', b'Find a reference.'),
-                                   Section('capabilities', 'allowance', b'web_calls=1'))),
-                         Options('codex', 'model'), renderer=researcher.render)
-        request = ModelRequest(Route.from_config(route), 'research', replace(LIMITS, web_calls=1),
-                              self.artifacts.save(prepared.wire), self.artifacts.save(prepared.setup))
-        provider = construct(config, transports={request.route.scope: lambda *_: self.output})
-        output = provider.invoke(request, context(self.artifacts, issue(self.artifacts, request)))
-        self.assertIsNone(output.error)
-        self.assertEqual(output.usage.cost_microusd, 112)
+        config = replace(Config(), research=route,
+                         web_search=replace(route, prices=Prices(2_000_000, 200_000, 6_000_000)))
+        provider = construct(config, transports={Route.from_config(route).scope: lambda *_: self.output})
+        for module, role, cost in ((researcher, 'research', 112), (web_searcher, 'web_search', 224)):
+            prepared = build(Snapshot((Section('question', 'question', b'Help with this proof.'),
+                                       Section('capabilities', 'allowance', b'web_calls=1'))),
+                             Options('codex', 'model'), renderer=module.render)
+            request = ModelRequest(Route.from_config(route), role, replace(LIMITS, web_calls=int(role == 'web_search')),
+                                  self.artifacts.save(prepared.wire), self.artifacts.save(prepared.setup))
+            output = provider.invoke(request, context(self.artifacts, issue(self.artifacts, request)))
+            self.assertIsNone(output.error)
+            self.assertEqual(output.usage.cost_microusd, cost)
+
 
     def test_large_response_is_not_json_serialized_for_pricing(self):
         with patch('json.dumps', side_effect=AssertionError('JSON serialization')):

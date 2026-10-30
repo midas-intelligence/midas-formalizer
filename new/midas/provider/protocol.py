@@ -130,12 +130,12 @@ class ModelRequest:
         instance(self.route, Route)
         instance(self.limits, Limits)
         instance(self.wire, ArtifactRef)
-        if self.role not in ('prover', 'reviewer', 'research'):
+        if self.role not in ('prover', 'reviewer', 'research', 'web_search'):
             raise DomainError('Invalid model role')
-        if self.role == 'research' and (self.route.transport, self.route.provider) != ('codex', 'openai'):
-            raise DomainError('Research requires the OpenAI app-server')
-        if self.role != 'research' and self.limits.web_calls:
-            raise DomainError('Only research can use web tools')
+        if self.role == 'web_search' and (self.route.transport, self.route.provider) != ('codex', 'openai'):
+            raise DomainError('Web search requires the OpenAI app-server')
+        if self.role != 'web_search' and self.limits.web_calls:
+            raise DomainError('Only web search can use web tools')
         if self.route.transport == 'codex':
             instance(self.setup, ArtifactRef)
         elif self.setup is not None:

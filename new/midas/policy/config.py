@@ -89,6 +89,7 @@ class MathematicsConfig:
 @dataclass(frozen=True, slots=True)
 class HelperConfig:
     research: int = 7
+    web_search: int = 7
     retrieval: int = 10
     probe: int = 6
     web_calls: int = 12
@@ -96,7 +97,7 @@ class HelperConfig:
     def __post_init__(self):
         _integers(self, zero=tuple(f.name for f in fields(self)))
         if self.web_calls > 12:
-            raise DomainError('Research web call limit exceeds 12')
+            raise DomainError('Web-search call limit exceeds 12')
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,10 +290,12 @@ class Config:
     export: ExportConfig = ExportConfig()
     model: ModelConfig = ModelConfig()
     research_model: ModelConfig = ModelConfig(invocation_ms=300_000)
+    web_search_model: ModelConfig = ModelConfig(invocation_ms=300_000)
     recovery: RecoveryConfig = RecoveryConfig()
     prover: ModelRoute = ModelRoute()
     reviewer: ModelRoute = ModelRoute()
     research: ModelRoute = ModelRoute()
+    web_search: ModelRoute = ModelRoute()
 
     def __post_init__(self):
         for name, cls in _SECTIONS.items():
@@ -303,6 +306,8 @@ class Config:
             raise DomainError('Compiler job memory exceeds pool')
         if self.research_model.invocation_ms > 300_000:
             raise DomainError('Research invocation exceeds 300000 ms')
+        if self.web_search_model.invocation_ms > 300_000:
+            raise DomainError('Web-search invocation exceeds 300000 ms')
 
     def record(self):
         return dict(format=FORMAT, **{
@@ -349,9 +354,9 @@ class Config:
 _SECTIONS = {
     'run': RunConfig, 'scheduling': SchedulingConfig, 'mathematics': MathematicsConfig,
     'helpers': HelperConfig, 'checker': ProcessConfig, 'local': ProcessConfig,
-    'export': ExportConfig, 'model': ModelConfig, 'research_model': ModelConfig,
+    'export': ExportConfig, 'model': ModelConfig, 'research_model': ModelConfig, 'web_search_model': ModelConfig,
     'recovery': RecoveryConfig, 'prover': ModelRoute, 'reviewer': ModelRoute,
-    'research': ModelRoute,
+    'research': ModelRoute, 'web_search': ModelRoute,
 }
 
 

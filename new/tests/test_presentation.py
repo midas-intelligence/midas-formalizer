@@ -80,7 +80,7 @@ class PresentationTests(unittest.TestCase):
     def test_review_evidence_filters_search_records_and_binds_research_to_candidate(self):
         from midas.application import helpers, records as r
         from midas.prompt import Section
-        from midas.tools import Backend, HelperRequest, Lookup, Research, Retrieve, Scope, Stage, prepare_archive
+        from midas.tools import Backend, HelperRequest, Lookup, Research, Retrieve, Scope, Stage, WebSearch, prepare_archive
         from tests.test_strategy import dispatch, fixture
         artifacts, snapshot = fixture(conditional=True)
         _, prepared, _ = dispatch(snapshot, artifacts)
@@ -103,22 +103,26 @@ class PresentationTests(unittest.TestCase):
             lookup=Lookup(('Nat.add_comm', 'Nat.mul_comm')))
         fragmented = add(Retrieve(names=('Nat.add_assoc',)), ['def Nat.add_assoc\n' + 'exact supporting source\n'*1500],
                          lookup=Lookup(('Nat.add_assoc',)))
-        add(Research('Earlier prover research', (), 1), [dict(answer='PROVER_RESEARCH')])
-        add(Research('Old candidate research', (), 1), [dict(answer='STALE_RESEARCH')],
+        add(Research('Earlier prover research'), [dict(answer='PROVER_RESEARCH')])
+        add(Research('Old candidate research'), [dict(answer='STALE_RESEARCH')],
             parent=['submission', 'parent'], turn=replace(prepared.turn, candidate_hash='a'*64))
-        current = add(Research('Current review research', (), 1), [dict(answer='CURRENT_RESEARCH')],
+        current = add(Research('Current review research'), [dict(answer='CURRENT_RESEARCH')],
                       parent=['submission', 'parent'])
+        add(WebSearch('Old candidate references'), [dict(answer='STALE_WEB_SEARCH')],
+            parent=['submission', 'parent'], turn=replace(prepared.turn, candidate_hash='a'*64))
+        current_web = add(WebSearch('Current review references'), [dict(answer='CURRENT_WEB_SEARCH')],
+                          parent=['submission', 'parent'])
         sections = (Section('candidate', 'candidate', b'Use Nat.add_comm and Nat.add_assoc.'),)
         displayed = tuple(ref for a in archives for ref in a.pages)
         with patch.object(helpers, 'advertised', return_value=tuple(archives)), \
              patch.object(r, 'value', side_effect=lambda reader, scope, key: saved[key]):
             result = tuple(helpers.review_evidence(artifacts, snapshot, ('submission', 'parent'), sections, displayed))
         text = b'\n'.join(content for _, content in result)
-        for useful in (b'Nat.add_comm', b'Nat.add_assoc', b'CURRENT_RESEARCH'):
+        for useful in (b'Nat.add_comm', b'Nat.add_assoc', b'CURRENT_RESEARCH', b'CURRENT_WEB_SEARCH'):
             self.assertIn(useful, text)
-        for clutter in (b'Nat.mul_comm', b'Unrelated search excerpt', b'Search (', b'PROVER_RESEARCH', b'STALE_RESEARCH'):
+        for clutter in (b'Nat.mul_comm', b'Unrelated search excerpt', b'Search (', b'PROVER_RESEARCH', b'STALE_RESEARCH', b'STALE_WEB_SEARCH'):
             self.assertNotIn(clutter, text)
-        self.assertEqual({ref for ref, _ in result}, set((*retrieval.pages, *fragmented.pages, *current.pages)))
+        self.assertEqual({ref for ref, _ in result}, set((*retrieval.pages, *fragmented.pages, *current.pages, *current_web.pages)))
         self.assertIn(b'Continued excerpt', text)
 
 

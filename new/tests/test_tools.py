@@ -17,10 +17,10 @@ from midas.domain import (ArtifactRef, CapacityGrant, FrozenRequest, Invocation,
 from midas.domain import encoding as codec
 from midas.policy import Config, OwnerUsage, Policy, Services
 from midas.source import SourceFile
-from midas.tools import (Archive, Backend, HelperRequest, Lookup, Match, Probe, Research, Retrieve,
+from midas.tools import (Archive, Backend, HelperRequest, Lookup, Match, Probe, Research, WebSearch, Retrieve,
     Scope, Search, SearchResult, SearchService, SourceEntry, SourceIndex, Stage, StageEvidence,
     admit_checked, continue_retrieval, execute_search, finish_helper, fuse, lookup_sources, plan_helper,
-    prepare_archive, probe_summary, read_page, research_evidence, research_summary, search_stages, search_summary, source_excerpt, web_actions)
+    prepare_archive, probe_summary, read_page, research_evidence, research_summary, web_search_evidence, web_search_summary, search_stages, search_summary, source_excerpt, web_actions)
 from midas.tools.protocol import pack
 from midas.tools.search import hosted, worker_payload
 
@@ -60,7 +60,7 @@ class ToolsTests(unittest.TestCase):
         self.cancel = threading.Event()
         self.deadline = time.monotonic()+30
         self.policy = Policy(Config())
-        self.services = Services(research=True, research_web_calls=12)
+        self.services = Services(research=True, web_search=True, web_calls=12)
 
     def request(self, action, **kwargs):
         return HelperRequest(self.scope, action, 'resume original attempt', **kwargs)
@@ -82,7 +82,7 @@ class ToolsTests(unittest.TestCase):
     def test_request_binary_roundtrips_and_binding(self):
         for action in (Retrieve(names=('Nat.add',)),
                 Retrieve(('compact',), ('Nat.add',), (Backend('frozen-source', ('Mathlib',)),)),
-                Probe((self.a.save(pack({'id': 'p', 'code': 'simp'})),)), Research('Why?', ('https://example.test',))):
+                Probe((self.a.save(pack({'id': 'p', 'code': 'simp'})),)), Research('Why?'), WebSearch('Why?', ('https://example.test',))):
             request = self.request(action)
             with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
                 self.assertEqual(HelperRequest.load(request.payload), request)
@@ -116,7 +116,7 @@ class ToolsTests(unittest.TestCase):
             lambda: Retrieve(('query',)), lambda: Retrieve(backends=(Backend('leanexplore'),)),
             lambda: Search('x', Backend('leanexplore'), True), lambda: Backend('leanexplore', ('Mathlib',)),
             lambda: Backend('frozen-source', ('../secret',)), lambda: Backend('frozen-source', ('runtime',)),
-            lambda: Probe(()), lambda: Research('q', ('https://user:password@host',)), lambda: Research('q', web_calls=13))
+            lambda: Probe(()), lambda: WebSearch('q', ('https://user:password@host',)), lambda: WebSearch('q', web_calls=13))
         for build in invalid:
             with self.subTest(build=build), self.assertRaises(ValueError):
                 build()
@@ -129,7 +129,7 @@ class ToolsTests(unittest.TestCase):
             with self.subTest(names=names), self.assertRaisesRegex(ValueError, 'no allowed names'):
                 self.plan(Retrieve(names=names), forbidden=forbidden)
 
-    def test_policy_is_used_for_request_units_and_research_bounds(self):
+    def test_policy_is_used_for_request_units_and_web_search_bounds(self):
         request = self.request(Probe(tuple(self.a.save(pack({'id': str(n)})) for n in range(3))))
         remaining = OwnerUsage(probe=5)
         self.assertIn('probe', self.policy.capabilities(remaining, self.services).available_modes)
@@ -140,9 +140,9 @@ class ToolsTests(unittest.TestCase):
             self.assertEqual(plan.stages[0].action.cases, batch.action.cases)
         with self.assertRaisesRegex(ValueError, 'probe_allowance'):
             plan_helper(request, self.policy, OwnerUsage(probe=6), self.services)
-        research = plan_helper(self.request(Research('q')), self.policy, OwnerUsage(),
-                               replace(self.services, research_web_calls=2))
-        self.assertEqual(research.request.action.web_calls, 2)
+        web_search = plan_helper(self.request(WebSearch('q')), self.policy, OwnerUsage(),
+                               replace(self.services, web_calls=2))
+        self.assertEqual(web_search.request.action.web_calls, 2)
         for action in (Retrieve(names=('Nat.add',)),
                        Retrieve(('q',), backends=(Backend('leanexplore'),)), request.action):
             with self.assertRaisesRegex(ValueError, 'compiler_not_configured'):
@@ -311,8 +311,8 @@ class ToolsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 finish_helper(following, entries, self.scope, searches=searches)
 
-    def test_probe_and_research_never_classify_checked_names(self):
-        for action in (Probe((self.a.save(b'case'),)), Research('question')):
+    def test_probe_and_web_search_never_classify_checked_names(self):
+        for action in (Probe((self.a.save(b'case'),)), WebSearch('question')):
             plan = self.plan(action)
             receipt = self.receipt()
             ev = StageEvidence(plan.stages[0], receipt.request_ref.sha256, receipt, ResultStatus.SUCCEEDED,
@@ -335,7 +335,7 @@ class ToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             admit_checked(replace(stage, action=Lookup(('Other',))), admitted, compiler_hash, self.a)
         with self.assertRaises(ValueError):
-            admit_checked(self.stage(Research('q')), admitted, compiler_hash, self.a)
+            admit_checked(self.stage(WebSearch('q')), admitted, compiler_hash, self.a)
 
     def test_probe_handoff_retains_case_batch_without_proof_authority(self):
         stage = self.stage(Probe((self.a.save(pack({'id':'p', 'code':'simp'})),)))
@@ -568,39 +568,60 @@ class ToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             source_excerpt(data, dict(location, end=[5,0]))
 
-    def research_value(self, **source_changes):
+    def test_research_admits_guidance_without_web_events_and_rejects_source_claims(self):
+        from midas.prompt.wire import _Writer
+        stage = self.stage(Research('How can this be proved?'))
+        value = dict(answer='Use induction. '+ 'α' * 12000, unresolved=['Check the base case.'])
+        wire = _Writer(131072)
+        wire.add(b'{"answer":')
+        wire.string((value['answer'].encode(),))
+        wire.add(b',"unresolved":["Check the base case."]}')
+        with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
+            evidence = research_evidence(stage, wire.finish())
+            summary = research_summary(evidence)
+        self.assertIn(value['answer'], summary)
+        self.assertIn('Check the base case.', summary)
+        self.assertEqual(codec.load_record(evidence, limit=131072)['authority'], 'advisory')
+        for bad in (dict(answer='x', unresolved=[], sources=[]), dict(answer='', unresolved=[]),
+                    dict(answer='x', unresolved=['q']*33), dict(answer='x', unresolved=[True])):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                research_evidence(stage, json.dumps(bad).encode())
+        with self.assertRaises(ValueError):
+            research_evidence(self.stage(WebSearch('Find references.')), b'{"answer":"x","unresolved":[]}')
+
+    def web_search_value(self, **source_changes):
         return {'answer':'Use the theorem.', 'sources':[dict(url='https://example.test/paper', title='Paper',
                 location='Theorem 2', excerpt='compact sets are closed', summary='Useful', hypotheses='Hausdorff',
                 accessed=True, **source_changes)], 'unresolved':[]}
 
-    def test_research_access_claims_quotes_and_binary_evidence(self):
-        stage = self.stage(Research('question'))
-        value = self.research_value()
+    def test_web_search_access_claims_quotes_and_binary_evidence(self):
+        stage = self.stage(WebSearch('question'))
+        value = self.web_search_value()
         raw = json.dumps(value).encode()
         event = {'type':'webSearch', 'id':'w1', 'action':{'type':'openPage'}}
         with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
-            result = codec.load_record(research_evidence(stage, raw, events(event)), limit=131072)
+            result = codec.load_record(web_search_evidence(stage, raw, events(event)), limit=131072)
         self.assertEqual(result['authority'], 'advisory')
         self.assertEqual(result['stage'], stage.sha256)
         self.assertEqual(result['warnings'], [])
-        warned = codec.load_record(research_evidence(stage, raw,
+        warned = codec.load_record(web_search_evidence(stage, raw,
             events(dict(event, action={'type':'search'}))), limit=131072)
         self.assertEqual(warned['warnings'], [
-            'Research claimed access without an open/find or matching document view'])
+            'Web search claimed access without an open/find or matching document view'])
         for field in ('answer', 'sources', 'unresolved'):
             self.assertEqual(warned[field], result[field])
         viewed = dict(event, action={'type':'other', 'results':[{'type':'text_result', 'ref_id':'turn1view0', 'url':value['sources'][0]['url']}]})
-        matched = codec.load_record(research_evidence(stage, raw, events(viewed)), limit=131072)
+        matched = codec.load_record(web_search_evidence(stage, raw, events(viewed)), limit=131072)
         self.assertEqual(matched['warnings'], [])
         value['sources'] *= 6
         value['sources'][0]['excerpt'] = 'one two three four five'
         with self.assertRaisesRegex(ValueError, 'quote allowance'):
-            research_evidence(stage, json.dumps(value).encode(), events(event))
+            web_search_evidence(stage, json.dumps(value).encode(), events(event))
 
-    def test_research_pages_lead_with_warning_and_preserve_all_response_text(self):
+    def test_web_search_pages_lead_with_warning_and_preserve_all_response_text(self):
         from midas.application.helpers import page_text
-        stage = self.stage(Research('question'))
-        value = self.research_value()
+        stage = self.stage(WebSearch('question'))
+        value = self.web_search_value()
         value['answer'] = 'First mathematical step.\n' + 'αβγ proof detail\n' * 1200 + 'Last mathematical step.'
         value['unresolved'] = ['Check the boundary case.', 'Find the exact declaration.']
         # Build the large wire from bounded pieces, without a whole-document JSON operation.
@@ -612,16 +633,16 @@ class ToolsTests(unittest.TestCase):
         wire.add(b',"unresolved":'+json.dumps(value['unresolved']).encode()+b'}')
         recorded = events({'type':'webSearch', 'id':'private-web-action', 'action':{'type':'search'}})
         with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
-            evidence = research_evidence(stage, wire.finish(), recorded)
-            text = research_summary(evidence)
+            evidence = web_search_evidence(stage, wire.finish(), recorded)
+            text = web_search_summary(evidence)
             archive = prepare_archive(self.scope, stage.helper_id, (text,), (self.a.save(evidence),), self.a)
             pages = [read_page(archive, self.scope, self.a, cursor=f'{archive.id}:{i}')
                      for i in range(len(archive.pages))]
             displays = [page_text(page.payload).decode() for page in pages]
         self.assertGreater(len(pages), 1)
-        self.assertTrue(displays[0].startswith('Warning: Research claimed access'))
+        self.assertTrue(displays[0].startswith('Warning: Web search claimed access'))
         self.assertIn('First mathematical step.', displays[0])
-        self.assertLess(displays[0].index('Warning:'), displays[0].index('Research answer'))
+        self.assertLess(displays[0].index('Warning:'), displays[0].index('Web-search results'))
         # Page framing is separate from the source text: reconstruct exact UTF-8 fragments.
         restored = ''.join(row[4] for page in pages
                            for row in codec.load_record(page.payload, limit=16000)[4])
@@ -631,14 +652,14 @@ class ToolsTests(unittest.TestCase):
             self.assertIn(str(content), restored)
         for question in value['unresolved']:
             self.assertIn(question, restored)
-        for clutter in ('0/actions', 'private-web-action', 'midas-research-evidence-v1', self.scope.environment_id):
+        for clutter in ('0/actions', 'private-web-action', 'midas-web-search-evidence-v1', self.scope.environment_id):
             self.assertNotIn(clutter, ''.join(displays))
         saved = codec.load_record(evidence, limit=131072)
         self.assertEqual(saved['actions'][0], ['private-web-action', 'search', []])
         self.assertIn('Source 1: Paper', restored)
         self.assertNotIn(saved['sources'][0]['id'], restored)
 
-    def test_research_web_limits_duplicates_and_malformed_response(self):
+    def test_web_search_web_limits_duplicates_and_malformed_response(self):
         event = {'type':'webSearch', 'id':'w1', 'action':{'type':'search'}}
         self.assertEqual(len(web_actions(events(event, event), limit=1)), 1)
         with self.assertRaises(ValueError):
@@ -648,10 +669,10 @@ class ToolsTests(unittest.TestCase):
         for raw in (b'', b'\x00', events(event)[:-1]):
             with self.assertRaises(ValueError):
                 web_actions(raw, limit=2)
-        stage = self.stage(Research('question'))
+        stage = self.stage(WebSearch('question'))
         for raw in (b'{"answer":"a","answer":"b","sources":[],"unresolved":[]}', b'['*20+b']'*20):
             with self.assertRaises(ValueError):
-                research_evidence(stage, raw, events(event))
+                web_search_evidence(stage, raw, events(event))
 
     def test_component_import_boundary(self):
         import ast

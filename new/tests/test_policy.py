@@ -106,11 +106,12 @@ class ConfigTests(unittest.TestCase):
         config = load_config(b'''{
             "format": "midas-config-v1",
             "model": {"request_max_retries": 3, "stream_max_retries": 1},
-            "research_model": {"request_max_retries": 2, "stream_max_retries": 4}
+            "research_model": {"request_max_retries": 2, "stream_max_retries": 4},
+            "web_search_model": {"request_max_retries": 1, "stream_max_retries": 3}
         }''')
         self.assertEqual(load_config(config.encode()), config)
         defaults = Config()
-        for section in ('model', 'research_model'):
+        for section in ('model', 'research_model', 'web_search_model'):
             saved = getattr(config, section)
             self.assertEqual(getattr(config.increase({'run': {'turns': 401}}), section), saved)
             for name in ('request_max_retries', 'stream_max_retries'):
@@ -128,7 +129,7 @@ class ConfigTests(unittest.TestCase):
             for value in (-1, True, 1.5, '2', None, 2**63):
                 with self.subTest(name=name, value=value), self.assertRaises(DomainError):
                     ModelConfig(**{name: value})
-            for section in ('model', 'research_model'):
+            for section in ('model', 'research_model', 'web_search_model'):
                 payload = ('{"format":"midas-config-v1","' + section + '":{"' + name + '":-1}}').encode()
                 with self.subTest(section=section, name=name), self.assertRaises(DomainError):
                     load_config(payload)
@@ -174,9 +175,11 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual((route.provider, route.model), ('azure', 'gpt-6.1-sol'))
             self.assertEqual(route.prices, Prices(2_000_000, 100_000, 10_000_000, 2_500_000))
         self.assertEqual(config.reviewer.prompt_cache, 'explicit')
-        self.assertEqual(config.research, ModelRoute())
+        for name in ('research', 'web_search'):
+            route = getattr(config, name)
+            self.assertEqual((route.provider, route.model, route.transport), ('openai', 'gpt-6.1-sol', 'codex'))
         defaults = Config()
-        for name in ('prover', 'reviewer', 'research'):
+        for name in ('prover', 'reviewer', 'research', 'web_search'):
             self.assertEqual(getattr(defaults, name), ModelRoute())
             self.assertFalse(getattr(defaults, name).configured)
             self.assertEqual(set(config.record()[name]),
@@ -447,11 +450,24 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.admit(request()).reason, 'unknown_usage_bound:input_tokens')
         self.assertEqual(self.admit(req, run=RunUsage(bound_exceeded=True)).reason, 'usage_bound_exceeded')
 
+    def test_guidance_and_web_search_have_independent_availability_and_allowances(self):
+        services = Services(research=True, web_search=True, web_calls=3)
+        for mode, other in (('research', 'web_search'), ('web_search', 'research')):
+            used = OwnerUsage(**{mode: 7})
+            self.assertEqual(self.policy.helper(mode, used, services).reason, mode+'_allowance_exhausted')
+            self.assertTrue(self.policy.helper(other, used, services).allowed)
+            disabled = replace(services, **{mode: False})
+            self.assertEqual(self.policy.helper(mode, OwnerUsage(), disabled).reason, 'missing_'+mode+'_configuration')
+            self.assertTrue(self.policy.helper(other, OwnerUsage(), disabled).allowed)
+        no_web = Policy(replace(Config(), helpers=HelperConfig(web_calls=0)))
+        self.assertTrue(no_web.helper('research', OwnerUsage(), services).allowed)
+        self.assertEqual(no_web.helper('web_search', OwnerUsage(), services).reason, 'missing_web_search_configuration')
+
     def test_helper_display_and_admission_use_same_rules(self):
-        services = Services(research=True, research_web_calls=8)
+        services = Services(research=True, web_search=True, web_calls=8)
         for owner in (OwnerUsage(), OwnerUsage(research=7, retrieval=10, probe=6)):
             modes = self.policy.capabilities(owner, services).available_modes
-            for mode in ('research', 'retrieve', 'probe', 'page'):
+            for mode in ('research', 'web_search', 'retrieve', 'probe', 'page'):
                 self.assertEqual(mode in modes, self.policy.helper(mode, owner, services).allowed)
         self.assertEqual(self.policy.capabilities(OwnerUsage(), services).web_calls, 8)
         self.assertEqual(self.admit(request(helper='research'), services=services, owner=OwnerUsage(research=7)).reason,
@@ -477,9 +493,9 @@ class AdmissionTests(unittest.TestCase):
         config = replace(Config(), helpers=HelperConfig(research=1, retrieval=0, probe=2, web_calls=3),
                          mathematics=MathematicsConfig(direct=0))
         self.policy = Policy(config)
-        services = Services(research=True, research_web_calls=8)
+        services = Services(research=True, web_search=True, web_calls=8)
         caps = self.policy.capabilities(OwnerUsage(), services)
-        self.assertEqual(caps.available_modes, ('research', 'probe', 'page'))
+        self.assertEqual(caps.available_modes, ('research', 'web_search', 'probe', 'page'))
         self.assertEqual((caps.direct_remaining, caps.web_calls), (0, 3))
         self.assertFalse(self.admit(request(candidate_mode='direct')).allowed)
         req = request()

@@ -44,12 +44,12 @@ def strings(value, count, limit, label, *, names=False):
 
 
 def public_url(value):
-    text(value, 'research URL', 8000)
+    text(value, 'source URL', 8000)
     parsed = urlsplit(value)
     if (parsed.scheme not in ('http', 'https') or not parsed.hostname
             or parsed.username is not None or parsed.password is not None
             or any(c.isspace() or ord(c) < 32 for c in value)):
-        raise ValueError('Research URLs require HTTP(S) without credentials')
+        raise ValueError('Source URLs require HTTP(S) without credentials')
     return value
 
 
@@ -177,16 +177,24 @@ def expand_probe_bodies(cases):
 @dataclass(frozen=True, slots=True)
 class Research:
     question: str
+
+    def __post_init__(self):
+        text(self.question, 'research question', 8000)
+
+
+@dataclass(frozen=True, slots=True)
+class WebSearch:
+    question: str
     urls: tuple[str, ...] = ()
     web_calls: int = 12
 
     def __post_init__(self):
-        text(self.question, 'research question', 8000)
-        strings(self.urls, 6, 8000, 'research URLs')
+        text(self.question, 'web-search question', 8000)
+        strings(self.urls, 6, 8000, 'web-search URLs')
         for url in self.urls:
             public_url(url)
         if type(self.web_calls) is not int or not 1 <= self.web_calls <= 12:
-            raise ValueError('Invalid research web-call bound')
+            raise ValueError('Invalid web-search call bound')
 
 
 def action_value(action):
@@ -199,7 +207,9 @@ def action_value(action):
     if isinstance(action, Probe):
         return ['probe', [c.to_dict() for c in action.cases]]
     if isinstance(action, Research):
-        return ['research', action.question, list(action.urls), action.web_calls]
+        return ['research', action.question]
+    if isinstance(action, WebSearch):
+        return ['web_search', action.question, list(action.urls), action.web_calls]
     raise ValueError('Unknown helper action')
 
 
@@ -223,22 +233,24 @@ def load_action(value):
         return Retrieve(array(value[1]), array(value[2]), tuple(backend(b) for b in array(value[3])))
     if kind == 'probe' and len(value) == 2:
         return Probe(tuple(ArtifactRef.from_dict(c) for c in array(value[1])))
-    if kind == 'research' and len(value) == 4:
-        return Research(value[1], array(value[2]), value[3])
+    if kind == 'research' and len(value) == 2:
+        return Research(value[1])
+    if kind == 'web_search' and len(value) == 4:
+        return WebSearch(value[1], array(value[2]), value[3])
     raise ValueError('Unknown helper action or fields')
 
 
 @dataclass(frozen=True, slots=True)
 class HelperRequest:
     scope: Scope
-    action: Retrieve | Probe | Research
+    action: Retrieve | Probe | Research | WebSearch
     continuation: str
     forbidden: tuple[str, ...] = ()
     id: str = field(init=False)
 
     def __post_init__(self):
         instance(self.scope, Scope)
-        if not isinstance(self.action, (Retrieve, Probe, Research)):
+        if not isinstance(self.action, (Retrieve, Probe, Research, WebSearch)):
             raise ValueError('Invalid helper action; search and lookup are internal stages')
         text(self.continuation, 'strategy continuation', 1024)
         strings(self.forbidden, 1024, 1024, 'forbidden names', names=True)
@@ -269,7 +281,7 @@ class Stage:
     helper_id: str
     ordinal: int
     scope: Scope
-    action: Search | Lookup | Probe | Research
+    action: Search | Lookup | Probe | Research | WebSearch
     sha256: str = field(init=False)
     _payload: bytes = field(init=False, repr=False, compare=False)
 
@@ -277,7 +289,7 @@ class Stage:
         identifier(self.helper_id, '')
         natural(self.ordinal, 'Helper stage')
         instance(self.scope, Scope)
-        if not isinstance(self.action, (Search, Lookup, Probe, Research)):
+        if not isinstance(self.action, (Search, Lookup, Probe, Research, WebSearch)):
             raise ValueError('Invalid helper stage action')
         payload = pack(['midas-helper-stage-v1', self.helper_id, self.ordinal, self.scope.value(), action_value(self.action)])
         object.__setattr__(self, '_payload', payload)
@@ -292,7 +304,7 @@ class Stage:
         if isinstance(self.action, Search) and self.action.backend.name == 'leanexplore':
             return JobKind.NETWORK_SEARCH
         return {Search: JobKind.SEARCH, Lookup: JobKind.LOOKUP, Probe: JobKind.PROBE,
-                Research: JobKind.MODEL}[type(self.action)]
+                Research: JobKind.MODEL, WebSearch: JobKind.MODEL}[type(self.action)]
 
     @property
     def inputs(self):
