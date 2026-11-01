@@ -108,6 +108,8 @@ project searches the frozen project sources.
 Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
 preference within the selected scope. Large excerpts may continue on another page.
+Local queries that are exact Lean identifiers also get a direct checked lookup;
+resolved declarations appear first, including generated declarations.
 Queries require backends. For names-only retrieval, use "queries":[] and
 "backends":[]. If both queries and names are empty, retrieval is disabled for
 this node and proof work continues without a lookup.

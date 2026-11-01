@@ -1,12 +1,11 @@
 """Advisory archive preparation, indexed paging, and frozen-source excerpts."""
 from dataclasses import dataclass, field
 from hashlib import sha256
-import re
 
 from ..domain import ArtifactRef
 from ..domain import encoding as codec
 from ..domain.records import identifier, instance, items
-from ..source import SourceFile, code_only
+from ..source import SourceFile
 from .protocol import RESULT_BYTES, Scope, pack, read, text
 from .search import FILE_BYTES, SearchResult
 from .bm25 import DETAILS
@@ -14,8 +13,6 @@ from .bm25 import DETAILS
 PAGE_BYTES = 16000
 MAX_PAGES = 1024
 INDEX_BYTES = 256 * 1024
-_ALIAS = re.compile(r'\s*(?:@\[[^\]]*\]\s*)*'
-                    r'(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*alias\b')
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +274,7 @@ def lookup_summary(records):
 
 
 def lookup_sources(records, *, environment_id, index, prefix, reader):
-    """Return checked theorem signatures and authored bodies for definitions.
+    """Return checked signatures with available authored source for definitions.
 
     prefix is the exact checked SourceFile prefix. Installed modules are resolved
     only against the admitted index, and bytes are verified on every read.
@@ -317,9 +314,9 @@ def lookup_sources(records, *, environment_id, index, prefix, reader):
             if source is None:
                 note = note or 'Original declaration source unavailable: declaration exceeds byte allowance.'
             else:
-                if 'alias' in source and _ALIAS.match(code_only(source)):
-                    source = summary + '\n\n' + source
-                result.append(source)
+                # Generated declarations can point at their parent command.
+                # Keep the checked identity/type visible even in that case.
+                result.append(summary + '\n\n' + source)
                 continue
         result.append(summary+'\n-- '+note)
     return tuple(result)

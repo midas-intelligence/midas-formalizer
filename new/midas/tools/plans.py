@@ -125,7 +125,22 @@ def fuse(request, reports):
             provenance.setdefault(name, []).append((stage.ordinal, rank))
     ranked = tuple(sorted(scores, key=lambda n: (-scores[n], n)))
     action = request.action
-    names = dict.fromkeys((*action.names, *ranked[:12]))
+    # The lexical index cannot enumerate generated declarations. Try local
+    # identifier queries directly in the checker, even without any source hits.
+    direct = []
+    for stage in stages:
+        name = stage.action.query.strip()
+        if stage.action.backend.name == 'frozen-source' and _canonical(name) is not None:
+            if allowed(name):
+                direct.append(name)
+            else:
+                excluded[name] = None
+    candidates = {}
+    for name in (*direct, *ranked):
+        candidates.setdefault(_canonical(name), name)
+        if len(candidates) == 12:
+            break
+    names = dict.fromkeys((*action.names, *candidates.values()))
     selected = []
     for name in names:
         if allowed(name):

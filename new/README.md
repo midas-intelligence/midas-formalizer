@@ -1219,14 +1219,20 @@ preserving the stage key, scope and initial helper charge. Remaining stages and
 `continue_retrieval` reserve execution capacity without another helper charge.
 
 Search hints are fused using exact integer reciprocal-rank weights over the bounded
-rank domain. Explicit names retain priority; forbidden names, equivalent escaped
-spellings, internal Midas names and invalid identifiers cannot become lookup jobs.
+rank domain. Explicit names retain priority. Local queries that are valid Lean
+identifiers are sent directly to checked lookup ahead of BM25 names, within the
+12-name selection bound, so generated declarations can appear first even when
+absent from the lexical index. Equivalent query/result spellings are deduplicated.
+Forbidden names and their equivalent escaped spellings, internal Midas names and
+invalid identifiers cannot become lookup jobs.
 Searches must all have exact, ordered outcomes, including explicit failures.
 Names are checked before their availability is reported. Search-driven retrieval
 retains authored theorem statements and definition bodies. Lookup always requests
 original source for definitions and returns checked theorem signatures without proof
 bodies. This also applies to lookup stages in retrieval, including those following
-searches. Model retrieve responses have no `inspect` field.
+searches. Checked names and types precede source excerpts, including when a generated
+declaration's source range points to its parent command. Model retrieve responses
+have no `inspect` field.
 `finish_helper` validates the expected stages and current scope and returns
 advisory evidence with the original strategy continuation. Storage/controller must
 commit this result once against current owner versions and retain every search,
@@ -1250,10 +1256,12 @@ SQLite/raw bytes, without JSON corpus serialization or a GPU/model dependency.
 The index uses the tested BM25 field weights: names 3, documentation 2, lexical
 headers 1. Tokens retain words and camel-case components; there is no stemming,
 additional normalization or score cutoff. Query terms are ORed. Filtering happens
-before the best 100 candidates are selected, with corpus-wide IDF. Exact full
-names (optionally prefixed by `_root_.`) stay first. Remaining scores get a 1.5×
-ranking multiplier only for an explicitly selected file/module; directories grant
-no bonus. Ties preserve baseline ordering. Evidence retains raw BM25 scores.
+before the best 100 candidates are selected, with corpus-wide IDF. Exact identifier
+queries (including `_root_.` spellings) use checked lookup instead of an index
+name match; successful lookups precede BM25 matches in retrieval evidence. Scores
+get a 1.5× ranking multiplier only for an explicitly selected file/module;
+directories grant no bonus. Ties preserve baseline ordering. Evidence retains raw
+BM25 scores.
 
 Search returns up to 50 results. The first 12 include source excerpts (up to 6000
 UTF-8 bytes each); subsequent named hits carry only names in the display. Lookup
@@ -1351,11 +1359,12 @@ estimate tokens. Existing prompt byte/section bounds still apply, and provider
 context limits can still be exceeded because token density is only estimated.
 Artifact publication and orphaned staging recovery remain storage responsibilities.
 
-BM25 integration validation (2026-10-19): offline contracts cover exact-name
-protection, scope-before-candidate selection, file-only preference, raw score
+BM25 integration validation: offline contracts cover direct identifier lookup
+priority, scope-before-candidate selection, file-only preference, raw score
 roundtrips, cache reuse/invalidation and concurrent builds, 12/50 delivery, paged
 overflow, and tail lookup. A real Lean 4.35.0-rc3 application check passed search,
-checked tail source lookup, proof continuation and resume.
+generated recursor lookup appearing first, checked tail source lookup, proof
+continuation and resume.
 On the experimental Mathlib checkout (`aae61ae`), building 249,981 lexical
 declarations from 8,264 files took 22.6 seconds and produced a 63 MiB index. Warm
 simplicial-nerve search took about 8 ms versus 2.2 seconds for v2's scan of the

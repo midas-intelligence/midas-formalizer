@@ -277,7 +277,7 @@ def database(index, reader, cancel, deadline, cache_directory=None, *, prepared_
 def ranked(db, query, prefixes, *, limit=TOTAL):
     """Filter before top-100, preserving corpus IDF; then apply file preference.
 
-    Scores returned to evidence are raw BM25, including zero for exact hits.
+    Scores returned to evidence are raw BM25.
     The 1.5 multiplier affects ordering only. Stable ties preserve FTS order.
     """
     db.execute('CREATE TEMP TABLE scope_docs(id INTEGER PRIMARY KEY, preferred INTEGER NOT NULL)')
@@ -288,29 +288,23 @@ def ranked(db, query, prefixes, *, limit=TOTAL):
             ON CONFLICT(id) DO UPDATE SET preferred=max(preferred,excluded.preferred)''',
             (prefix, prefix, prefix+'/', prefix+'0'))
     query = query.strip()
-    exact = db.execute('''SELECT d.id FROM documents d JOIN scope_docs s ON s.id=d.id
-        WHERE d.name=? ORDER BY d.id LIMIT 1''', (query.removeprefix('_root_.'),)).fetchone()
-    exact = exact[0] if exact else None
-    candidates = [(exact, 0.0)] if exact is not None else []
+    candidates = []
     terms = dict.fromkeys(token_text(query).split())
     if terms:
         expression = ' OR '.join('"'+term.replace('"', '""')+'"' for term in terms)
         for id, score in db.execute('''SELECT rowid,rank FROM terms WHERE terms MATCH ?
                 AND EXISTS (SELECT 1 FROM scope_docs s WHERE s.id=terms.rowid)
                 ORDER BY rank LIMIT ?''', (expression, CANDIDATES)):
-            if id != exact:
-                candidates.append((id, -score))
-            if len(candidates) == CANDIDATES:
-                break
+            candidates.append((id, -score))
     hits = []
     for id, score in candidates:
         row = db.execute('''SELECT d.name,f.path,d.line,d.start_line,d.start,d.end,s.preferred
             FROM documents d JOIN files f ON f.id=d.file JOIN scope_docs s ON s.id=d.id
             WHERE d.id=?''', (id,)).fetchone()
-        hits.append((id == exact, score, row))
-    hits.sort(key=lambda h: (not h[0], -h[1]*(1.5 if h[2][-1] else 1)))
+        hits.append((score, row))
+    hits.sort(key=lambda h: -h[0]*(1.5 if h[1][-1] else 1))
     seen, result = set(), []
-    for _, score, row in hits:
+    for score, row in hits:
         name = row[0]
         if name and name in seen:
             continue

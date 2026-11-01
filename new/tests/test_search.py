@@ -182,13 +182,13 @@ class SearchTests(unittest.TestCase):
         for proof in ('theoremProof', 'lemmaProof', 'equationProof', 'complexProof'):
             self.assertNotIn(proof, display)
 
-    def test_exact_name_stays_first_and_scores_roundtrip_losslessly(self):
+    def test_identifier_queries_use_bm25_and_scores_roundtrip_losslessly(self):
         index = self.index(('lib/Mathlib/A.lean', 'namespace N\ndef result : Nat := 0\nend N\n'),
             ('lib/Mathlib/B.lean', '/-- N result result result -/\ndef other : Nat := 0\n'))
         result = self.search(index, ' _root_.N.result ', ('Mathlib', 'Mathlib/B.lean'))
-        self.assertEqual(result.records[0].names, ('N.result',))
-        self.assertEqual(result.records[0].score, 0)
-        self.assertGreater(result.records[1].score, 0)
+        self.assertEqual(result.records[0].names, ('other',))
+        self.assertEqual(result.records[1].names, ('N.result',))
+        self.assertTrue(all(row.score > 0 for row in result.records))
         with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
             self.assertEqual(SearchResult.load(result.payload), result)
         for score in (float('nan'), float('inf'), -1, True):
@@ -251,7 +251,7 @@ class SearchTests(unittest.TestCase):
         index = self.index(('lib/Mathlib/X.lean',
             'def needle : Nat := 0\n/-- needle -/\ndef middle : Nat := 0\n'
             'def last : Needle := by exact needle\n'))
-        # Lower-case query is not an exact name, but uses identical FTS terms.
+        # Case does not change the FTS terms.
         result = self.search(index, 'NEEDLE')
         self.assertEqual([r.names for r in result.records], [('needle',), ('middle',), ('last',)])
         self.assertTrue(all(a.score > b.score for a, b in zip(result.records, result.records[1:])))

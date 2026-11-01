@@ -259,7 +259,7 @@ class ToolsTests(unittest.TestCase):
             continue_retrieval(plan, reports, replace(self.scope, owner=replace(self.scope.owner, generation=1)))
 
     def test_fusion_matches_fraction_order_and_deduplicates_complete_stages(self):
-        request = self.request(Retrieve(('a', 'b', 'c'), backends=(Backend('frozen-source', ('Mathlib',)),)))
+        request = self.request(Retrieve(('a query', 'b query', 'c query'), backends=(Backend('frozen-source', ('Mathlib',)),)))
         stages = search_stages(request)
         reports, expected = [], {}
         for stage in stages:
@@ -271,6 +271,39 @@ class ToolsTests(unittest.TestCase):
         fusion = fuse(request, tuple(reports))
         self.assertEqual(fusion.ranked, tuple(sorted(expected, key=lambda n: (-expected[n], n))))
         self.assertEqual(fusion.selected, tuple(sorted(expected, key=lambda n: (-expected[n], n)))[:12])
+
+    def test_local_identifier_query_requests_lookup_without_indexed_name(self):
+        for error in (None, 'search failure'):
+            plan = self.plan(Retrieve(('_root_.N.Generated.rec',),
+                backends=(Backend('frozen-source'),)))
+            reports = (SearchResult(plan.stages[0].sha256, error=error),)
+            following, fusion = continue_retrieval(plan, reports, self.scope)
+            self.assertEqual(fusion.ranked, ())
+            self.assertEqual(following.stages[0].action, Lookup(('_root_.N.Generated.rec',)))
+            self.assertIsNone(following.charge)
+
+    def test_local_direct_lookup_priority_deduplication_and_bound(self):
+        names = tuple(f'N.term{n:02}' for n in range(20))
+        plan = self.plan(Retrieve(('_root_.N.term19', 'N.«term19»'), ('Explicit',),
+            (Backend('frozen-source'),)))
+        reports = tuple(SearchResult(stage.sha256, tuple(
+            Match((name,), 'project/Main.lean', 1, 1) for name in names)) for stage in plan.stages)
+        following, fusion = continue_retrieval(plan, reports, self.scope)
+        self.assertEqual(fusion.selected, ('Explicit', '_root_.N.term19', *names[:11]))
+        self.assertEqual(tuple(n for s in following.stages for n in s.action.names), fusion.selected)
+
+    def test_only_allowed_local_identifiers_get_direct_lookups(self):
+        for query, backend, forbidden in (
+                ('N.Generated.rec', Backend('leanexplore'), ()),
+                ('a natural language query', Backend('frozen-source'), ()),
+                ('by exact h', Backend('frozen-source'), ()),
+                ('_root_.N.«Generated».rec', Backend('frozen-source'), ('N.Generated.rec',)),
+                ('«MidasInternal».generated', Backend('frozen-source'), ())):
+            with self.subTest(query=query, backend=backend):
+                plan = self.plan(Retrieve((query,), backends=(backend,)), forbidden=forbidden)
+                reports = (SearchResult(plan.stages[0].sha256),)
+                following, _ = continue_retrieval(plan, reports, self.scope)
+                self.assertEqual(following.stages, ())
 
     def test_retrieval_checks_top_twelve_and_explicit_names_then_allows_named_followup(self):
         names = tuple(f'N.term{n:02}' for n in range(20))
@@ -424,7 +457,7 @@ class ToolsTests(unittest.TestCase):
             'module':'ChallengeDeps', 'start':[1,0], 'end':[1,15]}},)
         result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
                                 prefix=SourceFile('Main.lean', b''), reader=self.a)
-        self.assertEqual(result[0], 'def helper := 0')
+        self.assertEqual(result[0], 'helper\n\ndef helper := 0')
         self.assertEqual(index.roots, ('project',))
         for selector, query, path, name in (
                 ('project', 'helper', 'project/ChallengeDeps.lean', 'helper'),
@@ -452,7 +485,7 @@ class ToolsTests(unittest.TestCase):
                 ('unrelated', 'LeanPool.ClassificationOfSurfaces.LeanEval.ChallengeDeps', 18)))
         result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
                                 prefix=SourceFile('Submission.lean', b''), reader=self.a)
-        self.assertEqual(result, ('def helper := 0', 'def unrelated := 1'))
+        self.assertEqual(result, ('helper\n\ndef helper := 0', 'unrelated\n\ndef unrelated := 1'))
         self.assertEqual(self.a.reads, [e.artifact for e in index.entries[:2]])
         missing = replace(index, entries=index.entries[1:])
         result = lookup_sources(records[:1], environment_id=self.scope.environment_id, index=missing,
@@ -488,7 +521,19 @@ class ToolsTests(unittest.TestCase):
                         source_range=dict(module='Helpers', start=[1, 0], end=[2, 10])))
         result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
                                 prefix=SourceFile('Main.lean', b''), reader=self.a)
-        self.assertEqual(result, ('theorem result : value = 42', source.rstrip()))
+        self.assertEqual(result, ('theorem result : value = 42', 'def value : Nat\n\n'+source.rstrip()))
+        self.assertEqual(self.a.reads, [index.entries[0].artifact])
+
+    def test_generated_lookup_keeps_identity_when_source_is_parent_command(self):
+        source = 'structure Box where\n  value : Nat\n'
+        index = self.index((('project/Helpers.lean', source.encode()),))
+        records = tuple(dict(query=name, status='available', kind=kind, type='checked type',
+            source_range=dict(module='Helpers', start=[1, 0], end=[2, 13]))
+            for name, kind in (('Box.rec', 'recursor'), ('Box.mk', 'constructor'), ('Box.value', 'def')))
+        result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
+                                prefix=SourceFile('Main.lean', b''), reader=self.a)
+        for row, rendered in zip(records, result):
+            self.assertIn(row['query']+' : checked type\n\n'+source.rstrip(), rendered)
         self.assertEqual(self.a.reads, [index.entries[0].artifact])
 
     def test_archive_large_unicode_indexed_reads_and_duplicate_guard(self):
@@ -560,7 +605,7 @@ class ToolsTests(unittest.TestCase):
         index = self.index((('mathlib/Mathlib/X.lean', data),))
         result = lookup_sources(records, environment_id=self.scope.environment_id, index=index,
                                 prefix=SourceFile('Main.lean', b''), reader=self.a)
-        self.assertEqual(result[0], 'def α := "😀"')
+        self.assertEqual(result[0], 'α\n\ndef α := "😀"')
         other = replace(index, entries=index.entries+(SourceEntry('other/Mathlib/X.lean', self.a.save(data), 'Mathlib.X'),))
         self.assertIn('missing or ambiguous frozen module', lookup_sources(records,
             environment_id=self.scope.environment_id, index=other,
