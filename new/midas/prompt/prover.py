@@ -98,9 +98,10 @@ definitions or theorem interfaces; imports do not display their definitions.
 Supply up to three queries and two backends for discovery, up to twelve known names
 for direct inspection, or both together.
 Discovery results are merged and ranked, then the top twelve names are checked
-alongside your explicit names. To inspect other results, include their names in a
-later retrieve action, optionally with new queries. Known names need no prior
-result ID.
+alongside your explicit names. Explicit names appear as standalone lookup results;
+checked search hits appear within their numbered search results. To inspect other
+results, include their names in a later retrieve action, optionally with new queries.
+Known names need no prior result ID.
 Retrieval returns checked types and available authored definition source.
 Theorems return checked signatures without proof bodies.
 Backend names are frozen-source and leanexplore. frozen-source accepts optional
@@ -112,7 +113,7 @@ Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
 preference within the selected scope. Large excerpts may continue on another page.
 Local queries that are exact Lean identifiers also get a direct checked lookup;
-resolved declarations appear first, including generated declarations.
+resolved declarations appear in that search section, including generated declarations.
 Queries require backends. For names-only retrieval, use "queries":[] and
 "backends":[]. If both queries and names are empty, retrieval is disabled for
 this node and proof work continues without a lookup.
@@ -235,4 +236,4 @@ def render(snapshot):
     sections = tuple(s for s in sections if s.kind != 'capabilities')
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
         b'Return the action JSON now.'))),)
-    return Prompt('prover', 'prover-v9', 'prover-action-v3', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('prover', 'prover-v10', 'prover-action-v3', INSTRUCTIONS, SCHEMA, sections)

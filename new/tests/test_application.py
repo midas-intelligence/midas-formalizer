@@ -1252,10 +1252,12 @@ class Contracts(unittest.TestCase):
     def test_review_uses_read_only_candidate_relevant_lookups_and_its_own_research(self):
         from midas.prompt import reviewer
         from tests.test_strategy import decomposition
+        from midas.tools import Match, SearchService
+        self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         research_route = ModelRoute(provider='openai', model='fixture')
-        retrieve = dict(mode='retrieve', rationale='Inspect names.', names=['Nat.add', 'Nat.mul'],
-                        queries=[], backends=[])
+        retrieve = dict(mode='retrieve', rationale='Inspect multiplication and discover addition.', names=['Nat.mul'],
+                        queries=['addition'], backends=[dict(name='leanexplore', prefixes=[])])
         probe = dict(mode='probe', rationale='Inspect internals.', cases=[dict(code='pure ()')])
         action = decomposition()
         action['children'] = [dict(name='support', statement='True ∧ True', proof='Use Nat.add and the constructor.',
@@ -1364,7 +1366,7 @@ class Contracts(unittest.TestCase):
                 'module': module, 'start': [1, 0], 'end': [1, len(body)]}},)
             result = lookup_sources(records, environment_id=environment.id, index=sources.index,
                                     prefix=SourceFile('Submission.lean', b''), reader=sources)
-            self.assertEqual(result[0], body)
+            self.assertEqual(result[0], 'helper\n\n'+body)
         self.assertIsNone(sources.index.by_path['other/Support.lean'].module)
         from midas.tools import SearchService
         self.app.search_factory = lambda: SearchService(index=sources.index, source_reader=sources)

@@ -12,7 +12,7 @@ from ..source import CheckedAlias, SourceFile
 from ..strategy import Context
 from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retrieve, Search, WebSearch,
     SearchResult, SourceIndex, Stage, StageEvidence, admit_checked, admit_research, admit_web_search, continue_retrieval,
-    lookup_sources, prepare_archive, probe_summary, research_summary, web_search_summary, search_stages, search_summary)
+    lookup_sources, prepare_archive, probe_summary, research_summary, retrieval_summary, web_search_summary, search_stages)
 from . import records as r, token_usage
 
 
@@ -174,7 +174,8 @@ def reduce(flow, reader, invocation, accepted, binding):
     snapshot = replace(flow.snapshot(reader, request.scope.owner, attempt=attempt), busy=False)
     # Continuation validates owner/context; memory may have advanced at dispatch.
     flow.strategy.on_helper(snapshot, turn, plan, evidence, searches=searches)
-    rows, provenance = [], []
+    rows, provenance, checked = [], [], {}
+    lookup_records = []
     for item in evidence:
         provenance.extend(item.artifacts)
         for reference in item.artifacts:
@@ -200,8 +201,9 @@ def reduce(flow, reader, invocation, accepted, binding):
                 packet = CompilerRequest(r.read(reader, executed.request.operation_payload, r.DATA)).decode()['packet']
                 source_reader = getattr(flow.search, 'source_reader', None) or reader
                 index = getattr(flow.search, 'index', None) or SourceIndex(request.scope.environment_id, ())
-                rows.extend(lookup_sources(records, environment_id=request.scope.environment_id,
-                    index=index, prefix=SourceFile(packet['logical'], packet['source'].encode()), reader=source_reader))
+                summaries = lookup_sources(records, environment_id=request.scope.environment_id,
+                    index=index, prefix=SourceFile(packet['logical'], packet['source'].encode()), reader=source_reader)
+                checked.update((record['query'], summary) for record, summary in zip(records, summaries))
                 continue
             if isinstance(item.stage.action, Probe):
                 rows.append('Probe failed: '+(item.error or item.status.value))
@@ -210,9 +212,12 @@ def reduce(flow, reader, invocation, accepted, binding):
                 rows.append(codec.decode(data) if data.startswith(codec.MAGIC) else codec.load_record(data, limit=4*1024**2))
             except ValueError:
                 rows.append(dict(status=item.error or 'advisory', artifact=reference.id))
+    if isinstance(request.action, Retrieve):
+        summaries, positions = retrieval_summary(request.action,
+            tuple((result, search.action) for result, search in zip(searches, search_stages(request))), checked)
+        lookup_records = [[name, len(rows)+index] for name, index in positions]
+        rows.extend(summaries)
     if searches:
-        for result, search in zip(searches, search_stages(request)):
-            rows.extend(search_summary(result, search.action))
         provenance.extend(r.unref(v) for v in saved['searches'])
     if not provenance:
         provenance.append(r.unref(saved['request']))
@@ -227,7 +232,7 @@ def reduce(flow, reader, invocation, accepted, binding):
         r.save_owner(reader, request.scope.owner.obligation_id, replace(state,
             evidence=tuple(dict.fromkeys((*state.evidence, archive.pages[0]))))),
         r.record(reader, 'application.pending', request.scope.owner.obligation_id, None),
-        r.record(reader, 'application.helpers', key, dict(saved, completed=True))]
+        r.record(reader, 'application.helpers', key, dict(saved, completed=True, lookup_records=lookup_records))]
     if saved['parent']:
         from .candidates import submission
         subkey, _ = saved['parent']
@@ -259,8 +264,8 @@ _REVIEW_NAME = re.compile(r"[^\W\d][\w'?!]*(?:\.[^\W\d][\w'?!]*)*")
 def review_evidence(reader, snapshot, review, sections, displayed):
     """Select named checked lookups and research for this exact review.
 
-    Lookup records precede search hints in retrieval archives. Their original
-    record indices let us select whole excerpts without guessing from prose or
+    Checked declarations may appear in explicit lookups or numbered search rows.
+    Their saved record indices select whole excerpts without guessing from prose or
     loading complete historical results. General searches/probes are omitted.
     """
     from ..strategy import Turn
@@ -290,15 +295,13 @@ def review_evidence(reader, snapshot, review, sections, displayed):
             if not stages or any(not isinstance(s.action, Lookup) or
                     saved['results'][str(s.ordinal)][3] != ResultStatus.SUCCEEDED.value for s in stages):
                 continue
-            records, offset = set(), 0
-            for stage in stages:
-                available = saved['results'][str(stage.ordinal)][5]
-                for index, name in enumerate(stage.action.names):
-                    normalized = name.removeprefix('_root_.')
-                    if (name in available and not normalized.startswith('_private.') and
-                            (normalized in names or normalized.rsplit('.', 1)[-1] in names)):
-                        records.add(str(offset + index))
-                offset += len(stage.action.names)
+            records = set()
+            available = {name for stage in stages for name in saved['results'][str(stage.ordinal)][5]}
+            for name, index in saved['lookup_records']:
+                normalized = name.removeprefix('_root_.')
+                if (name in available and not normalized.startswith('_private.') and
+                        (normalized in names or normalized.rsplit('.', 1)[-1] in names)):
+                    records.add(str(index))
             if not records:
                 continue
         else:

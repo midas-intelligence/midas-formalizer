@@ -986,7 +986,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v9`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v1`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v10`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v1`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat, complete retained observation sections in saved order. No nested reference dictionary or prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
@@ -1195,9 +1195,12 @@ stages; they are absent from the model schema, capabilities and action parser.
 For direct inspection, use `retrieve` with `names` and empty `queries` and
 `backends`. For discovery, supply up to three queries and two backends; retrieval
 merges and ranks the results, then checks the top twelve ranked names plus up to
-twelve explicit names. To inspect other search results, select their names in a
-names-only request, which skips search. Use `page` to read more content from an
-existing result. Both retrieval forms require the compiler and consume one
+twelve explicit names. Explicit names appear as standalone lookup results; checked
+search hits appear within the numbered search results. Exact local identifier
+queries also get checked, with generated declarations shown in their search section.
+To inspect other search results, select their names in a names-only request, which
+skips search. Use `page` to read more content from an existing result.
+Both retrieval forms require the compiler and consume one
 retrieval allowance. A names-only request with no allowed names is rejected
 before scheduling, so it cannot leave the task waiting on zero jobs.
 The scope contains an owner/generation, an environment **hash**, and one artifact
@@ -1270,7 +1273,8 @@ weight. This prevents longer identifiers from gaining weight simply by producing
 more compound tokens. All postings are considered before the best 100 candidates
 are selected, with scope filtering and corpus-wide IDF. Exact identifier
 queries (including `_root_.` spellings) use checked lookup instead of an index
-name match; successful lookups precede BM25 matches in retrieval evidence. Scores
+name match; checked declarations appear within their search results, with unindexed
+generated declarations shown under that query's heading. Scores
 get a 1.5× ranking multiplier only for an explicitly selected file/module;
 directories grant no bonus. Ties preserve candidate ordering. Evidence retains
 the compound/component score before the file multiplier.
@@ -1345,8 +1349,13 @@ logged message, each goal and inspected expressions/types retain their first fiv
 and last five lines when longer than ten lines, with an explicit omitted-line count.
 Generated code and diagnostic locations remain intact; original results remain in
 archive provenance. Truncation happens before paging so more errors fit on a page.
-Combined retrieval keeps
-the search excerpts and failures alongside checked lookup results. Original
+Combined retrieval shows explicitly requested lookups first, then search results
+with automatically checked declarations embedded in their numbered entries.
+Search titles remain declaration names. Checked details replace the indexed
+excerpt beneath the source location instead of adding a separate lookup entry.
+The indexed source remains a fallback when lookup source is unavailable.
+A flat declaration-to-record index preserves review access
+after pagination. Original
 artifacts remain archive provenance. Container descriptors preserve object/array
 shape for other structured evidence. Text fragments carry
 field paths, UTF-8 byte offsets and total byte lengths;

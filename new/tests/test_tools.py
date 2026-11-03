@@ -20,7 +20,7 @@ from midas.source import SourceFile
 from midas.tools import (Archive, Backend, HelperRequest, Lookup, Match, Probe, Research, WebSearch, Retrieve,
     Scope, Search, SearchResult, SearchService, SourceEntry, SourceIndex, Stage, StageEvidence,
     admit_checked, continue_retrieval, execute_search, finish_helper, fuse, lookup_sources, plan_helper,
-    prepare_archive, probe_summary, read_page, research_evidence, research_summary, web_search_evidence, web_search_summary, search_stages, search_summary, source_excerpt, web_actions)
+    prepare_archive, probe_summary, read_page, research_evidence, research_summary, retrieval_summary, web_search_evidence, web_search_summary, search_stages, search_summary, source_excerpt, web_actions)
 from midas.tools.protocol import pack
 from midas.tools.search import hosted, worker_payload
 
@@ -393,15 +393,76 @@ class ToolsTests(unittest.TestCase):
         rows = search_summary(result, search)
         self.assertEqual(rows, ('Search (frozen-source): Morley triangle',
             'Geometry.morley\nGeometry.triangle\nSource: mathlib/Mathlib/Geometry.lean:12\n'
-            'Excerpt starts at line 10:\n-- Morley\ntheorem triangle : True := by trivial',
+            '-- Morley\ntheorem triangle : True := by trivial',
             'Source match (no declaration name)\nSource: mathlib/Mathlib/Comment.lean:2\n'
-            'Excerpt starts at line 1:\n-- Morley triangle'))
+            '-- Morley triangle'))
         self.assertEqual(search_summary(SearchResult('a'*64), search)[-1], 'No matches.')
         self.assertEqual(search_summary(SearchResult('a'*64, error='unavailable'), search)[-1],
                          'Search failed: unavailable')
         hosted = search_summary(SearchResult('a'*64, (Match(('Geometry.morley',)),)),
                                 Search('Morley', Backend('leanexplore')))
         self.assertEqual(hosted, ('Search (leanexplore): Morley', 'Geometry.morley'))
+
+    def test_retrieval_displays_four_explicit_lookups_and_checks_inside_fifty_search_hits(self):
+        explicit = tuple(f'N.explicit{i}' for i in range(4))
+        hits = tuple(f'N.hit{i}' for i in range(50))
+        action = Retrieve(('find terms',), explicit, (Backend('frozen-source'),))
+        search = Search(action.queries[0], action.backends[0])
+        result = SearchResult('a'*64, tuple(Match((name,), 'project/Main.lean', i+1, i+1,
+            'indexed source '+name) for i, name in enumerate(hits)))
+        checked = {name: f'theorem {name} : True' for name in (*explicit, *hits[:12])}
+        rows, positions = retrieval_summary(action, ((result, search),), checked)
+        self.assertEqual(rows[:4], tuple(checked[name] for name in explicit))
+        self.assertEqual(rows[4], 'Search (frozen-source): find terms')
+        self.assertEqual(len(rows), 4+1+50)
+        for i, name in enumerate(hits[:12]):
+            self.assertEqual(rows[5+i], f'{i+1}. {name}\nSource: project/Main.lean:{i+1}\n{checked[name]}')
+        self.assertEqual(rows[-1], '50. N.hit49')
+        for name, index in positions:
+            self.assertIn(checked[name], rows[index])
+            self.assertEqual('\n'.join(rows).count(checked[name]+'\n'), 1)
+        self.assertEqual(len(positions), 16)
+
+    def test_checked_search_details_keep_review_positions_when_paged(self):
+        from midas.application.helpers import page_text
+        hits = tuple(f'N.hit{i}' for i in range(50))
+        action = Retrieve(('find terms',), backends=(Backend('leanexplore'),))
+        search = Search(action.queries[0], action.backends[0])
+        result = SearchResult('a'*64, tuple(Match((name,)) for name in hits))
+        checked = {hits[0]: 'def N.hit0 : Nat\n\n'+('large source body\n'*1500)}
+        rows, positions = retrieval_summary(action, ((result, search),), checked)
+        self.assertEqual(rows[0], 'Search (leanexplore): find terms')
+        self.assertIn('50. N.hit49', rows[1])
+        self.assertEqual(positions, (('N.hit0', 2),))
+        archive = prepare_archive(self.scope, 'a'*64, rows, (self.a.save(b'provenance'),), self.a)
+        selected = b''.join(page_text(self.a.data[ref.id], records={'2'}) for ref in archive.pages)
+        self.assertIn(b'def N.hit0 : Nat', selected)
+        self.assertNotIn(b'N.hit49', selected)
+        self.assertGreater(len(archive.pages), 1)
+
+    def test_direct_identifier_lookup_stays_in_its_search_section_without_source_hits(self):
+        action = Retrieve(('N.Generated.rec',), backends=(Backend('frozen-source'),))
+        search = Search(action.queries[0], action.backends[0])
+        checked = {'N.Generated.rec': 'theorem N.Generated.rec : True'}
+        for error in (None, 'search failure'):
+            result = SearchResult('a'*64, error=error)
+            rows, positions = retrieval_summary(action, ((result, search),), checked)
+            self.assertEqual(rows[0], 'Search (frozen-source): N.Generated.rec')
+            self.assertEqual(rows[-1], 'Exact identifier lookup:\n'+checked['N.Generated.rec'])
+            self.assertEqual(positions, (('N.Generated.rec', 2),))
+
+    def test_checked_search_source_is_not_repeated_within_entry_or_as_another_lookup(self):
+        action = Retrieve(('first query', 'second query'), backends=(Backend('frozen-source'),))
+        source = 'def example : Nat := 1'
+        result = SearchResult('a'*64, (Match(('N.example',), 'project/Main.lean', 1, 1, source),))
+        searches = tuple((result, Search(query, action.backends[0])) for query in action.queries)
+        checked = {'N.example': 'def N.example : Nat\n\n'+source}
+        rows, positions = retrieval_summary(action, searches, checked)
+        self.assertEqual(rows[0], 'Search (frozen-source): first query')
+        self.assertEqual(rows[1].splitlines()[:2], ['N.example', 'Source: project/Main.lean:1'])
+        self.assertEqual(rows[1].count(source), 1)
+        self.assertEqual('\n'.join(rows).count('def N.example : Nat'), 1)
+        self.assertEqual(positions, (('N.example', 1),))
 
     def test_probe_display_preserves_diagnostics_goals_flags_and_inspection(self):
         case = dict(id='inspect', operation='tactic', code='run_tac do\n  pure ()', setup='', expected=None)

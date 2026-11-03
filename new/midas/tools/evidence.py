@@ -13,6 +13,7 @@ from .bm25 import DETAILS
 PAGE_BYTES = 16000
 MAX_PAGES = 1024
 INDEX_BYTES = 256 * 1024
+SOURCE_UNAVAILABLE = 'Original declaration source unavailable:'
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,39 +193,65 @@ def source_excerpt(data, location):
 
 
 def search_summary(result, search):
+    return tuple(text for text, _ in _search_records(result, search, {}))
+
+
+def _search_records(result, search, checked):
     """Twelve detailed hits and a compact name tail, without a score cutoff.
 
     If full excerpts would push names off the first page, lead with the ranked
     name list and page the details after it. Anonymous hits always need source.
     """
     instance(result, SearchResult)
-    rows = [f'Search ({search.backend.name}): {search.query}']
+    rows = [(f'Search ({search.backend.name}): {search.query}', ())]
     if result.error:
-        rows.append('Search failed: '+result.error)
+        rows.append(('Search failed: '+result.error, ()))
     elif not result.records:
-        rows.append('No matches.')
+        rows.append(('No matches.', ()))
     details, names = [], []
     compact = len(result.records) > DETAILS
-    if compact:
-        detail = f'; first {DETAILS} detailed' if search.backend.name == 'frozen-source' else ''
-        rows.append(f'{len(result.records)} results{detail}. '
-                    'Use retrieve with names for checked types and available definition source.')
+    # Exact identifier queries can resolve generated declarations absent from the index.
+    direct = search.query.strip()
+    if (search.backend.name == 'frozen-source' and direct in checked
+            and not any(direct in match.names for match in result.records)):
+        rows.append(('Exact identifier lookup:\n'+checked.pop(direct), (direct,)))
+    header_count = len(rows)
     for rank, match in enumerate(result.records, 1):
         name = '\n'.join(match.names) or 'Source match (no declaration name)'
         label = f'{rank}. ' if compact else ''
         names.append(label+name if match.names else f'{label}{name}: {match.path}:{match.line}')
-        detailed = rank <= DETAILS or not match.names
+        resolved = tuple(n for n in match.names if n in checked)
+        body = '\n\n'.join(checked.pop(n) for n in resolved)
+        detailed = rank <= DETAILS or not match.names or bool(resolved)
         if match.path is not None and detailed:
             name += f'\nSource: {match.path}:{match.line}'
-            if match.source:
-                name += f'\nExcerpt starts at line {match.start_line}:\n'+match.source
-            details.append(label+name)
-        rows.append(label+name)
+            if match.source and (not resolved or '\n-- '+SOURCE_UNAVAILABLE in body) and match.source not in body:
+                body += ('\n\n' if body else '')+match.source
+        if body:
+            name += '\n'+body
+        row = (label+name, resolved)
+        if detailed and (match.path is not None or resolved):
+            details.append(row)
+        rows.append(row)
     if compact and details and sum(codec.record_size(f, limit=PAGE_BYTES)
-                                   for f in _fragments(rows)) > PAGE_BYTES-1024:
-        return (*rows[:2], 'Ranked names (details follow; use page for further excerpts):\n'+'\n'.join(names),
+                                   for f in _fragments(text for text, _ in rows)) > PAGE_BYTES-1024:
+        return (*rows[:header_count], ('Ranked names (details follow; use page for further excerpts):\n'+'\n'.join(names), ()),
                 *details)
     return tuple(rows)
+
+
+def retrieval_summary(action, searches, checked):
+    """Keep explicit lookups separate and place checked search hits in their rows.
+
+    Return a flat name/record-index map so reviews can select checked declarations
+    after pagination without relying on their former lookup-first ordering.
+    """
+    pending = dict(checked)
+    records = [(pending.pop(name), (name,)) for name in action.names if name in pending]
+    for result, search in searches:
+        records.extend(_search_records(result, search, pending))
+    return (tuple(text for text, _ in records),
+            tuple((name, index) for index, (_, names) in enumerate(records) for name in names))
 
 
 def _probe_excerpt(value):
@@ -308,16 +335,16 @@ def lookup_sources(records, *, environment_id, index, prefix, reader):
             continue
         data, path, note = prefix.data, prefix.path, None
         if location is None:
-            note = 'Original declaration source unavailable: no declaration range.'
+            note = SOURCE_UNAVAILABLE+' no declaration range.'
         elif location['module'] is not None:
             module = location['module']
             if type(module) is not str or not module or any(c in module for c in ('/', '\\', '\x00')):
                 raise ValueError('Invalid lookup source module')
             candidates = index.by_module.get(module, ())
             if len(candidates) != 1:
-                note = 'Original declaration source unavailable: missing or ambiguous frozen module.'
+                note = SOURCE_UNAVAILABLE+' missing or ambiguous frozen module.'
             elif candidates[0].artifact.byte_count > FILE_BYTES:
-                note = 'Original declaration source unavailable: file exceeds byte allowance.'
+                note = SOURCE_UNAVAILABLE+' file exceeds byte allowance.'
             else:
                 entry = candidates[0]
                 path = entry.path
@@ -329,9 +356,9 @@ def lookup_sources(records, *, environment_id, index, prefix, reader):
             try:
                 source = source_excerpt(data, location)
             except (ValueError, UnicodeError):
-                note = 'Original declaration source unavailable: range differs from frozen source.'
+                note = SOURCE_UNAVAILABLE+' range differs from frozen source.'
             if source is None:
-                note = note or 'Original declaration source unavailable: declaration exceeds byte allowance.'
+                note = note or SOURCE_UNAVAILABLE+' declaration exceeds byte allowance.'
             else:
                 # Generated declarations can point at their parent command.
                 # Keep the checked identity/type visible even in that case.
