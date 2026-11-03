@@ -1365,6 +1365,10 @@ The controller supplies an indexed duplicate-delivery check and rechecks the ret
 delivery key and scope when committing. Scope changes invalidate cursors.
 Delivered evidence pages and result archives remain saved. The `page` action fetches
 additional undelivered pages using advertised cursors. There is no `recall` action.
+Results use stable names such as `tool-result-1`, numbered by saved result order
+within each obligation. The cursor `tool-result-1:2` requests page 2. Names also
+identify evidence pins and remain stable across prompt truncation and resume;
+archive hashes remain internal for integrity checks.
 The 16,000-byte storage page bound still applies.
 
 `prover.input_token_budget` in `config.json` controls the prompt's rolling evidence

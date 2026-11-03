@@ -246,9 +246,25 @@ def advertised(reader, owner):
     return tuple(Archive.load(r.read(reader, r.unref(ref))) for ref in refs)
 
 
+def named_archives(reader, owner):
+    """Stable owner-local names from the append-only saved archive order."""
+    return tuple((f'tool-result-{i}', archive)
+                 for i, archive in enumerate(advertised(reader, owner), 1))
+
+
 def page_effect(flow, reader, snapshot, turn, work, state):
-    key = codec.load_record(work.detail, limit=65536)[0]
-    archive = next(a for a in advertised(reader, snapshot.version.owner) if key.split(':')[0] == a.id)
+    value = codec.load_record(work.detail, limit=65536)
+    key = value[0]
+    name, separator, number = key.partition(':')
+    if (not separator or not number.isascii() or not number.isdigit()
+            or len(number) > 4 or str(int(number)) != number or int(number) < 1):
+        raise ValueError('Invalid evidence cursor')
+    archive = next((a for label, a in named_archives(reader, snapshot.version.owner) if label == name), None)
+    if archive is None:
+        raise ValueError('Unknown tool result')
+    # Resolve the public name at the application boundary; the tools layer still
+    # validates the immutable archive, page binding, scope and delivery key.
+    work = replace(work, detail=r.pack([f'{archive.id}:{int(number)-1}', *value[1:]]))
     displayed = set(state.evidence)
     result = flow.strategy.on_page(snapshot, turn, work, archive, reader,
         delivered=lambda cursor: archive.pages[int(cursor.rsplit(':', 1)[1])] in displayed)
@@ -276,7 +292,7 @@ def review_evidence(reader, snapshot, review, sections, displayed):
              if section.kind in ('subject', 'definitions', 'interfaces', 'candidate')
              for match in _REVIEW_NAME.finditer(section.text.decode())}
     displayed = set(displayed)
-    for archive in advertised(reader, snapshot.version.owner):
+    for result_name, archive in named_archives(reader, snapshot.version.owner):
         if archive.scope.context != snapshot.version.context or not displayed.intersection(archive.pages):
             continue
         saved = r.value(reader, 'application.helpers', archive.helper_id)
@@ -312,7 +328,7 @@ def review_evidence(reader, snapshot, review, sections, displayed):
             text = page_text(r.read(reader, ref, 16000), records=records)
             if not text:
                 continue
-            header = f'Result ID: {archive.id}\nPage {ordinal+1} of {len(archive.pages)}. '
+            header = f'Result ID: {result_name}\nPage {ordinal+1} of {len(archive.pages)}. '
             header += ('Selected checked declaration excerpts.\n\n' if records is not None else
                        'Review web search (advisory).\n\n' if isinstance(request.action, WebSearch) else
                        'Review research (advisory).\n\n')

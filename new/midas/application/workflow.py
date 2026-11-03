@@ -87,8 +87,8 @@ class Workflow:
         memory = Memory.load(r.read(reader, state.memory)) if state.memory else Memory()
         a = reader.status_snapshot().accounting
         pending = r.value(reader, 'application.pending', owner.obligation_id)
-        from .helpers import advertised
-        archives = advertised(reader, owner)
+        from .helpers import named_archives
+        archives = named_archives(reader, owner)
         displayed = set(state.evidence)
         return Snapshot(Version(owner, saved.revision, state.context, memory.version, len(state.evidence)),
             context, self.selection.environment_id, self.work_graph(reader)[0], memory,
@@ -98,8 +98,8 @@ class Workflow:
             attempt, busy=pending is not None,
             stopped=state.stopped and not (attempt and attempt.candidate.joint_submission_id),
             forbidden_names=tuple(t.selector for t in self.selection.selected.targets),
-            allowed_pins=tuple(a.id for a in archives),
-            cursors=tuple(f'{a.id}:{i}' for a in archives for i in range(1, min(len(a.pages), 128))
+            allowed_pins=tuple(name for name, _ in archives),
+            cursors=tuple(f'{name}:{i+1}' for name, a in archives for i in range(1, min(len(a.pages), 128))
                           if a.pages[i] not in displayed),
             stop_request=StopRequest.load(r.read(reader, state.stop_request, 65536)) if state.stop_request else None)
 
@@ -202,7 +202,7 @@ class Workflow:
                     dep.alias.encode() + b' :\n' + subject('type', signature).text))
                 refs.append(dep.interface)
                 owners.append(dep.owner)
-        from .helpers import advertised, page_text, review_evidence
+        from .helpers import named_archives, page_text, review_evidence
         displayed = tuple(dict.fromkeys(state.evidence))
         if bounded_evidence and review is None:
             # Keep preparation itself within the prompt's hard byte/section
@@ -227,18 +227,20 @@ class Workflow:
                 sections.append(Section('evidence', f'review-result-{ordinal+1}', text))
                 refs.append(reference)
             displayed = ()
-        pages = {reference: (archive.id, ordinal+1, len(archive.pages))
-                 for archive in (advertised(reader, snapshot.version.owner) if displayed else ())
+        pages = {reference: (name, ordinal+1, len(archive.pages))
+                 for name, archive in (named_archives(reader, snapshot.version.owner) if displayed else ())
                  for ordinal, reference in enumerate(archive.pages) if reference in displayed}
         for ordinal, reference in enumerate(displayed):
             details = pages.get(reference)
             if details is None:
+                section_name = f'tool-output-{ordinal+1}'
                 header = 'Tool output included below.\n\n'
             else:
                 result_id, page, count = details
+                section_name = result_id if count == 1 else f'{result_id}-page-{page}'
                 header = f'Result ID: {result_id}\nPage {page} of {count}. '
                 header += 'Complete result included below.\n\n' if count == 1 else 'This page is included below.\n\n'
-            sections.append(Section('evidence', f'tool-result-{ordinal+1}',
+            sections.append(Section('evidence', section_name,
                 header.encode()+page_text(r.read(reader, reference, 16000))))
             refs.append(reference)
         if review is None and self.search and self.search.index:

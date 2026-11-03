@@ -19,7 +19,7 @@ Background source and English plans do not add hypotheses. Preserve all binders,
 universe signatures, and checked dependency aliases. Do not emit top-level commands.
 
 Choose one action using the CAPABILITIES section before filling its fields.
-Tool result sections identify the result ID and pages already displayed; use their
+Tool result sections identify stable names such as tool-result-1 and pages already displayed; use their
 contents directly. Delivered evidence is retained, subject to the configured
 input-token budget. Omission notices identify when older pages are outside this
 prompt. If a helper is disabled, choose an enabled helper or work on the proof
@@ -140,6 +140,7 @@ Use web_search when enabled to find resources and references, with a question an
 at most six public source URLs. Its results include source locations and hypotheses.
 Use returned references in your reasoning or ask the researcher how to apply them.
 Use page only with an offered cursor to read an additional page outside this prompt.
+For example, tool-result-1:2 requests page 2 of tool-result-1.
 
 Use stop when you believe this exact node cannot be proved. Explain why in
 rationale. Before stopping, identify the best next decomposition layer considered

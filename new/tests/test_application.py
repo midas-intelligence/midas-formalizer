@@ -557,8 +557,8 @@ class Contracts(unittest.TestCase):
                          [provider_route.scope, 1000, 500])))
             self.assertEqual(self.finish(run).exit_code, 0)
             self.assertEqual(len(calls), 1)
-            self.assertNotIn(archives[0].id.encode(), calls[0])
-            self.assertIn(archives[-1].id.encode(), calls[0])
+            self.assertNotIn(b'Result ID: tool-result-1\\n', calls[0])
+            self.assertIn(b'Result ID: tool-result-12\\n', calls[0])
             self.assertGreater(calls[0].count(b'Result ID:'), 2)
             self.assertLess(calls[0].count(b'Result ID:'), 12)
             self.assertIn(b'older evidence page(s) omitted', calls[0])
@@ -1108,11 +1108,12 @@ class Contracts(unittest.TestCase):
                 display = flow.display(reader, snapshot)
                 results = [s for s in prover.render(display).sections if s.kind == 'evidence']
                 self.assertEqual(len(results), 1)
-                self.assertEqual(results[0].name, 'tool-result-1')
-                self.assertIn(f'Result ID: {archive.id}\nPage 1 of {len(archive.pages)}.'.encode(), results[0].text)
+                self.assertEqual(results[0].name, 'tool-result-1-page-1' if large else 'tool-result-1')
+                self.assertIn(f'Result ID: tool-result-1\nPage 1 of {len(archive.pages)}.'.encode(), results[0].text)
+                self.assertNotIn(archive.id.encode(), results[0].text)
                 self.assertEqual(results[0].text.count(declaration.encode()), 1)
-                self.assertEqual(snapshot.allowed_pins, (archive.id,))
-                self.assertEqual(snapshot.cursors, tuple(f'{archive.id}:{i}' for i in range(1, len(archive.pages))))
+                self.assertEqual(snapshot.allowed_pins, ('tool-result-1',))
+                self.assertEqual(snapshot.cursors, tuple(f'tool-result-1:{i+1}' for i in range(1, len(archive.pages))))
                 work = flow.strategy.plan(snapshot, flow.policy).work[0]
                 prepared = flow.strategy.prepare_model(snapshot, flow.policy, work, display, Options('codex', 'fixture'))
                 capabilities = next(s.text for s in prepared.wire.snapshot.sections if s.kind == 'capabilities')
@@ -1125,8 +1126,13 @@ class Contracts(unittest.TestCase):
 
                 if large:
                     self.assertGreater(len(archive.pages), 8)
+                    for cursor in ('tool-result-2:2', f'{archive.id}:2', 'tool-result-1:0',
+                                   'tool-result-1:02', 'tool-result-1:1025'):
+                        with self.subTest(cursor=cursor), self.assertRaises(ValueError):
+                            page_effect(flow, reader, snapshot, prepared.turn,
+                                Work('page', owner, detail=r.pack([cursor, prepared.turn.id])), state)
                     for ordinal in range(1, len(archive.pages)):
-                        cursor = f'{archive.id}:{ordinal}'
+                        cursor = f'tool-result-1:{ordinal+1}'
                         self.assertIn(cursor, snapshot.cursors)
                         page = Work('page', owner, detail=r.pack([cursor, prepared.turn.id]))
                         state, _ = page_effect(flow, reader, snapshot, prepared.turn, page, state)
@@ -1167,8 +1173,18 @@ class Contracts(unittest.TestCase):
             sections = prover.render(run.workflow.display(run.writer, snapshot)).sections
             evidence = [s for s in sections if s.kind == 'evidence']
             self.assertEqual(len(evidence), 25)
-            for section, archive in zip(evidence, archives):
-                self.assertIn(f'Result ID: {archive.id}'.encode(), section.text)
+            for i, (section, archive) in enumerate(zip(evidence, archives), 1):
+                self.assertEqual(section.name, f'tool-result-{i}')
+                self.assertIn(f'Result ID: tool-result-{i}\n'.encode(), section.text)
+                self.assertNotIn(archive.id.encode(), section.text)
+            # Selecting only a later result must not renumber it.
+            from midas.application.service import commit
+            commit(run.writer, 'retain-last-page', r.save_owner(run.writer, owner.obligation_id,
+                replace(state, evidence=expected[-1:])))
+            snapshot = run.workflow.snapshot(run.writer, owner)
+            evidence = [s for s in run.workflow.display(run.writer, snapshot).sections if s.kind == 'evidence']
+            self.assertEqual(evidence[0].name, 'tool-result-25')
+            self.assertIn(b'Result ID: tool-result-25\n', evidence[0].text)
 
     def test_empty_retrieval_disables_node_retrieval_without_protocol_charge(self):
         from midas.provider import ModelOutput, Route

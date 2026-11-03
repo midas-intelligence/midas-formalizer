@@ -94,6 +94,7 @@ class PresentationTests(unittest.TestCase):
                 stages=[r.ref(artifacts.save(s.payload)) for s in stages],
                 results={str(s.ordinal): [s.ordinal, '', None, 'SUCCEEDED', [], list(s.action.names), [], None]
                          for s in stages}, parent=parent,
+                lookup_records=[[name, i] for i, name in enumerate(lookup.names)] if lookup else [],
                 turn=r.ref(artifacts.save((turn or prepared.turn).payload)))
             archives.append(archive)
             return archive
@@ -123,6 +124,11 @@ class PresentationTests(unittest.TestCase):
         for clutter in (b'Nat.mul_comm', b'Unrelated search excerpt', b'Search (', b'PROVER_RESEARCH', b'STALE_RESEARCH', b'STALE_WEB_SEARCH'):
             self.assertNotIn(clutter, text)
         self.assertEqual({ref for ref, _ in result}, set((*retrieval.pages, *fragmented.pages, *current.pages, *current_web.pages)))
+        for i, archive in enumerate(archives, 1):
+            for ref, content in result:
+                if ref in archive.pages:
+                    self.assertIn(f'Result ID: tool-result-{i}\n'.encode(), content)
+                    self.assertNotIn(archive.id.encode(), content)
         self.assertIn(b'Continued excerpt', text)
 
 
