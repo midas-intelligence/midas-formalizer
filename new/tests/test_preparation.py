@@ -26,6 +26,19 @@ class PreparationTests(unittest.TestCase):
         self.context = Context(self.root)
         self.context.cancellation = Event()
         self.context.deadline = time.monotonic()+30
+        # Exercise the binary search worker protocol in-process alongside the
+        # synthetic compiler. The production adapter now calls run_search.
+        def run_search(request):
+            import io
+            from types import SimpleNamespace
+            from midas.executor import Outcome
+            from midas.tools.search_process import _main
+            output = io.BytesIO()
+            with patch('sys.stdout', SimpleNamespace(buffer=output)):
+                _main(request)
+            return SimpleNamespace(outcome=Outcome.COMPLETED,
+                stdout=SimpleNamespace(data=output.getvalue()), stderr=SimpleNamespace(data=b''))
+        self.context.run_search = run_search
         runtime = self.environment.directory/'runtime/ld.so'
         bootstrap = Bootstrap(self.environment.launcher, self.environment.manifest.launcher_sha256, ())
         self.enterContext(patch('midas.environment.package._runtime', return_value=(runtime, (runtime,))))

@@ -146,7 +146,8 @@ def _main(request):
             if path is not None:
                 db = bm25._connect(path, cancel, deadline, readonly=True)
                 try:
-                    hits = bm25.ranked(db, query, prefixes, limit=limit)
+                    hits = bm25.ranked(db, query, prefixes, limit=limit,
+                                       check=lambda: bm25.stopped(cancel, deadline))
                     answer = ['hits', [[*row[:-1], row[-1].hex()] for row in hits]]
                 finally:
                     db.close()

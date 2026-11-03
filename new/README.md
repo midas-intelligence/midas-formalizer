@@ -1168,6 +1168,7 @@ modules plus `__init__.py`:
 | `tools/protocol.py` | Immutable scoped actions, binary requests, stable identities, bounded stage descriptions and probe-body expansion |
 | `tools/search.py` | Frozen source selectors, bounded search projection, hosted LeanExplore transport, worker execution and search receipt admission |
 | `tools/bm25.py` | Lexical declaration extraction, frozen-corpus SQLite FTS5 cache and file-scope preference |
+| `tools/bm25_score.py` | Compound token fields, identifier budgets and scoped span scoring |
 | `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
 | `tools/research.py` | Mathematical guidance validation and advisory evidence |
 | `tools/web_search.py` | Reference validation, recorded web actions, access claims, quote bounds and advisory provenance |
@@ -1253,15 +1254,43 @@ bytes again. A missing, outdated or corrupt package index falls back to the
 application cache, keyed by the same corpus key. Files, postings and ranges use
 SQLite/raw bytes, without JSON corpus serialization or a GPU/model dependency.
 
-The index uses the tested BM25 field weights: names 3, documentation 2, lexical
-headers 1. Tokens retain words and camel-case components; there is no stemming,
-additional normalization or score cutoff. Query terms are ORed. Filtering happens
-before the best 100 candidates are selected, with corpus-wide IDF. Exact identifier
+The index stores nine fields: lexical tokens, adjacent pairs, and adjacent triples,
+each with name/documentation/header weights 3/2/1. Tokens retain words and ASCII
+camel-case components, without stemming. Underscores and camel boundaries form
+compound components; dots separate query units. Repeated equivalent query units
+do not receive additional weight.
+
+Each candidate is scored separately. Matching triples are selected before pairs,
+with left-to-right ties and no overlapping positions. A selected `k`-component
+span receives `k/N` of its identifier's score budget. Uncovered components receive
+50% lexical credit within the remaining budget. If no compound matches, that
+identifier receives 50% of its mean lexical score; ordinary words retain full
+weight. This prevents longer identifiers from gaining weight simply by producing
+more compound tokens. All postings are considered before the best 100 candidates
+are selected, with scope filtering and corpus-wide IDF. Exact identifier
 queries (including `_root_.` spellings) use checked lookup instead of an index
 name match; successful lookups precede BM25 matches in retrieval evidence. Scores
 get a 1.5× ranking multiplier only for an explicitly selected file/module;
-directories grant no bonus. Ties preserve baseline ordering. Evidence retains raw
-BM25 scores.
+directories grant no bonus. Ties preserve candidate ordering. Evidence retains
+the compound/component score before the file multiplier.
+
+The production scorer uses sparse compound replacements and native SQL fallback.
+Component ID filters scan term postings instead of repeatedly seeking common
+terms. Temporary scope/scoring tables are confined to a query savepoint and are
+removed on success or cancellation without committing a caller's transaction.
+The `midas-bm25-source-v3-compound-spans` format changes the corpus key, so older
+three-field package indexes fall back to a freshly built disposable cache; newly
+prepared packages include the compound index. No package environment ID changes.
+
+Enabled in the production local-search path on 2026-11-03. Validation included
+93 offline tests, nine-field equality for all 249,981 frozen corpus entries, and
+unchanged top100 order/scores on all 232 frozen queries (23,100 candidate positions).
+The real Lean retrieval check passed package-index reuse with a fresh application
+cache, generated-name lookup, 12 detailed/50 total results, selected-name followups,
+proof continuation, and authenticated resume. Validation artifacts and source
+hashes are under `.local/search-production-20261103`. The experiment notes below
+describe the pre-integration runs; their statements that production was unchanged
+refer to those earlier runs.
 
 Search returns up to 50 results. The first 12 include source excerpts (up to 6000
 UTF-8 bytes each); subsequent named hits carry only names in the display. Lookup
@@ -1378,6 +1407,281 @@ Its 25 results and first 12 details fit in a single page (9.1 KB of display text
 # Requires root AGENTS.md permission for Lean/bubblewrap:
 ../.venv/bin/python -B -m tests.check_search_lean /absolute/path/to/toolchain/bin/lean
 ```
+
+`tests.benchmark_search_pretrained` compares binary SentencePiece tokenizers with
+the lexical baseline, either replacing or appending tokens. Run the module with
+`--help` for its source corpus, reference index, query/judgment TSV and model-file
+arguments. Its optional experimental dependencies are `sentencepiece==0.2.1` and
+`protobuf==6.33.0`; production search does not depend on them. It writes SQLite/TSV,
+checks corpus identity and repeated ranking stability, and reports index size,
+token counts, retrieval latency and recovery of previously judged direct results.
+Unjudged hits remain unjudged. Different pretrained models do not isolate the
+effect of vocabulary size. The dependency-free benchmark guards run with
+`python -B -m unittest tests.test_search_pretrained`.
+
+`tests.benchmark_search_long_tokens` tests adding two/three adjacent identifier
+components and custom corpus-trained BPE pieces. The BPE variants use 8,192 and
+32,768 vocabulary entries, either adding all pieces or only pieces at least four
+characters long. All variants retain baseline lexical tokens. Training uses only
+source declarations, documentation and statement headers; queries and judgments
+are evaluation inputs. It reuses the extracted `corpus.sqlite` and frozen query
+and target TSVs from the earlier benchmark, and writes to a fresh output directory:
+
+```bash
+PYTHONPATH=new /path/to/sentencepiece-venv/bin/python -B -m tests.benchmark_search_long_tokens \
+  --corpus /path/to/corpus.sqlite --queries /path/to/queries.tsv \
+  --targets /path/to/targets.tsv --output /path/to/new-output-directory
+PYTHONPATH=new .venv/bin/python -B -m unittest tests.test_search_long_tokens -q
+```
+
+Pass `--vocab-sizes` with no values for the dependency-free compound experiment.
+The output includes model files, input hashes, build costs, repeated query timings,
+rankings and paired target recovery, including an `eq`/`dvd`/`pi` query subset.
+These are source-only development experiments, with global scope, fixed BM25
+weights and candidate limits, and no Lean execution. Known-target recovery does
+not measure complete relevance or proof success. Production tokenization is unchanged.
+
+On 2026-11-03, six variants were replayed over 249,981 declarations and 200 frozen
+queries (138 with known indexed direct targets). Compound tokens increased
+success@1 from 74 to 82 and success@50 from 120 to 123, with success@12 unchanged
+at 110; median warm retrieval rose from 23.12 to 23.85 ms and index size from
+55.40 to 68.01 MiB. Adding only BPE pieces of at least four characters increased
+success@5 on the 17 target-bearing `eq`/`dvd`/`pi` queries from 11 to 14, but had
+mixed overall recovery. The 32,768-entry version reached 111/138 at top 12 and
+119/138 at top 50, at 24.99 ms. These results support further experimentation,
+not an unconditional replacement: compound tokens also moved the direct target
+for `δ toOrderHom succAbove` from rank 3 to 47. All 200 baseline rankings matched
+the earlier experiment and repeated rankings were stable; 29 offline tests passed.
+
+`tests.benchmark_search_token_weights` extends that experiment using the same
+models and frozen inputs. It sweeps minimum added BPE lengths 1–6 and compound
+weights 1×, 2×, 4× and 8×. Lexical and compound tokens occupy separate FTS fields
+with weights `(3,2,1)` and `(3w,2w,w)`; all weights share one index and unchanged
+document lengths. These weights affect term frequency before BM25 saturation,
+so they are not linear multipliers of the final score. Weighting applies before
+the candidate cutoff. The 1× configuration must reproduce the previous compound
+rankings, and reused baseline/BPE configurations must reproduce their old rankings.
+
+```bash
+PYTHONPATH=new /path/to/sentencepiece-venv/bin/python -B -m tests.benchmark_search_token_weights \
+  --previous /path/to/long-token-output --output /path/to/new-sweep-output
+PYTHONPATH=new .venv/bin/python -B -m unittest tests.test_search_token_weights -q
+```
+
+`--minimums`, `--weights` and `--trials` override the sweep. Output includes
+per-query ranks, paired gains/losses, latency, build costs and index/input hashes.
+The length threshold counts underscores as characters, consistently with the
+earlier experiment; all original lexical tokens remain searchable.
+
+The 2026-11-03 threshold sweep completed 10,200 retrieval executions. For the
+32,768-entry model, minimum length 2 gave top-1/5/12/50 recovery of
+78/103/111/121 versus 76/104/111/119 at minimum 4, with warm medians of
+24.33 versus 23.63 ms. Thus four characters is not an established optimum.
+Uniform compound weight 8× increased top-5 recovery from 101 to 104 versus 1×,
+with top-12 unchanged at 110 and top-50 decreasing from 123 to 122.
+Their warm medians were 23.06 and 23.00 ms. The dropped known target does not
+establish that its newly promoted replacement is irrelevant; labels are incomplete.
+
+`tests.benchmark_search_compound_lengths` further separates two-component and
+three-component compounds into independent field groups. Name/documentation/
+statement weights are `(3,2,1)` for lexical tokens, `(3p,2p,p)` for pairs, and
+`(3t,2t,t)` for triples. Splitting the fields preserves token counts and document
+lengths. Triples receive their own weight while their constituent pairs also
+remain indexed. The default sweep compares pair/triple weights `1:2`, `1:4`,
+`2:4`, `2:8` with equal-weight controls `1:1`, `2:2`, `4:4`, `8:8`.
+
+```bash
+PYTHONPATH=new .venv/bin/python -B -m tests.benchmark_search_compound_lengths \
+  --previous /path/to/token-weight-output --output /path/to/new-length-output
+PYTHONPATH=new .venv/bin/python -B -m unittest tests.test_search_compound_lengths -q
+```
+
+This sweep requires no SentencePiece dependency. `--weights` accepts distinct
+positive `pair:triple` values; `--trials` sets alternating replay passes. Equal
+weights are checked against the previous sweep, and repeated rankings must match.
+
+On 2026-11-03, the independent pair/triple sweep completed 5,400 executions;
+all controls and repeats matched, and 34 offline tests passed. Only 33 queries
+contained triples, including 29 with known targets. Pair/triple weights `2:8`
+improved top-5 recovery from 102 to 103 versus `2:2`, with top-12/top-50 unchanged
+at 110/122 and warm medians of 23.38/23.33 ms. The other tested triple-only
+increases (`1:2`, `1:4`, `2:4`) changed individual ranks but no measured cutoff
+counts. The shared nine-field index was 72.37 MiB, built in 18.83 seconds.
+These results support independent configuration but do not establish optimal
+weights; queries without triples were unchanged when only triple weight changed.
+
+`tests.benchmark_search_identifier_budgets` tests the overlapping-token bias
+directly. `compound-budget` divides each query unit's added-compound scores by
+its total number of generated compounds; lexical weights stay at one.
+`identifier-budget` instead gives its lexical and compound tokens one shared
+budget, dividing all their scores by the total generated-token count. Both
+denominators include unmatched tokens. Units retain underscores and camelCase;
+dots, whitespace and punctuation are boundaries. Equivalent repeated units are
+deduplicated, and tokens shared by different units accumulate their contributions.
+
+```bash
+PYTHONPATH=new .venv/bin/python -B -m tests.benchmark_search_identifier_budgets \
+  --previous /path/to/compound-length-output --output /path/to/new-budget-output
+PYTHONPATH=new .venv/bin/python -B -m unittest tests.test_search_identifier_budgets -q
+```
+
+The experiment reuses the nine-field index with unit pair/triple weights.
+Normalization multiplies BM25 score contributions after term-frequency
+saturation. Terms with equal coefficients share one FTS query; SQL sums those
+weighted contributions across all matches before selecting the top 100. There
+is no per-group candidate cutoff. A common coefficient uses native FTS ranking.
+Query coefficients are recorded as exact fractions in `query-weights.tsv`.
+
+On 2026-11-03, 2,400 executions were stable and reproduced both previous controls;
+37 offline tests passed. Across 138 queries with known targets, unnormalized
+compounds gave top-1/5/12/50 recovery of 82/101/110/123. Compound-only budgets
+gave 83/103/111/123; full identifier budgets gave 79/105/114/124. The latter
+added four top-12 successes with no losses versus unnormalized compounds, but
+lost three net rank-1 successes. For `δ toOrderHom succAbove`, the known direct
+target moved from rank 47 to 4 with compound-only normalization and to 2 with
+full normalization. Warm medians were 24.07, 23.58 and 24.32 ms respectively;
+p95 was 112.17, 110.05 and 122.27 ms. These are development results over incomplete
+target sets; production search remains unchanged. Budgets remove amplification
+from token count while preserving BM25's IDF and term-frequency differences.
+
+`tests.benchmark_search_compound_fallback` tests compound-first scoring for each
+candidate and query unit independently. If any generated compound matches, the
+unit contributes its mean compound BM25 score and no lexical score. Otherwise
+it contributes `discount * mean lexical score`. Units that generate no compounds
+retain their ordinary mean lexical score. Means divide by all generated tokens
+in their channel, including unmatched tokens, preserving the normalization.
+Pairs and triples have equal weights, and a partial pair match selects the
+compound branch. A compound match in one result does not disable component
+fallback in other results or for other query units.
+
+```bash
+PYTHONPATH=new .venv/bin/python -B -m tests.benchmark_search_compound_fallback \
+  --previous /path/to/identifier-budget-output --output /path/to/new-fallback-output
+PYTHONPATH=new .venv/bin/python -B -m unittest tests.test_search_compound_fallback -q
+```
+
+The default discounts are `0`, `0.1`, `0.25`, `0.5`, and `1`; override them with
+`--discounts`. Discount 1 isolates branch selection without discounting fallback;
+discount 0 removes component-only contributions for compound-capable units.
+SQL groups all matching postings by candidate and query unit before selecting
+the top 100; there is no earlier candidate cutoff. The existing index is reused.
+
+On 2026-11-03, 4,200 executions reproduced both controls and stable repeats;
+40 offline tests passed. Against full identifier normalization's top-1/5/12/50
+recovery of 79/105/114/124, fallback weight 0.5 gave 84/108/115/123. It added one
+top-12 success (`indepFun coordinates pi measure`, rank 16 to 6) with no losses
+at that cutoff, while the known `orderIsoFin` target dropped from the top 50.
+Weights 0, 0.1, 0.25, 0.5 and 1 gave top-12 counts 114, 114, 114, 115 and 115,
+and top-50 counts 122, 122, 123, 123 and 122. All fallback variants reached 84
+at rank 1 and 108 within top 5. The 0.5 prototype's warm median/p95 were
+31.76/165.01 ms versus 24.88/122.45 ms for normalization; zero fallback was
+13.39/70.62 ms because component-only postings can be omitted. This is tuning
+on the same incomplete development labels, not held-out proof validation.
+Production search remains unchanged.
+
+`tests.benchmark_search_uncovered` compares that 50% fallback with non-overlapping
+compound spans. Matching triples are selected before pairs, with left-to-right
+ties. Each selected span of length `k` receives `k/N` of its identifier's budget;
+covered components receive no additional credit. `spans-fallback` gives uncovered
+components `0.5/N` lexical credit; `spans-only` gives them zero. Both retain 50%
+mean lexical fallback when no compound matches. This is greedy span selection,
+not maximum-weight interval selection. Scoring covers all postings before top100
+and reuses the existing index.
+
+```bash
+PYTHONPATH=new .venv/bin/python -B -m tests.benchmark_search_uncovered \
+  --previous /path/to/compound-fallback-output --output /path/to/new-span-output
+PYTHONPATH=new .venv/bin/python -B -m tests.benchmark_search_uncovered \
+  --previous /path/to/compound-fallback-output --output /path/to/new-fresh-output \
+  --queries /path/to/frozen-queries.tsv --targets /path/to/frozen-targets.tsv
+PYTHONPATH=new .venv/bin/python -B -m unittest tests.test_search_uncovered -q
+```
+
+On 2026-11-03, 2,088 executions covered the archived 200 queries and 32 fresh
+authored queries, with three variants and three trials. Controls and repeated
+rankings passed; 43 offline search tests passed. On the 138 archived queries with
+targets, baseline / spans-only / spans-fallback recovered **84/108/115/123**,
+**84/106/115/123**, and **85/108/115/124** at top1/5/12/50. Partial credit restores
+`orderIsoFin` at rank41, while top12 recovery is unchanged.
+
+Fresh queries and intent were frozen before target lookup and scorer runs. Their
+37 indexed targets span 27 queries. Baseline / spans-only / spans-fallback give
+**13/18/20/23**, **13/18/22/23**, and **13/19/22/24** at top1/5/12/50. Both new
+variants improve `lcm_dvd_iff` from rank19 to12 and quotient membership from19
+to7/to3, with no top12 losses. Partial credit avoids the ablation's coprimality
+top50 loss, but that query still regresses from23 to48 versus baseline.
+
+Source review of 408 pooled query/declaration cards, with scorer names and ranks
+hidden and judgments frozen before comparative analysis, found a direct top12
+result for **22/32**, **24/32**, and **24/32** queries. Direct slots increased
+from31 to33 out of384; direct-or-support slots rose from149 to157/to158. No direct
+top12 result was lost; one query lost a supporting result. One truncated source
+header remained unknown. Five queries lacked frozen indexed targets and were
+excluded from known-target counts, but retained in top12 review. This small
+authored set and same-assistant source review are not independent human labels,
+live-traffic evaluation, or Lean validation.
+
+Warm median/p95 over all32 fresh queries were **40.56/97.93**, **65.34/161.24**,
+and **81.03/196.26 ms**. On the archived target-bearing subset they were
+31.00/160.09, 41.42/249.79, and 45.29/306.41 ms. The partial-credit scorer is the
+preferred quality candidate, but its Python SQLite aggregate needs profiling
+before production integration; these measurements do not establish v2 performance
+parity. Production search remains unchanged. Full local results and the frozen
+review are under `.local/search-uncovered-{development,holdout,fresh-inputs}-20261103`;
+the holdout directory contains `report.txt` and reproducible `analyze.py`.
+
+`tests.benchmark_search_uncovered_fast` implements the same span rule with sparse
+compound replacements. It selects spans only for documents with compound matches
+and asks FTS for uncovered-component scores restricted to those document IDs.
+BM25 statistics still come from the full index. Ordinary lexical fallback runs in
+native SQL; a connection-local temporary table replaces fallback contributions
+for matching compound units. That table is dropped after scoring. All matching
+postings are considered before the candidate cutoff, and the index is unchanged.
+
+`tests.profile_search_uncovered` interleaves the previous compound-first scorer,
+the frozen span reference, and the optimized scorer. It uses production SQLite
+temporary-file settings and deadline polling, checks the frozen top50 results,
+compares complete top100 ordering and scores, and profiles after timing. The first
+trial warms caches; three measured trials follow by default. Score comparisons
+allow floating-point roundoff from native BM25 summation.
+
+```bash
+PYTHONPATH=new .venv/bin/python -B -m tests.profile_search_uncovered \
+  --references /path/to/development-span-output /path/to/fresh-span-output \
+  --output /path/to/new-profile-output
+PYTHONPATH=new .venv/bin/python -B -m unittest tests.test_search_uncovered_fast -q
+```
+
+Profiling on 2026-11-03 found 849,299 span-aggregate objects for the 32 fresh
+queries, although only 7,520 groups had compound matches. Sparse replacement
+removes those aggregate callbacks. A second bottleneck came from FTS seeking
+separately for each ID in an uncovered-component filter. Using `+rowid IN (...)`
+keeps a term posting scan followed by filtering; it preserves full-index BM25
+statistics and avoids repeated seeks for common terms such as `of` and `iff`.
+
+The final interleaved replay made 2,784 retrievals. Top 100 ordering was identical
+on all 232 queries (23,100 candidate positions), all top 50 results matched the
+frozen reference, and repeated rankings were stable. Maximum score roundoff was
+`3.56e-15`. The 45 offline search tests passed, including all-score comparisons
+for overlapping/repeated spans, camelCase, empty/stopword-only queries, and
+component filtering across multiple batches.
+
+Warm median/p95 in ms, measured in the same run:
+
+| Query set | Previous 50% compound-first | Frozen span reference | Optimized spans |
+| --- | --- | --- | --- |
+| All 200 archived queries | 33.23 / 172.13 | 42.48 / 303.60 | 29.33 / 146.05 |
+| All 32 fresh queries | 44.31 / 125.92 | 81.34 / 257.27 | 34.57 / 120.00 |
+
+On the archived 138-query target-bearing subset, optimized median/p95 were
+26.68/155.49 ms. Fresh-process peak RSS over the 32 fresh queries was 35.58 MiB
+for optimized spans versus 38.54 MiB for the reference. Full-index scans still
+dominate broad queries: `orderIsoOfFin` improved from 326.39 to 148.86 ms, and
+`IsCompact.exists_isMaxOn` from 482.86 to 222.55 ms. These are offline retrieval
+measurements, excluding index construction and full tool-call execution; they do
+not establish end-to-end parity with v2. Production remains unchanged. Results,
+profiles, query plans, source hashes and `report.txt` are under
+`.local/search-uncovered-optimized-filter-20261103`.
 
 Validation of body-only probes and readable evidence on 2026-10-17: **144 offline
 tests passed**, plus the real Lean application integration check. Coverage includes

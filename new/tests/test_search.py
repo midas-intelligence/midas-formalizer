@@ -129,6 +129,106 @@ class SearchTests(unittest.TestCase):
         self.assertFalse(self.search(index, 'the and').records)
         self.assertFalse(self.search(index, 'NEAR(foo) OR "bar"*').records)
 
+    def test_compound_scoring_matches_frozen_reference_and_isolated_worker(self):
+        from math import isclose
+        from tests.benchmark_search_uncovered import uncovered_ranked
+        from tests.benchmark_search_compound_lengths import split_compounds
+        from midas.tools import bm25_score
+        source = ('namespace N\n'
+                  '/-- fin -/\ndef order_iso : Nat := 0\n'
+                  'def order_iso_fin : Nat := 0\n'
+                  '/-- order iso fin -/\ndef fallback : Nat := 0\n'
+                  'def order_order_iso : Nat := 0\n'
+                  'def the_and : Nat := 0\nend N\n')
+        index = self.index(('lib/Mathlib/A.lean', source))
+        for name, _, _, _, _, doc, header in bm25.documents(source):
+            values = name, doc, header
+            split = [split_compounds(v) for v in values]
+            expected = (*map(bm25.token_text, values), *(p for p,t in split), *(t for p,t in split))
+            self.assertEqual(bm25_score.fields(*values), expected)
+        with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
+            for query in ('orderIsoFin', 'order_iso_fin', 'order_order_iso_fin', 'the_and', 'the and'):
+                reference = uncovered_ranked(db, query, .5)
+                expected = [(db.execute('SELECT name FROM documents WHERE id=?', (doc,)).fetchone()[0], -score)
+                            for doc,score in reference]
+                result = bm25.ranked(db, query, ('lib/Mathlib',))
+                self.assertEqual([r[0] for r in result], [name for name,score in expected])
+                self.assertTrue(all(isclose(r[-1], score, rel_tol=1e-13, abs_tol=1e-15)
+                                    for r,(_,score) in zip(result,expected)))
+                self.assertFalse(db.in_transaction)
+                self.assertFalse(db.execute('SELECT name FROM sqlite_temp_master').fetchall())
+        self.assertEqual(self.isolated_search(index, 'orderIsoFin'),
+                         self.search(index, 'orderIsoFin', prefixes=()))
+
+    def test_compound_scope_filters_before_top100_with_global_scores(self):
+        from tests.benchmark_search_uncovered import uncovered_ranked
+        index = self.index(('lib/Mathlib/A.lean',
+                            ''.join(f'def other{i}_order_iso_fin : Nat := 0\n' for i in range(150))),
+                           ('lib/Mathlib/B.lean', 'def target_order_iso : Fin 4 := by sorry\n'))
+        result = self.search(index, 'order_iso_fin', ('Mathlib/B.lean',))
+        self.assertEqual([r.names for r in result.records], [('target_order_iso',)])
+        with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
+            doc, = db.execute("SELECT id FROM documents WHERE name='target_order_iso'").fetchone()
+            expected = -dict(uncovered_ranked(db, 'order_iso_fin', .5, limit=1000))[doc]
+            self.assertAlmostEqual(result.records[0].score, expected, places=13)
+
+    def test_compound_cancellation_cleans_query_tables_and_preserves_outer_transaction(self):
+        index = self.index(('lib/Mathlib/A.lean', 'def order_iso : Fin 4 := by sorry\n'))
+        with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
+            def cancel_in_scoring():
+                if db.execute("SELECT 1 FROM sqlite_temp_master WHERE name='scope_docs'").fetchone():
+                    raise TimeoutError('cancelled compound scoring')
+            with self.assertRaisesRegex(TimeoutError, 'compound scoring'):
+                bm25.ranked(db, 'order_iso_fin', ('lib/Mathlib',), check=cancel_in_scoring)
+            self.assertFalse(db.in_transaction)
+            self.assertFalse(db.execute('SELECT name FROM sqlite_temp_master').fetchall())
+            db.execute('BEGIN')
+            self.assertTrue(bm25.ranked(db, 'order_iso_fin', ('lib/Mathlib',)))
+            self.assertTrue(db.in_transaction)
+            db.rollback()
+
+    def test_old_index_format_rebuilds_without_modifying_prepared_package(self):
+        import sqlite3
+        index = self.index(('lib/Mathlib/A.lean', 'def order_iso : Fin 4 := by sorry\n'))
+        path = self.cache/'prepared.sqlite'
+        with patch.object(bm25, 'FORMAT', b'midas-bm25-source-v2'):
+            old_key = bm25.corpus_key(index)
+        self.assertNotEqual(index.search_key, old_key)
+        with sqlite3.connect(path) as db:
+            db.execute('CREATE TABLE metadata(key TEXT PRIMARY KEY)')
+            db.execute('INSERT INTO metadata VALUES(?)', (old_key,))
+            db.execute("CREATE VIRTUAL TABLE terms USING fts5(name,documentation,statement,content='')")
+        before = path.read_bytes()
+        self.assertEqual(self.search(index, 'order_iso_fin', prepared_path=path).records[0].names, ('order_iso',))
+        self.assertEqual(path.read_bytes(), before)
+        with sqlite3.connect(self.cache/(index.search_key+'.sqlite')) as db:
+            self.assertEqual(len(db.execute('PRAGMA table_info(terms)').fetchall()), 9)
+
+    def test_sqlite_interrupt_during_scope_write_preserves_error_and_cleans_state(self):
+        import sqlite3
+        index = self.index(('lib/Mathlib/A.lean', 'def order_iso : Fin 4 := by sorry\n'))
+        with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
+            state = {'armed': False, 'fired': False}
+            def authorize(action, table, *args):
+                if action == sqlite3.SQLITE_INSERT and table == 'scope_docs':
+                    state['armed'] = True
+                return sqlite3.SQLITE_OK
+            def interrupt():
+                if state['armed'] and not state['fired']:
+                    state['fired'] = True
+                    return 1
+                return 0
+            db.set_authorizer(authorize)
+            db.set_progress_handler(interrupt, 1)
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'interrupted'):
+                bm25.ranked(db, 'order_iso_fin', ('lib/Mathlib',))
+            db.set_authorizer(None)
+            db.set_progress_handler(None, 0)
+            self.assertTrue(state['fired'])
+            self.assertFalse(db.in_transaction)
+            self.assertFalse(db.execute('SELECT name FROM sqlite_temp_master').fetchall())
+            self.assertTrue(bm25.ranked(db, 'order_iso_fin', ('lib/Mathlib',)))
+
     def test_lexical_documents_bind_headers_docs_and_source_ranges(self):
         source = ('namespace N\n/-- α documentation -/\n@[simp]\n'
             'theorem result (n : Nat := 2) : n = n := by\n  rfl\n\n'

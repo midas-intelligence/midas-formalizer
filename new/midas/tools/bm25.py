@@ -18,15 +18,14 @@ import time
 from ..domain.encoding import hash_field
 from ..source import code_only, declaration_names, parse_identifier
 from .protocol import read
+from . import bm25_score
+from .bm25_score import STOP, token_text
 
 FILE_BYTES = 2 * 1024**2
 CORPUS_BYTES = 512 * 1024**2
 CANDIDATES = 100
 DETAILS = 12
 TOTAL = 50
-STOP = frozenset(('the', 'and', 'that', 'with', 'from', 'have', 'exists', 'such', 'this', 'are', 'two', 'for'))
-_WORDS = re.compile(r'[^\W_]+')
-_CAMEL = re.compile(r'([a-z])([A-Z])')
 _ATTR = re.compile(r'@\[[^\]]*\]')
 _COMMENT_BOUNDARY = re.compile(r'/-|-/')
 _MODIFIERS = r'(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*'
@@ -38,29 +37,13 @@ _COMMAND = re.compile(r'(?m)^(?P<indent>[ \t]*)'+_MODIFIERS+
     r'alias|export|syntax|macro|elab|notation|infix[lr]?|prefix|postfix|mutual|deriving)\b')
 _HEADER_TOKEN = re.compile(r'«[^»]*»|:=|[()\[\]{}⟨⟩]|(?<![\w.])(?:where|let|match|by|do)(?![\w.])|(?m:^\s*\|)')
 _OPEN = {'(': ')', '[': ']', '{': '}', '⟨': '⟩'}
-WEIGHTED_RANK = 'bm25(3.0, 2.0, 1.0)'
-FORMAT = b'midas-bm25-source-v2'
+WEIGHTED_RANK = bm25_score.RANK
+FORMAT = b'midas-bm25-source-v3-compound-spans'
 
 
 def stopped(cancel, deadline):
     if cancel.is_set() or time.monotonic() >= deadline:
         raise TimeoutError('Search cancelled or deadline exceeded')
-
-
-def token_text(value):
-    """Original experiment tokenizer: retain words and camel components.
-
-    Multiplicity is term frequency. No stemming, singularization, identifier
-    encoding, or query-score normalization is applied.
-    """
-    out = []
-    for word in _WORDS.findall(value):
-        parts = _CAMEL.sub(r'\1 \2', word).split()
-        for term in ([word] if len(parts) == 1 else [word, *parts]):
-            folded = term.casefold()
-            if folded not in STOP:
-                out.append(folded)
-    return ' '.join(out)
 
 
 def _statement_end(clean):
@@ -187,6 +170,8 @@ def _build(path, key, index, reader, cancel, deadline):
             CREATE INDEX names ON documents(name);
             CREATE INDEX source_files ON documents(file);
             CREATE VIRTUAL TABLE terms USING fts5(name, documentation, statement,
+                pair_name, pair_documentation, pair_statement,
+                triple_name, triple_documentation, triple_statement,
                 content='', tokenize='unicode61 remove_diacritics 0');
         ''')
         db.execute("INSERT INTO terms(terms,rank) VALUES('rank',?)", (WEIGHTED_RANK,))
@@ -199,8 +184,10 @@ def _build(path, key, index, reader, cancel, deadline):
                     stopped(cancel, deadline)
                 row = db.execute('INSERT INTO documents(name,file,line,start_line,start,end) VALUES(?,?,?,?,?,?)',
                     (name, file, line, start_line, start, end))
-                db.execute('INSERT INTO terms(rowid,name,documentation,statement) VALUES(?,?,?,?)',
-                    (row.lastrowid, token_text(name), token_text(doc), token_text(header)))
+                db.execute('INSERT INTO terms(rowid,name,documentation,statement,'
+                    'pair_name,pair_documentation,pair_statement,'
+                    'triple_name,triple_documentation,triple_statement) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                    (row.lastrowid, *bm25_score.fields(name, doc, header)))
         db.execute("INSERT INTO terms(terms) VALUES('optimize')")
         db.execute('INSERT INTO metadata VALUES(?)', (key,))
         db.commit()
@@ -274,10 +261,10 @@ def database(index, reader, cancel, deadline, cache_directory=None, *, prepared_
         db.close()
 
 
-def ranked(db, query, prefixes, *, limit=TOTAL):
+def _ranked(db, query, prefixes, limit, check):
     """Filter before top-100, preserving corpus IDF; then apply file preference.
 
-    Scores returned to evidence are raw BM25.
+    Scores returned to evidence use normalized compound/component budgets.
     The 1.5 multiplier affects ordering only. Stable ties preserve FTS order.
     """
     db.execute('CREATE TEMP TABLE scope_docs(id INTEGER PRIMARY KEY, preferred INTEGER NOT NULL)')
@@ -287,15 +274,8 @@ def ranked(db, query, prefixes, *, limit=TOTAL):
             WHERE f.path=? OR (f.path>=? AND f.path<?)
             ON CONFLICT(id) DO UPDATE SET preferred=max(preferred,excluded.preferred)''',
             (prefix, prefix, prefix+'/', prefix+'0'))
-    query = query.strip()
-    candidates = []
-    terms = dict.fromkeys(token_text(query).split())
-    if terms:
-        expression = ' OR '.join('"'+term.replace('"', '""')+'"' for term in terms)
-        for id, score in db.execute('''SELECT rowid,rank FROM terms WHERE terms MATCH ?
-                AND EXISTS (SELECT 1 FROM scope_docs s WHERE s.id=terms.rowid)
-                ORDER BY rank LIMIT ?''', (expression, CANDIDATES)):
-            candidates.append((id, -score))
+    candidates = [(doc, -score) for doc, score in
+                  bm25_score.candidates(db, query.strip(), CANDIDATES, check)]
     hits = []
     for id, score in candidates:
         row = db.execute('''SELECT d.name,f.path,d.line,d.start_line,d.start,d.end,s.preferred
@@ -313,3 +293,17 @@ def ranked(db, query, prefixes, *, limit=TOTAL):
         if len(result) == limit:
             break
     return result
+
+
+def ranked(db, query, prefixes, *, limit=TOTAL, check=lambda: None):
+    """Keep temporary scoring state inside one request, including on failure."""
+    check()
+    db.execute('SAVEPOINT search_query')
+    try:
+        return _ranked(db, query, prefixes, limit, check)
+    finally:
+        # Interrupting a SQLite write can already roll back the transaction,
+        # including this savepoint. Preserve the original interruption error.
+        if db.in_transaction:
+            db.execute('ROLLBACK TO search_query')
+            db.execute('RELEASE search_query')

@@ -178,7 +178,8 @@ def source_search(stage, index, reader, cancel, deadline, *, cache_directory=Non
     prefixes = index.resolve(action.backend.prefixes) if action.backend.prefixes else index.roots
     if context is None:
         with database(index, reader, cancel, deadline, cache_directory, prepared_path=prepared_path) as db:
-            hits = ranked(db, action.query, prefixes, limit=action.limit)
+            hits = ranked(db, action.query, prefixes, limit=action.limit,
+                          check=lambda: stopped(cancel, deadline))
     else:
         from .search_process import search_hits
         hits = search_hits(index, reader, action, prefixes, context,
