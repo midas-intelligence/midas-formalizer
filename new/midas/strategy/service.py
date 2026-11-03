@@ -105,12 +105,13 @@ class Strategy:
                 details += '\nReview subject: stop request; accept stops this node; reject continues proof work.'
         else:
             availability = []
+            mode_names = {'direct': 'proof', 'decomposition': 'decomposition'}
             if len(snapshot.context.subjects) != 1:
                 availability.append('proof/decomposition: unavailable (requires one subject); use candidate')
             if snapshot.base is None:
                 availability.append('revise: unavailable (no existing candidate)')
             elif snapshot.base.mode not in modes:
-                availability.append(f'revise: unavailable ({snapshot.base.mode} mode unavailable)')
+                availability.append(f'revise: unavailable ({mode_names[snapshot.base.mode]} mode unavailable)')
             else:
                 availability.append('revise: available')
             availability.extend(mode+': disabled' for mode in ('research', 'web_search') if mode not in helpers)
@@ -118,7 +119,7 @@ class Strategy:
                 availability.append('retrieve: disabled (previous request had no usable queries or names)')
             if not snapshot.cursors:
                 availability.append('page: unavailable (no additional pages outside this prompt)')
-            details = ('Candidate modes: ' + ', '.join(modes) + '\nHelper modes: ' +
+            details = ('Candidate modes: ' + ', '.join(mode_names[mode] for mode in modes) + '\nHelper modes: ' +
                 ', '.join(helpers) + '\n' + '\n'.join(availability))
             if snapshot.cursors:
                 details += '\nSaved evidence not included in this prompt:\n'+'\n'.join(

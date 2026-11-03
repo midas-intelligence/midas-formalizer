@@ -156,13 +156,9 @@ def expand_probe_bodies(cases):
     """Lower model-authored TacticM bodies into bounded internal checker cases."""
     if type(cases) is not list or not 1 <= len(cases) <= 3:
         raise ValueError('Expected 1 through 3 probe cases')
-    ids, expanded = set(), []
-    for case in cases:
-        codec.fields(case, ('id', 'code'))
-        if (type(case['id']) is not str or re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,47}', case['id']) is None
-                or case['id'] in ids):
-            raise ValueError('Invalid or duplicate probe case ID')
-        ids.add(case['id'])
+    expanded = []
+    for index, case in enumerate(cases, 1):
+        codec.fields(case, ('code',))
         text(case['code'], 'probe body', 16000)
         body = code_only(case['code'])
         if not body.strip() or re.match(r'\s*(?:by|run_tac|run_elab|do)\b', body):
@@ -170,7 +166,7 @@ def expand_probe_bodies(cases):
         code = 'run_tac do\n'+indent(case['code'], '  ')
         if len(code.encode()) > 16000:
             raise ValueError('Generated probe code exceeds 16000 UTF-8 bytes')
-        expanded.append(dict(id=case['id'], code=code, operation='tactic', setup='', expected=None))
+        expanded.append(dict(id=f'case{index}', code=code, operation='tactic', setup='', expected=None))
     return tuple(expanded)
 
 

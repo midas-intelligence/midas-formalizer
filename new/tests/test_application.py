@@ -955,9 +955,9 @@ class Contracts(unittest.TestCase):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         retrieve = dict(mode='retrieve', rationale='Find and inspect addition.', queries=['addition'], names=[],
                         backends=[dict(name='leanexplore', prefixes=[])])
-        probe = dict(mode='probe', rationale='Try the proof.', cases=[dict(id='try',
+        probe = dict(mode='probe', rationale='Try the proof.', cases=[dict(
             code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))'),
-            dict(id='second', code='Lean.Elab.Tactic.evalTactic (← `(tactic| exact True.intro))')])
+            dict(code='Lean.Elab.Tactic.evalTactic (← `(tactic| exact True.intro))')])
         action = proof()
         action['proof_body'] = 'by trivial'
         config = replace(Config(), prover=route, reviewer=route, helpers=replace(Config().helpers, probe=1))
@@ -976,9 +976,9 @@ class Contracts(unittest.TestCase):
             self.assertEqual(len(pages), 2)
             self.assertIn('Search (leanexplore): addition\n', pages[0])
             self.assertIn('\nNat.add\n', pages[0])
-            self.assertIn('Probe try (tactic): closed_exploratory (advisory)', pages[1])
-            self.assertIn('Probe second (tactic): closed_exploratory (advisory)', pages[1])
-            self.assertIn('try.code (line 1 below):\nrun_tac do\n  '+probe['cases'][0]['code'], pages[1])
+            self.assertIn('Probe case1 (tactic): closed_exploratory (advisory)', pages[1])
+            self.assertIn('Probe case2 (tactic): closed_exploratory (advisory)', pages[1])
+            self.assertIn('case1.code (line 1 below):\nrun_tac do\n  '+probe['cases'][0]['code'], pages[1])
             self.assertNotRegex('\n'.join(pages), r'(?m)^\d+(?:/[^:]+)?:')
 
     def test_named_retrieval_rejects_excluded_names_without_stalling(self):
@@ -1256,7 +1256,7 @@ class Contracts(unittest.TestCase):
         research_route = ModelRoute(provider='openai', model='fixture')
         retrieve = dict(mode='retrieve', rationale='Inspect names.', names=['Nat.add', 'Nat.mul'],
                         queries=[], backends=[])
-        probe = dict(mode='probe', rationale='Inspect internals.', cases=[dict(id='enumeration', code='pure ()')])
+        probe = dict(mode='probe', rationale='Inspect internals.', cases=[dict(code='pure ()')])
         action = decomposition()
         action['children'] = [dict(name='support', statement='True ∧ True', proof='Use Nat.add and the constructor.',
                                    usefulness='Provides the required fact.', depends_on=[])]

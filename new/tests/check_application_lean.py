@@ -101,8 +101,8 @@ def main():
         retrieve = dict(mode='retrieve', rationale='Inspect a library declaration.', names=['Nat.add'],
                         queries=[], backends=[])
         probe = dict(mode='probe', rationale='Try closing the current goal.', cases=[
-            dict(id='inspect', code='let env ← Lean.getEnv\nLean.logInfo m!"Nat.add available: {(env.find? `Nat.add).isSome}"'),
-            dict(id='close', code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))')])
+            dict(code='let env ← Lean.getEnv\nLean.logInfo m!"Nat.add available: {(env.find? `Nat.add).isSome}"'),
+            dict(code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))')])
         with app.start(root/'helpers', package=package, selection=selected, config=config, workflow='scripted',
             script=(('prover', response(retrieve)), ('prover', response(probe)), ('prover', response(action)))) as run:
             def strict(reducer):
@@ -124,9 +124,9 @@ def main():
             from midas.application import helpers, records as r
             archives = helpers.advertised(run.writer, run.workflow.graph(run.writer).nodes[0].owner)
             text = helpers.page_text(r.read(run.writer, archives[-1].pages[0], 16000))
-            assert b'Probe inspect (tactic): open (advisory)' in text, text
+            assert b'Probe case1 (tactic): open (advisory)' in text, text
             assert b'Nat.add available: true' in text, text
-            assert b'Probe close (tactic): closed_exploratory (advisory)' in text, text
+            assert b'Probe case2 (tactic): closed_exploratory (advisory)' in text, text
             assert b'Goal 1:' in text, text
             assert b'0/' not in text, text
         print('named retrieval, probe, advisory evidence and original continuations passed', flush=True)
@@ -199,7 +199,7 @@ def main():
         splitting = dict(decompose, proof_body='by have witness := second; trivial', children=[
             dict(name='first', statement='1 = 1', proof='Use reflexivity.', usefulness='Premise.', depends_on=[]),
             dict(name='second', statement='2 = 2', proof='Use reflexivity.', usefulness='Conclusion.', depends_on=['first'])])
-        alias_probe = dict(mode='probe', rationale='Check the inherited alias.', cases=[dict(id='alias',
+        alias_probe = dict(mode='probe', rationale='Check the inherited alias.', cases=[dict(
             code='Lean.Elab.Tactic.evalTactic (← `(tactic| have witness := first; rfl))')])
         second_calls = []
         def transport(request, raw, *args):

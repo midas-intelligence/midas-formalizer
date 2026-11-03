@@ -25,10 +25,11 @@ def compare(label, old, new, count):
 
 
 def main():
-    cases = [dict(id=f'case{n}', code='let env ← Lean.getEnv\nLean.logInfo m!"{(env.find? `Nat.add).isSome}"')
-             for n in range(3)]
-    assert list(expand_probe_bodies(cases)) == old_probe_bodies(cases)
-    compare('probe_bodies_3_cases', lambda: old_probe_bodies(cases), lambda: expand_probe_bodies(cases), 100)
+    cases = [dict(code='let env ← Lean.getEnv\nLean.logInfo m!"{(env.find? `Nat.add).isSome}"')
+             for _ in range(3)]
+    old_cases = [dict(case, id=f'case{index}') for index, case in enumerate(cases, 1)]
+    assert list(expand_probe_bodies(cases)) == old_probe_bodies(old_cases)
+    compare('probe_bodies_3_cases', lambda: old_probe_bodies(old_cases), lambda: expand_probe_bodies(cases), 100)
     artifacts = Artifacts()
     scope = Scope(OwnerVersion('obl_'+'1'*64, 0), 'env_'+'2'*64, artifacts.save(b'context'))
     request = HelperRequest(scope, Retrieve(('one', 'two', 'three'),

@@ -227,20 +227,39 @@ def search_summary(result, search):
     return tuple(rows)
 
 
+def _probe_excerpt(value):
+    """Keep five leading/trailing lines without allocating every expanded line."""
+    head_end = 0
+    for _ in range(5):
+        boundary = value.find('\n', head_end)
+        if boundary < 0:
+            return value
+        head_end = boundary + 1
+    tail_start = len(value) - int(value.endswith('\n'))
+    for _ in range(5):
+        boundary = value.rfind('\n', head_end, tail_start)
+        if boundary < 0:
+            return value
+        tail_start = boundary
+    tail_start += 1
+    omitted = value.count('\n', head_end, tail_start)
+    return value[:head_end] + f'... [{omitted} lines omitted] ...\n' + value[tail_start:]
+
+
 def probe_summary(case, outcome):
-    """Render an admitted case with exact generated code and diagnostic locations."""
+    """Render exact code/locations and compact each diagnostic, goal and inspection."""
     result = outcome['result']
     rows = [f"Probe {case['id']} ({case['operation']}): {result['status']} (advisory)"]
     for field in ('setup', 'code', 'expected'):
         if case.get(field):
             rows.append(f"{case['id']}.{field} (line 1 below):\n"+case[field])
     if 'diagnostic' in result:
-        rows.append('Diagnostic:\n'+result['diagnostic'])
+        rows.append('Diagnostic:\n'+_probe_excerpt(result['diagnostic']))
     for message in outcome['messages']:
         rows.append(f"{message['severity']} at {message['file']}:{message['line']}:{message['column']}:\n"
-                    +message['text'])
+                    +_probe_excerpt(message['text']))
     if 'goals' in result:
-        rows.extend(f'Goal {i}:\n'+goal for i, goal in enumerate(result['goals'], 1))
+        rows.extend(f'Goal {i}:\n'+_probe_excerpt(goal) for i, goal in enumerate(result['goals'], 1))
         if not result['goals']:
             rows.append('No remaining goals (exploratory only).')
     for field, label in (('contains_sorry', 'Contains sorry'),
@@ -249,8 +268,8 @@ def probe_summary(case, outcome):
             rows.append(f'{label}: '+str(result[field]).lower())
     inspection = result.get('inspection')
     if inspection:
-        rows.extend(('Inspected expression:\n'+inspection['expression'],
-                     'Inferred type:\n'+inspection['inferred_type'],
+        rows.extend(('Inspected expression:\n'+_probe_excerpt(inspection['expression']),
+                     'Inferred type:\n'+_probe_excerpt(inspection['inferred_type']),
                      'Expression contains sorry: '+str(inspection['contains_sorry']).lower(),
                      'Expression unresolved metavariables: '+str(inspection['unresolved_metavariables']).lower()))
     return '\n\n'.join(rows)

@@ -986,7 +986,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v7`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v1`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v9`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v1`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat, complete retained observation sections in saved order. No nested reference dictionary or prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
@@ -1011,7 +1011,7 @@ Probes follow v2's body-only approach: each case has only `id` and `code`, where
 The generated code must fit 16,000 UTF-8 bytes; diagnostics refer to that generated
 code, with the body starting on line 2. Use
 ``Lean.Elab.Tactic.evalTactic (← `(tactic| intro C))`` to run a proof tactic in the body.
-This schema is versioned as `prover-action-v2`. A new direct proof replaces the
+This schema is versioned as `prover-action-v3`. A new direct proof replaces the
 previous decomposition; keeping proposed
 children requires a complete decomposition or an exact revision of its fragments.
 
@@ -1202,9 +1202,10 @@ retrieval allowance. A names-only request with no allowed names is rejected
 before scheduling, so it cannot leave the task waiting on zero jobs.
 The scope contains an owner/generation, an environment **hash**, and one artifact
 reference for the admitted selection/goal/alias context. No environment object,
-toolchain or package inventory is embedded in requests. Model probe bodies are
-expanded once by `expand_probe_bodies` into internal binary case records containing
-`id`, generated `code`, `operation='tactic'`, empty `setup` and null `expected`.
+toolchain or package inventory is embedded in requests. Model probe cases contain
+only `code`. They are expanded once by `expand_probe_bodies` into internal binary
+case records containing positional `id` values (`case1`, `case2`, `case3`), generated
+`code`, `operation='tactic'`, empty `setup` and null `expected`.
 Probe actions hold artifact references to these records; the checker owns their
 Lean validation. Continuations retain the complete batch without another charge.
 
@@ -1339,7 +1340,12 @@ labels; source IDs and web-action metadata stay in the original evidence and are
 not presented in prompts. Search and probe records
 are also projected to plain text before paging, so the
 model sees declaration names, authored excerpts and source locations, or case IDs,
-generated code, diagnostics, goals and exploratory status. Combined retrieval keeps
+generated code, diagnostics, goals and exploratory status. Probe diagnostics, each
+logged message, each goal and inspected expressions/types retain their first five
+and last five lines when longer than ten lines, with an explicit omitted-line count.
+Generated code and diagnostic locations remain intact; original results remain in
+archive provenance. Truncation happens before paging so more errors fit on a page.
+Combined retrieval keeps
 the search excerpts and failures alongside checked lookup results. Original
 artifacts remain archive provenance. Container descriptors preserve object/array
 shape for other structured evidence. Text fragments carry

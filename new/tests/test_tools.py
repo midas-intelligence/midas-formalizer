@@ -428,9 +428,55 @@ class ToolsTests(unittest.TestCase):
                         'Expression contains sorry: false', 'Expression unresolved metavariables: false'):
             self.assertIn(content, text)
 
-    def test_readable_probe_pages_preserve_large_unicode_messages_without_json(self):
+    def test_probe_excerpts_keep_boundary_lines_and_count_omissions(self):
+        from midas.tools.evidence import _probe_excerpt
+        for count in (0, 1, 5, 9, 10, 11, 12, 20):
+            for newline in ('\n', '\r\n'):
+                for trailing in ('', newline):
+                    with self.subTest(count=count, newline=newline, trailing=trailing):
+                        lines = [f'line {i}: α😀' for i in range(count)]
+                        value = newline.join(lines) + trailing
+                        actual = _probe_excerpt(value)
+                        if count <= 10:
+                            self.assertEqual(actual, value)
+                        else:
+                            expected = (newline.join(lines[:5]) + newline +
+                                        f'... [{count-10} lines omitted] ...\n' +
+                                        newline.join(lines[-5:]) + trailing)
+                            self.assertEqual(actual, expected)
+
+    def test_probe_pages_compact_each_error_goal_and_inspection_without_json(self):
         from midas.application.helpers import page_text
-        message = 'α😀\n'*20000
+        lines = [f'expanded line {i}: α😀' for i in range(20000)]
+        expansion = '\n'.join(lines)
+        code = 'run_tac do\n' + '\n'.join('  pure ()' for _ in range(12))
+        with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
+            summaries = []
+            for index in range(1, 4):
+                case = dict(id=f'case{index}', operation='tactic', code=code, setup='', expected=None)
+                messages = [dict(severity='error', file=f'case{index}.code', line=n, column=2,
+                                 text=f'Error {n}\n'+expansion) for n in (2, 3)]
+                result = dict(status='error', diagnostic=expansion, goals=[expansion],
+                    contains_sorry=False, unresolved_metavariables=True,
+                    inspection=dict(expression=expansion, inferred_type=expansion,
+                                    contains_sorry=False, unresolved_metavariables=True))
+                summaries.append(probe_summary(case, dict(result=result, messages=messages)))
+            archive = prepare_archive(self.scope, 'a'*64, summaries, (self.a.save(b'receipt'),), self.a)
+            self.assertEqual(len(archive.pages), 1)
+            displayed = page_text(read_page(archive, self.scope, self.a).payload).decode()
+            for index in range(1, 4):
+                self.assertIn(f'Probe case{index} (tactic): error', displayed)
+                for line in (2, 3):
+                    self.assertIn(f'error at case{index}.code:{line}:2:\nError {line}', displayed)
+            self.assertEqual(displayed.count('lines omitted'), 18)
+            for content in (code, lines[0], lines[-1], 'Goal 1:', 'Inspected expression:', 'Inferred type:',
+                            'Contains sorry: false', 'Unresolved metavariables: true'):
+                self.assertIn(content, displayed)
+            self.assertNotIn(lines[100]+'\n', displayed)
+
+    def test_readable_probe_pages_preserve_long_single_lines_without_json(self):
+        from midas.application.helpers import page_text
+        message = 'α😀'*20000
         case = dict(id='large', operation='tactic', code='run_tac do\n  pure ()', setup='', expected=None)
         with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
             text = probe_summary(case, dict(result=dict(status='interrupted', diagnostic=message), messages=[]))

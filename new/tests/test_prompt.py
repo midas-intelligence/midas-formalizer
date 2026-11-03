@@ -386,9 +386,9 @@ class PromptTests(unittest.TestCase):
                       if a['properties']['mode']['enum'] == ['probe'])
         cases = action['properties']['cases']
         self.assertEqual((cases['minItems'], cases['maxItems']), (1, 3))
-        self.assertEqual(set(cases['items']['properties']), {'id', 'code'})
+        self.assertEqual(set(cases['items']['properties']), {'code'})
         self.assertFalse(cases['items']['additionalProperties'])
-        self.assertIn(b'only id and code', prover.INSTRUCTIONS)
+        self.assertIn(b'only code', prover.INSTRUCTIONS)
         self.assertIn('Lean.Elab.Tactic.evalTactic (← `(tactic| intro C))'.encode(), prover.INSTRUCTIONS)
         self.assertIn(b'body starts at line 2', prover.INSTRUCTIONS)
 

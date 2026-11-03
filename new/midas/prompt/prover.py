@@ -27,7 +27,10 @@ directly.
 Every action needs a nonempty rationale explaining what it will accomplish.
 Give a concise actionable reason, not a reasoning transcript.
 
-Use proof for one goal. Use decomposition for one goal with useful intermediate
+Use proof to submit a complete candidate proof for one goal directly for checking.
+A failed proof check returns compiler diagnostics; you can submit a correction
+if the action remains available. No preliminary probe is needed.
+Use decomposition for one goal with useful intermediate
 lemmas and complete conditional glue in proof_body. Children have explicit
 statements, English proof plans, and depends_on names: only those prerequisites
 are available to each child. Parent hypotheses are not inherited implicitly.
@@ -118,9 +121,8 @@ For example (replace Nat.Prime with the actual name from your task):
 Discovery alone does not certify availability.
 
 Probe cases run in the frozen checked target context, without proposed children or
-definitions. Supply one through three cases, each containing only id and code.
-Each id is distinct, begins with a letter, then letters/digits/underscore/hyphen,
-at most 48 characters. code is ONLY the Lean TacticM do-block body after run_tac do.
+definitions. Supply one through three cases, each containing only code.
+code is ONLY the Lean TacticM do-block body after run_tac do.
 The application adds run_tac do and indents your body automatically.
 Do not wrap the body in by, run_tac, run_elab, or do. Do not supply operation,
 setup or expected. Example code:
@@ -190,7 +192,7 @@ def schema():
             ['suspected_false', 'missing_assumption', 'context_mismatch']}, evidence=text))),
         action('retrieve', queries=array(string(2048), 3), names=array(string(1024), 12),
                backends=array(ref('backend'), 2)),
-        action('probe', cases=dict(array(obj(id=string(48), code=dict(string(16000),
+        action('probe', cases=dict(array(obj(code=dict(string(16000),
                description='Only the TacticM do-block body after run_tac do; omit the wrapper.')), 3), minItems=1)),
         action('research', question=string(8000)),
         action('web_search', question=string(8000), urls=array(string(8000), 6)),
@@ -232,6 +234,5 @@ def render(snapshot):
                          for s in sections if s.kind == 'capabilities')
     sections = tuple(s for s in sections if s.kind != 'capabilities')
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
-        b'Use the enabled helpers to obtain missing context. '
         b'Return the action JSON now.'))),)
-    return Prompt('prover', 'prover-v7', 'prover-action-v2', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('prover', 'prover-v9', 'prover-action-v3', INSTRUCTIONS, SCHEMA, sections)

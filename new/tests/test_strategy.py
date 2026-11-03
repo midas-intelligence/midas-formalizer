@@ -139,19 +139,19 @@ def admitted(artifacts, dispatched, raw, **kwargs):
 class ProtocolTests(unittest.TestCase):
     def test_default_contracts_are_strict_and_role_bound(self):
         value = response(proof())
-        parsed = interpret(value, role='prover', contract='prover-action-v2')
+        parsed = interpret(value, role='prover', contract='prover-action-v3')
         self.assertEqual(parsed.mode, 'proof')
         for raw in (value + b'{}',
                     b'{"action":{},"action":{}}', b'{"x":NaN}', b'{"x":"\\ud800"}'):
             with self.subTest(raw=raw[:60]), self.assertRaises(ValueError):
-                interpret(raw, role='prover', contract='prover-action-v2')
-        for role, contract in (('reviewer', 'prover-action-v2'), ('prover', 'unknown')):
+                interpret(raw, role='prover', contract='prover-action-v3')
+        for role, contract in (('reviewer', 'prover-action-v3'), ('prover', 'unknown')):
             with self.assertRaises(ValueError):
                 interpret(value, role=role, contract=contract)
         malformed = proof()
         malformed['environment'] = {}
         with self.assertRaises(ValueError):
-            interpret(response(malformed), role='prover', contract='prover-action-v2')
+            interpret(response(malformed), role='prover', contract='prover-action-v3')
 
     def test_single_wrapped_object_preserves_validation(self):
         action = proof()
@@ -160,19 +160,19 @@ class ProtocolTests(unittest.TestCase):
         for prefix, suffix in ((b'```json\n', b'\n```'), (b'Here is the proof:\n', b'\nThis closes the goal.'),
                                (b'"Result":\n```json\n', b'\n```\nDone.')):
             with self.subTest(prefix=prefix):
-                parsed = interpret(prefix+value+suffix, role='prover', contract='prover-action-v2')
+                parsed = interpret(prefix+value+suffix, role='prover', contract='prover-action-v3')
                 self.assertEqual(parsed.value['proof_body'], action['proof_body'])
         for raw in (b'['+value+b']', b'{"nested":'+value+b'}', value+b'\n'+value,
                     b'{}\n'+value, b'{broken}\n'+value, value[:-1], b'```json\n'+value[:-1]+b'\n```'):
             with self.subTest(raw=raw[:40]), self.assertRaises(ValueError):
-                interpret(raw, role='prover', contract='prover-action-v2')
+                interpret(raw, role='prover', contract='prover-action-v3')
 
     def test_large_response_never_calls_json_library(self):
         action = proof()
         action['proof_body'] = 'by\n  -- ' + 'x'*900000 + '\n  rfl'
         raw = response(action)
         with patch('json.loads', side_effect=AssertionError('JSON loads')), patch('json.dumps', side_effect=AssertionError('JSON dumps')):
-            result = interpret(b'Here is the proof:\n```json\n'+raw+b'\n```', role='prover', contract='prover-action-v2')
+            result = interpret(b'Here is the proof:\n```json\n'+raw+b'\n```', role='prover', contract='prover-action-v3')
             draft = expand(result.value, context(), uid('large'))
             self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], action['proof_body'])
             self.assertEqual(Draft.load(draft.payload), draft)
@@ -184,39 +184,39 @@ class ProtocolTests(unittest.TestCase):
                         names=[], backends=[dict(name='leanexplore', prefixes=[])]))
         for action in actions:
             with self.subTest(mode=action['mode']):
-                parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+                parsed = interpret(response(action), role='prover', contract='prover-action-v3')
                 self.assertEqual(parsed.value, action)
                 for extra in (dict(inspect=False), dict(inspect=True), dict(offset=0), dict(offset=12)):
                     with self.assertRaises(ValueError):
-                        interpret(response(dict(action, **extra)), role='prover', contract='prover-action-v2')
+                        interpret(response(dict(action, **extra)), role='prover', contract='prover-action-v3')
 
     def test_retrieval_ignores_non_string_queries_without_coercing_them(self):
         backend = dict(name='leanexplore', prefixes=[])
         action = dict(mode='retrieve', rationale='Find addition.', names=[], backends=[backend],
                       queries=[{'query': 'not a search string'}, 'addition', None, 1, True, ['nested']])
-        parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+        parsed = interpret(response(action), role='prover', contract='prover-action-v3')
         self.assertEqual(parsed.value['queries'], ['addition'])
         self.assertEqual(parsed.value['backends'], [backend])
         for queries in ('addition', {'query': 'addition'}, ['a', 'b', 'c', 'd'], ['x'*2049]):
             with self.subTest(queries=queries), self.assertRaises(ValueError):
-                interpret(response(dict(action, queries=queries)), role='prover', contract='prover-action-v2')
+                interpret(response(dict(action, queries=queries)), role='prover', contract='prover-action-v3')
         # Other string arrays remain strict.
         with self.assertRaises(ValueError):
-            interpret(response(dict(action, names=[{'name': 'Nat.add'}])), role='prover', contract='prover-action-v2')
+            interpret(response(dict(action, names=[{'name': 'Nat.add'}])), role='prover', contract='prover-action-v3')
 
     def test_retrieval_deduplicates_names_in_first_occurrence_order(self):
         action = dict(mode='retrieve', rationale='Inspect addition.', queries=[], backends=[],
                       names=['Nat.add_comm', 'Nat.add', 'Nat.add_comm', 'Nat.add_assoc', 'Nat.add'])
-        parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+        parsed = interpret(response(action), role='prover', contract='prover-action-v3')
         self.assertEqual(parsed.value['names'], ['Nat.add_comm', 'Nat.add', 'Nat.add_assoc'])
         for names in (['Nat.add'] * 13, ['Nat.add', {'name': 'Nat.add'}]):
             with self.subTest(names=names), self.assertRaises(ValueError):
-                interpret(response(dict(action, names=names)), role='prover', contract='prover-action-v2')
+                interpret(response(dict(action, names=names)), role='prover', contract='prover-action-v3')
 
     def test_retrieval_keeps_names_when_all_queries_are_discarded(self):
         action = dict(mode='retrieve', rationale='Inspect addition.', names=['Nat.add'],
                       backends=[dict(name='leanexplore', prefixes=[])], queries=[{'dummy': ''}])
-        parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+        parsed = interpret(response(action), role='prover', contract='prover-action-v3')
         self.assertEqual(parsed.value['queries'], [])
         self.assertEqual(parsed.value['backends'], [])
         self.assertEqual(parsed.value['names'], ['Nat.add'])
@@ -227,7 +227,7 @@ class ProtocolTests(unittest.TestCase):
                    dict(mode='lookup', rationale='Read the definition.', names=['Nat.add']))
         for action in actions:
             with self.subTest(mode=action['mode']), self.assertRaises(ValueError):
-                interpret(response(action), role='prover', contract='prover-action-v2')
+                interpret(response(action), role='prover', contract='prover-action-v3')
 
     def test_review_findings_and_research_invariants(self):
         value = dict(verdict='accept', rationale='A valid plan.', findings=[], question='', urls=[])
@@ -257,7 +257,7 @@ class CandidateTests(unittest.TestCase):
                               dependencies=[dict(parameter='h', submission='current', key='helper')])
                 action = dict(mode='candidate', rationale='Compose the proof.', entries=[helper, parent],
                               proof='Use the helper.', proof_departures='', definitions=[], imports=[])
-                parsed = interpret(response(action), role='prover', contract='prover-action-v2')
+                parsed = interpret(response(action), role='prover', contract='prover-action-v3')
                 for scope, statement in ((None, None), ('Wrong.scope', 'False')):
                     # Existing subjects always retain their exact saved proposition.
                     parsed.value['entries'][1].update(scope_target=scope, statement=statement)
@@ -269,7 +269,7 @@ class CandidateTests(unittest.TestCase):
                     self.assertEqual(child_context(draft, 'helper', ctx).subjects[0].statement, 'True')
                 parent['kind'] = required.kind
                 with self.assertRaisesRegex(ValueError, 'Response fields differ'):
-                    interpret(response(action), role='prover', contract='prover-action-v2')
+                    interpret(response(action), role='prover', contract='prover-action-v3')
 
     def test_recursive_children_use_flat_context_and_inherit_imports(self):
         ctx = replace(context(), imports=('Mathlib',))
@@ -496,6 +496,10 @@ class StateTests(unittest.TestCase):
                 capabilities = wire['input'][-1]['text']
                 self.assertTrue(capabilities.startswith('QUESTION next-action\nCAPABILITIES strategy-capabilities\n'))
                 self.assertTrue(capabilities.endswith('Return the action JSON now.'))
+                advertised_candidates = next(line.removeprefix('Candidate modes: ') for line in capabilities.splitlines()
+                                             if line.startswith('Candidate modes: '))
+                self.assertEqual(set(advertised_candidates.split(', ')), {'proof', 'decomposition'})
+                self.assertLessEqual(set(advertised_candidates.split(', ')), actions)
                 advertised = next(line.removeprefix('Helper modes: ') for line in capabilities.splitlines()
                                   if line.startswith('Helper modes: '))
                 self.assertEqual(set(advertised.split(', ')) if advertised else set(), expected)
@@ -940,7 +944,7 @@ class StateTests(unittest.TestCase):
         actions = {a['properties']['mode']['enum'][0]
                    for a in response_schema(prepared)['properties']['action']['anyOf']}
         self.assertIn('revise', actions)
-        self.assertIn('revise: unavailable (direct mode unavailable)', wire['input'][-1]['text'])
+        self.assertIn('revise: unavailable (proof mode unavailable)', wire['input'][-1]['text'])
         with self.assertRaisesRegex(ValueError, 'direct_allowance_exhausted'):
             self.strategy.on_model(exhausted, self.policy, exhausted_dispatch,
                 admitted(artifacts, exhausted_dispatch, response(action)), artifacts, submission_id=uid('new'))
@@ -1020,12 +1024,12 @@ class StateTests(unittest.TestCase):
         artifacts, snapshot = fixture()
         dispatched, _, _ = dispatch(snapshot, artifacts)
         action = dict(mode='probe', rationale='Inspect the goal.', cases=[
-            dict(id='one', code='Lean.Elab.Tactic.evalTactic (← `(tactic| rfl))'),
-            dict(id='two', code='let env ← Lean.getEnv\nLean.logInfo m!"{(env.find? `Nat.add).isSome}"')])
+            dict(code='Lean.Elab.Tactic.evalTactic (← `(tactic| rfl))'),
+            dict(code='let env ← Lean.getEnv\nLean.logInfo m!"{(env.find? `Nat.add).isSome}"')])
         output = admitted(artifacts, dispatched, response(action))
         result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
         self.assertEqual(result.helper.units, 1)
-        self.assertEqual(load_record(result.artifacts[0].data, limit=65536), dict(id='one',
+        self.assertEqual(load_record(result.artifacts[0].data, limit=65536), dict(id='case1',
             code='run_tac do\n  '+action['cases'][0]['code'], operation='tactic', setup='', expected=None))
         self.assertEqual(load_record(result.artifacts[1].data, limit=65536)['code'],
             'run_tac do\n  let env ← Lean.getEnv\n  Lean.logInfo m!"{(env.find? `Nat.add).isSome}"')
@@ -1045,18 +1049,23 @@ class StateTests(unittest.TestCase):
         for wrapper in ('by', 'run_tac', 'run_elab', 'do'):
             for prefix in ('', '-- comment\n/- outer /- nested -/ -/\n'):
                 with self.subTest(wrapper=wrapper, prefix=prefix), self.assertRaisesRegex(ValueError, 'omit the wrapper'):
-                    apply([dict(id='one', code=prefix+wrapper+'\n  pure ()')])
-        for cases in ([], [dict(id='one', code='pure ()', operation='tactic', setup='', expected=None)],
-                      [dict(id='one', code='pure ()')]*2, [dict(id='0bad', code='pure ()')],
-                      [dict(id='one', code='-- just a comment')]):
+                    apply([dict(code=prefix+wrapper+'\n  pure ()')])
+        for cases in ([], [dict(code='pure ()', operation='tactic', setup='', expected=None)],
+                      [dict(code='pure ()')]*4, [dict(id='one', code='pure ()')],
+                      [dict(code='-- just a comment')]):
             with self.subTest(cases=cases), self.assertRaises(ValueError):
                 apply(cases)
         body = 'Lean.logInfo "'+'α'*7986+'"'
         self.assertEqual(len(body.encode()), 15987)
-        accepted = apply([dict(id='fits', code=body)])
+        for count in range(1, 4):
+            result = apply([dict(code='pure ()')]*count)
+            self.assertEqual([load_record(a.data, limit=65536)['id'] for a in result.artifacts],
+                             [f'case{index}' for index in range(1, count+1)])
+            self.assertEqual(len(set(result.helper.request.action.cases)), count)
+        accepted = apply([dict(code=body)])
         self.assertEqual(len(load_record(accepted.artifacts[0].data, limit=65536)['code'].encode()), 16000)
         with self.assertRaisesRegex(ValueError, 'Generated probe code exceeds'):
-            apply([dict(id='overflow', code=body+' ')])
+            apply([dict(code=body+' ')])
 
     def test_resource_and_protocol_failures_do_not_charge_math(self):
         _, snapshot = fixture(conditional=True)
