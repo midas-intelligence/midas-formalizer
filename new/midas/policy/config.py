@@ -289,8 +289,8 @@ class Config:
     local: ProcessConfig = ProcessConfig(wall_ms=60_000)
     export: ExportConfig = ExportConfig()
     model: ModelConfig = ModelConfig()
-    research_model: ModelConfig = ModelConfig(invocation_ms=300_000)
-    web_search_model: ModelConfig = ModelConfig(invocation_ms=300_000)
+    research_model: ModelConfig = ModelConfig(invocation_ms=900_000)
+    web_search_model: ModelConfig = ModelConfig(invocation_ms=900_000)
     recovery: RecoveryConfig = RecoveryConfig()
     prover: ModelRoute = ModelRoute()
     reviewer: ModelRoute = ModelRoute()
@@ -304,10 +304,10 @@ class Config:
                 raise DomainError(f'Invalid {name} config')
         if max(self.checker.memory_mib, self.export.memory_mib) > self.scheduling.compiler_memory_mib:
             raise DomainError('Compiler job memory exceeds pool')
-        if self.research_model.invocation_ms > 300_000:
-            raise DomainError('Research invocation exceeds 300000 ms')
-        if self.web_search_model.invocation_ms > 300_000:
-            raise DomainError('Web-search invocation exceeds 300000 ms')
+        if self.research_model.invocation_ms > 900_000:
+            raise DomainError('Research invocation exceeds 900000 ms')
+        if self.web_search_model.invocation_ms > 900_000:
+            raise DomainError('Web-search invocation exceeds 900000 ms')
 
     def record(self):
         return dict(format=FORMAT, **{
@@ -325,14 +325,17 @@ class Config:
         """Prospective live increases; callers persist audit and expected version.
 
         Frozen requests retain their old bounds. Usage and deadlines' origins do
-        not reset. Provider/recovery and helper settings stay frozen.
+        not reset. Helper invocation timeouts may increase; routes, retry controls
+        and helper allowances stay frozen.
         """
-        _object(changes, ('run', 'mathematics', 'checker', 'local', 'export', 'scheduling'))
+        _object(changes, ('run', 'mathematics', 'checker', 'local', 'export', 'scheduling',
+                         'research_model', 'web_search_model'))
         sections = {}
         changed = False
         for name, patch in changes.items():
             original = getattr(self, name)
             allowed = (('turns', 'runtime_ms') if name == 'run' else
+                ('invocation_ms',) if name in ('research_model', 'web_search_model') else
                 ('model_concurrency', 'compiler_concurrency', 'network_concurrency', 'compiler_memory_mib')
                 if name == 'scheduling' else tuple(f.name for f in fields(original)))
             _object(patch, allowed)

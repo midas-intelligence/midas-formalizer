@@ -260,7 +260,8 @@ class ConfigTests(unittest.TestCase):
         config = load_config(b'{"format":"midas-config-v1", "scheduling":{"model_concurrency":4}}')
         self.assertEqual(config.scheduling.backlog_new_stop, 84)
         self.assertEqual(config.scheduling.backlog_all_stop, 104)
-        self.assertEqual(config.research_model.invocation_ms, 300_000)
+        self.assertEqual(config.research_model.invocation_ms, 900_000)
+        self.assertEqual(config.web_search_model.invocation_ms, 900_000)
         self.assertEqual(load_config(config.encode()), config)
         self.assertLess(len(config.encode()), MAX_CONFIG_BYTES)
         with self.assertRaises(FrozenInstanceError):
@@ -272,6 +273,8 @@ class ConfigTests(unittest.TestCase):
 
     def test_unknown_duplicate_invalid_and_nested_settings_rejected(self):
         cases = (
+            b'{"format":"midas-config-v1","research_model":{"invocation_ms":900001}}',
+            b'{"format":"midas-config-v1","web_search_model":{"invocation_ms":900001}}',
             b'{"format":"midas-config-v1","run":{"turns":true}}',
             b'{"format":"midas-config-v1","run":{"turns":-1}}',
             b'{"format":"midas-config-v1","run":{"runtime_ms":NaN}}',
@@ -329,6 +332,21 @@ class ConfigTests(unittest.TestCase):
                        {'local': {'memory_mib': True}}):
             with self.subTest(change=change), self.assertRaises(DomainError):
                 old.increase(change)
+
+    def test_helper_timeout_increases_preserve_other_settings_and_enforce_limits(self):
+        old = replace(Config(), research_model=ModelConfig(invocation_ms=300_000),
+                      web_search_model=ModelConfig(invocation_ms=300_000))
+        for section in ('research_model', 'web_search_model'):
+            with self.subTest(section=section):
+                updated = old.increase({section: {'invocation_ms': 900_000}})
+                self.assertEqual(updated, replace(old, **{
+                    section: replace(getattr(old, section), invocation_ms=900_000)}))
+                self.assertEqual(load_config(updated.encode()), updated)
+                for patch in ({'invocation_ms': 299_999}, {'invocation_ms': 300_000},
+                              {'invocation_ms': 900_001}, {'invocation_ms': True},
+                              {'read_ms': 900_000}, {'request_max_retries': 1}):
+                    with self.subTest(patch=patch), self.assertRaises(DomainError):
+                        old.increase({section: patch})
 
     def test_policy_import_boundary(self):
         package = Path(__file__).resolve().parents[1] / 'midas' / 'policy'

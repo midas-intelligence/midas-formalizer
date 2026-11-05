@@ -207,7 +207,9 @@ Starting from `--source` requires `--target` or `--all-unfinished`. A saved
 `--selection` already contains that scope and cannot be combined with those flags.
 
 Runs execute in the foreground. Progress goes to stderr and the final status to
-stdout. `--quiet` suppresses progress; `--json` emits bounded JSON records, one
+stdout. In a terminal, elapsed-time-only updates overwrite the last progress
+frame; status changes add new rows. Redirected progress remains line-based.
+`--quiet` suppresses progress; `--json` emits bounded JSON records, one
 per line. Successful runs independently verify their export even without
 `--output`; supplying `--output` also publishes the bundle to that directory.
 
@@ -371,8 +373,10 @@ To increase allowances, save `increase.json` using new total limits:
 python -B -m midas resume run --raise-limits increase.json --output bundle
 ```
 
-Only `run.turns`, `run.runtime_ms`, and fields under `mathematics` may increase
-this way. At least one value must increase; none may decrease. Usage and elapsed
+Supported increases include `run.turns`, `run.runtime_ms`, mathematical and process/export
+limits, scheduling capacity, and `research_model.invocation_ms` or
+`web_search_model.invocation_ms` (up to 900000 ms each). At least one value must
+increase; none may decrease. Usage and elapsed
 time do not reset, and already prepared requests retain their original bounds.
 `submit` and `export` also accept `--raise-limits`.
 

@@ -597,11 +597,13 @@ class Contracts(unittest.TestCase):
                 def transport(request, raw, setup, *args):
                     calls.append((request.role, raw))
                     if request.role == 'web_search':
+                        self.assertEqual(request.limits.invocation_ms, 900_000)
                         self.assertEqual(request.limits.web_calls, 2)
                         self.assertIn(b'Find references only.', setup)
                         return ModelOutput(raw=web_answer, usage=Usage(100, 0, 10, 0),
                             events=events(dict(type='webSearch', id='open', action=dict(type='openPage'))))
                     if request.role == 'research':
+                        self.assertEqual(request.limits.invocation_ms, 900_000)
                         self.assertEqual(request.limits.web_calls, 0)
                         self.assertIsNone(setup)
                         self.assertIn(b'Reference on True.intro.', raw)
@@ -787,6 +789,57 @@ class Contracts(unittest.TestCase):
             self.assertEqual(run.writer.frozen_run().configuration, frozen)
         with self.assertRaises(ValueError):
             self.app.resume(self.root/'run', increases={'run': {'turns': 1}})
+
+    def test_resume_helper_timeout_increase_keeps_evidence_usage_and_old_request(self):
+        from midas.application import records as r
+        from midas.provider import ModelOutput, ModelRequest, Route
+        from tests.test_tools import events
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        for helper in ('research', 'web_search'):
+            with self.subTest(helper=helper):
+                setting = helper + '_model'
+                helper_route = ModelRoute(provider='openai', model='fixture') if helper == 'web_search' else route
+                ask = dict(mode=helper, rationale='Find a construction.', question='How to prove True?')
+                if helper == 'web_search':
+                    ask['urls'] = []
+                replies = iter((response(ask), response(ask), response(proof())))
+                answer = model_json(dict(answer='Saved helper guidance: apply True.intro.', unresolved=[],
+                                         **({'sources': []} if helper == 'web_search' else {})))
+                calls, prompts = [], []
+                def transport(request, raw, *args):
+                    calls.append((request.role, request.limits.invocation_ms))
+                    if request.role == helper:
+                        web_events = events(dict(type='webSearch', id='search', action=dict(type='search')))
+                        return ModelOutput(raw=answer, usage=Usage(20, 0, 10, 0),
+                                           events=web_events if helper == 'web_search' else b'')
+                    prompts.append(raw)
+                    return ModelOutput(raw=next(replies), usage=Usage(20, 0, 10, 0))
+                self.app.transports = {Route.from_config(item).scope: transport for item in (route, helper_route)}
+                config = replace(Config(), prover=route, run=replace(Config().run, turns=2),
+                    **{helper: helper_route, setting: replace(getattr(Config(), setting), invocation_ms=300_000)})
+                with self.start(name=helper, workflow='live', config=config) as run:
+                    self.assertEqual(run.run(poll_interval=.001).exit_code, 1)
+                    self.assertEqual(run.writer.status_snapshot().accounting.turns, 2)
+                    run_id = run.writer.run_id
+                    frozen = run.writer.frozen_run().configuration
+                    original = next(invocation for key in run.writer.receipt_ids(limit=10)
+                        if (invocation := run.writer.invocation(key)).request.job.kind.value == 'MODEL'
+                        and ModelRequest.load(r.read(run.writer, invocation.request.operation_payload, 16384)).role == helper)
+                    receipt = run.writer.receipt(original.original_execution_id)
+                    self.assertEqual(original.request.job.limits.wall_ms, 300_000)
+                with self.app.resume(self.root/helper, increases={
+                        setting: {'invocation_ms': 900_000}, 'run': {'turns': 5}}) as run:
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    self.assertEqual(run.writer.run_id, run_id)
+                    self.assertEqual(run.writer.frozen_run().configuration, frozen)
+                    self.assertEqual(run.writer.invocation(original.original_execution_id), original)
+                    self.assertEqual(run.writer.receipt(original.original_execution_id), receipt)
+                    self.assertEqual(run.writer.status_snapshot().accounting.turns, 5)
+                    self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, helper), 2)
+                    self.assertEqual([timeout for role, timeout in calls if role == helper], [300_000, 900_000])
+                    self.assertIn(b'Saved helper guidance: apply True.intro.', prompts[-1])
+                with self.app.resume(self.root/helper) as run:
+                    self.assertEqual(getattr(run.workflow.policy.config, setting).invocation_ms, 900_000)
 
     def test_resume_raised_export_limits_retries_without_rechecking_proofs(self):
         from midas.application import records as r

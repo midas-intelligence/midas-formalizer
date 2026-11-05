@@ -306,7 +306,11 @@ and goes to stderr. Terminal output shows time, turns, cost and resource usage,
 then separate `completed`, `conditional`, `active` and `waiting` node counts.
 Active nodes are distinct unresolved owners of running work; waiting nodes are
 the remaining unresolved nodes. Routine stage flags and `active_workers` reasons
-are omitted. A single pending frame is replaced when output is slow;
+are omitted. In a terminal, elapsed-time-only updates overwrite the last frame,
+including wrapped rows; status changes add new rows. The last frame is cleared
+before final output. Redirected progress remains line-based. Elapsed-time-only
+updates are emitted at most every ten seconds.
+A single pending frame is replaced when output is slow;
 a blocked or broken progress sink cannot delay controller admission or draining.
 `--quiet` suppresses progress. Final output goes to stdout. Status/query success
 exits 0; run results retain policy exit codes (0 verified, 1 incomplete/blocked,
@@ -1846,7 +1850,9 @@ diagnostic output is retained, including the configured limit; no special model
 prompt instructions are added.
 
 `Policy` and `Config` are immutable. `config.increase(...)` produces a new snapshot
-for prospective run, mathematical, process/export and scheduling capacity increases.
+for prospective run, mathematical, process/export, scheduling capacity and research/web-search
+invocation timeout increases. Helper invocation timeouts can increase up to 900000 ms;
+routes, retry controls and helper allowances remain frozen.
 It does not reset usage, move the
 run's time origin, enlarge existing repair grants or rewrite frozen requests.
 Storage/controller must persist the change with its audit identity and expected

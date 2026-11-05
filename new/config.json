@@ -80,7 +80,7 @@
     "stream_max_retries": 0
   },
   "research_model": {
-    "invocation_ms": 300000,
+    "invocation_ms": 900000,
     "preparation_ms": 10000,
     "connect_ms": 30000,
     "write_ms": 30000,
@@ -95,7 +95,7 @@
     "stream_max_retries": 0
   },
   "web_search_model": {
-    "invocation_ms": 300000,
+    "invocation_ms": 900000,
     "preparation_ms": 10000,
     "connect_ms": 30000,
     "write_ms": 30000,
