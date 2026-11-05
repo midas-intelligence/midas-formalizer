@@ -1,11 +1,12 @@
 """Advisory archive preparation, indexed paging, and frozen-source excerpts."""
 from dataclasses import dataclass, field
+from functools import lru_cache
 from hashlib import sha256
 
 from ..domain import ArtifactRef
 from ..domain import encoding as codec
 from ..domain.records import identifier, instance, items
-from ..source import SourceFile
+from ..source import SourceFile, lean_name, parse_identifier
 from .protocol import RESULT_BYTES, Scope, pack, read, text
 from .search import FILE_BYTES, SearchResult
 from .bm25 import DETAILS
@@ -193,65 +194,96 @@ def source_excerpt(data, location):
 
 
 def search_summary(result, search):
-    return tuple(text for text, _ in _search_records(result, search, {}))
+    return tuple(text for text, _, _ in _search_records(result, search, {}, set(), set()))
 
 
-def _search_records(result, search, checked):
+@lru_cache(maxsize=4096)
+def _name_key(name):
+    parsed = parse_identifier(name)
+    return lean_name(parsed, readable=True) if parsed is not None else name
+
+
+def _search_records(result, search, checked, seen, available):
     """Twelve detailed hits and a compact name tail, without a score cutoff.
 
     If full excerpts would push names off the first page, lead with the ranked
     name list and page the details after it. Anonymous hits always need source.
     """
     instance(result, SearchResult)
-    rows = [(f'Search ({search.backend.name}): {search.query}', ())]
+    rows = [(f'Search ({search.backend.name}): {search.query}', (), ())]
     if result.error:
-        rows.append(('Search failed: '+result.error, ()))
+        rows.append(('Search failed: '+result.error, (), ()))
     elif not result.records:
-        rows.append(('No matches.', ()))
+        rows.append(('No matches.', (), ()))
     details, names = [], []
     compact = len(result.records) > DETAILS
     # Exact identifier queries can resolve generated declarations absent from the index.
     direct = search.query.strip()
-    if (search.backend.name == 'frozen-source' and direct in checked
+    if (search.backend.name == 'frozen-source' and direct in checked and _name_key(direct) not in seen
             and not any(direct in match.names for match in result.records)):
-        rows.append(('Exact identifier lookup:\n'+checked.pop(direct), (direct,)))
+        shown = ((direct, len('Exact identifier lookup:\n')),) if direct in available else ()
+        rows.append(('Exact identifier lookup:\n'+checked.pop(direct), (direct,), shown))
+        seen.update(_name_key(n) for n, _ in shown)
     header_count = len(rows)
     for rank, match in enumerate(result.records, 1):
-        name = '\n'.join(match.names) or 'Source match (no declaration name)'
+        remaining = tuple(n for n in match.names if _name_key(n) not in seen)
+        if match.names and not remaining:
+            continue
+        name = '\n'.join(remaining) or 'Source match (no declaration name)'
         label = f'{rank}. ' if compact else ''
         names.append(label+name if match.names else f'{label}{name}: {match.path}:{match.line}')
-        resolved = tuple(n for n in match.names if n in checked)
-        body = '\n\n'.join(checked.pop(n) for n in resolved)
+        resolved = tuple(n for n in remaining if n in checked)
+        summaries = tuple(checked.pop(n) for n in resolved)
+        body = '\n\n'.join(summaries)
         detailed = rank <= DETAILS or not match.names or bool(resolved)
+        shown, offset = [], 0
+        for n, summary in zip(resolved, summaries):
+            if n in available:
+                shown.append((n, offset))
+            offset += len(summary.encode())+2
         if match.path is not None and detailed:
             name += f'\nSource: {match.path}:{match.line}'
             if match.source and (not resolved or '\n-- '+SOURCE_UNAVAILABLE in body) and match.source not in body:
+                offset = len(body.encode())+(2 if body else 0)
+                shown.extend((n, offset) for n in remaining if n not in available)
                 body += ('\n\n' if body else '')+match.source
         if body:
+            offset = len((label+name+'\n').encode())
+            shown = tuple((n, offset+start) for n, start in shown)
             name += '\n'+body
-        row = (label+name, resolved)
+        row = (label+name, resolved, tuple(shown))
+        seen.update(_name_key(n) for n, _ in shown)
         if detailed and (match.path is not None or resolved):
             details.append(row)
         rows.append(row)
+    if result.records and len(rows) == header_count:
+        rows.append(('No new matches; declaration types or definitions were already shown.', (), ()))
     if compact and details and sum(codec.record_size(f, limit=PAGE_BYTES)
-                                   for f in _fragments(text for text, _ in rows)) > PAGE_BYTES-1024:
-        return (*rows[:header_count], ('Ranked names (details follow; use page for further excerpts):\n'+'\n'.join(names), ()),
+                                   for f in _fragments(text for text, _, _ in rows)) > PAGE_BYTES-1024:
+        return (*rows[:header_count], ('Ranked names (details follow; use page for further excerpts):\n'+'\n'.join(names), (), ()),
                 *details)
     return tuple(rows)
 
 
-def retrieval_summary(action, searches, checked):
+def retrieval_summary(action, searches, checked, *, seen=(), available=None):
     """Keep explicit lookups separate and place checked search hits in their rows.
 
-    Return a flat name/record-index map so reviews can select checked declarations
-    after pagination without relying on their former lookup-first ordering.
+    Return flat name/record-index maps for checked lookups and displayed details;
+    details also carry their starting byte offset for exact page selection.
+    Names alone and lookup failures do not suppress later search hits. Filtering
+    keeps the original ranks and detail allowance, without fetching replacement hits.
     """
     pending = dict(checked)
-    records = [(pending.pop(name), (name,)) for name in action.names if name in pending]
+    seen = {_name_key(n) for n in seen}
+    available = set(checked) if available is None else set(available)
+    records = [(pending.pop(name), (name,), ((name, 0),) if name in available else ())
+               for name in action.names if name in pending]
+    seen.update(_name_key(n) for _, _, names in records for n, _ in names)
     for result, search in searches:
-        records.extend(_search_records(result, search, pending))
-    return (tuple(text for text, _ in records),
-            tuple((name, index) for index, (_, names) in enumerate(records) for name in names))
+        records.extend(_search_records(result, search, pending, seen, available))
+    return (tuple(text for text, _, _ in records),
+            tuple((name, index) for index, (_, names, _) in enumerate(records) for name in names),
+            tuple((name, index, offset) for index, (_, _, names) in enumerate(records) for name, offset in names))
 
 
 def _probe_excerpt(value):

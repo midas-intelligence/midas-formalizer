@@ -64,12 +64,14 @@ class Section:
     kind: str
     name: str
     text: bytes
+    declarations: tuple[str, ...] = ()  # Types/definitions in this section; not emitted on the wire.
 
     def __post_init__(self):
         if self.kind not in KINDS:
             raise DomainError('Unknown prompt section kind')
         label(self.name)
         raw_text(self.text)
+        items(self.declarations, str)
 
 
 def subject(name: str, signature: Signature):

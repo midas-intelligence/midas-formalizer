@@ -124,7 +124,9 @@ class Workflow:
         ident = candidates.identity(reader, state, self.selection.environment_id)
         target = self.selection.selected.targets[state.index]
         refs = [state.context, state.identity]
-        sections = [Section('source', 'source-prefix', self.selection.source[:target.declaration.start]),
+        sections = [Section('source', 'source-prefix', self.selection.source[:target.declaration.start],
+                            tuple(d.selector for d in self.selection.declarations
+                                  if d.source_authored and d.declaration.end <= target.declaration.start)),
             subject('goal', self.displayed_signature(reader, ident, refs))]
         owners = [snapshot.version.owner]
         guidance = reader.record('application.guidance', snapshot.version.owner.obligation_id)
@@ -135,7 +137,7 @@ class Workflow:
                 reader, snapshot.context, self.selection.environment_id)):
             signature = self.displayed_signature(reader, child_identity, refs)
             sections.append(Section('interfaces', f'inherited-{ordinal}',
-                alias.encode() + b' :\n' + subject('type', signature).text))
+                alias.encode() + b' :\n' + subject('type', signature).text, (alias,)))
             refs.append(child.interface)
             owners.append(child.owner)
         if snapshot.context.references and review is None:
@@ -144,7 +146,8 @@ class Workflow:
         definitions = codec.load_record(snapshot.context.definitions, limit=8*1024**2)
         if definitions:
             sections.append(Section('definitions', 'inherited-definitions', '\n'.join(
-                f"{d['kind']} {d['name']} : {d['type']} := {d['value']}" for d in definitions).encode()))
+                f"{d['kind']} {d['name']} : {d['type']} := {d['value']}" for d in definitions).encode(),
+                tuple(d['name'] for d in definitions)))
         for required in snapshot.context.subjects:
             if required.kind != 'target' or required.name == target.selector:
                 continue
@@ -241,7 +244,8 @@ class Workflow:
                 header = f'Result ID: {result_id}\nPage {page} of {count}. '
                 header += 'Complete result included below.\n\n' if count == 1 else 'This page is included below.\n\n'
             sections.append(Section('evidence', section_name,
-                header.encode()+page_text(r.read(reader, reference, 16000))))
+                header.encode()+page_text(r.read(reader, reference, 16000)),
+                tuple(r.value(reader, 'application.page-declarations', reference.sha256) or ())))
             refs.append(reference)
         if review is None and self.search and self.search.index:
             sections.append(Section('source', 'search-roots',
@@ -291,6 +295,9 @@ class Workflow:
             token_usage.prepare(reader, key, snapshot.version.owner, role, route, prepared.wire),
             r.record(reader, 'application.pending', snapshot.version.owner.obligation_id, key),
             Effect(artifacts=tuple(a for a in (wire, setup, turn) if a))]
+        if role == 'prover':
+            from .helpers import remember_declarations
+            effects.append(remember_declarations(reader, snapshot.version, prepared.wire.declarations))
         if self.script:
             effects.append(self.script.bind(reader, request))
         return r.merge(*effects)

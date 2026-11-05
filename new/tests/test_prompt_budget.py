@@ -50,6 +50,16 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(len([s for s in result.sections if s.kind == 'evidence']), 2)
         self.assertEqual(byte_budget(10000, (40000, 10000)), 36000)
 
+    def test_wire_tracks_only_declarations_in_the_selected_prompt(self):
+        from midas.prompt import Options, Snapshot, build
+        value = prompt()
+        value = replace(value, sections=tuple(replace(section, declarations=(section.name,))
+                                             for section in value.sections))
+        wire = build(Snapshot(value.sections), Options('codex', 'fixture'),
+                     renderer=lambda _: value, input_token_budget=3300)
+        self.assertEqual(wire.declarations, ('source', 'page-2', 'page-3', 'proof', 'question'))
+        self.assertNotIn(b'EVIDENCE page-0', wire.wire)
+
     def test_budget_cannot_silently_hide_newest_result_or_required_context(self):
         with self.assertRaisesRegex(DomainError, 'Input token budget cannot fit'):
             window(prompt(), 1000)

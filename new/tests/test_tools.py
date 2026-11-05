@@ -411,7 +411,7 @@ class ToolsTests(unittest.TestCase):
         result = SearchResult('a'*64, tuple(Match((name,), 'project/Main.lean', i+1, i+1,
             'indexed source '+name) for i, name in enumerate(hits)))
         checked = {name: f'theorem {name} : True' for name in (*explicit, *hits[:12])}
-        rows, positions = retrieval_summary(action, ((result, search),), checked)
+        rows, positions, displayed = retrieval_summary(action, ((result, search),), checked)
         self.assertEqual(rows[:4], tuple(checked[name] for name in explicit))
         self.assertEqual(rows[4], 'Search (frozen-source): find terms')
         self.assertEqual(len(rows), 4+1+50)
@@ -422,6 +422,7 @@ class ToolsTests(unittest.TestCase):
             self.assertIn(checked[name], rows[index])
             self.assertEqual('\n'.join(rows).count(checked[name]+'\n'), 1)
         self.assertEqual(len(positions), 16)
+        self.assertEqual(tuple((name, index) for name, index, _ in displayed), positions)
 
     def test_checked_search_details_keep_review_positions_when_paged(self):
         from midas.application.helpers import page_text
@@ -430,10 +431,11 @@ class ToolsTests(unittest.TestCase):
         search = Search(action.queries[0], action.backends[0])
         result = SearchResult('a'*64, tuple(Match((name,)) for name in hits))
         checked = {hits[0]: 'def N.hit0 : Nat\n\n'+('large source body\n'*1500)}
-        rows, positions = retrieval_summary(action, ((result, search),), checked)
+        rows, positions, displayed = retrieval_summary(action, ((result, search),), checked)
         self.assertEqual(rows[0], 'Search (leanexplore): find terms')
         self.assertIn('50. N.hit49', rows[1])
         self.assertEqual(positions, (('N.hit0', 2),))
+        self.assertEqual(tuple((name, index) for name, index, _ in displayed), positions)
         archive = prepare_archive(self.scope, 'a'*64, rows, (self.a.save(b'provenance'),), self.a)
         selected = b''.join(page_text(self.a.data[ref.id], records={'2'}) for ref in archive.pages)
         self.assertIn(b'def N.hit0 : Nat', selected)
@@ -446,10 +448,25 @@ class ToolsTests(unittest.TestCase):
         checked = {'N.Generated.rec': 'theorem N.Generated.rec : True'}
         for error in (None, 'search failure'):
             result = SearchResult('a'*64, error=error)
-            rows, positions = retrieval_summary(action, ((result, search),), checked)
+            rows, positions, _ = retrieval_summary(action, ((result, search),), checked)
             self.assertEqual(rows[0], 'Search (frozen-source): N.Generated.rec')
             self.assertEqual(rows[-1], 'Exact identifier lookup:\n'+checked['N.Generated.rec'])
             self.assertEqual(positions, (('N.Generated.rec', 2),))
+
+    def test_paged_multi_name_hit_tracks_where_each_type_actually_starts(self):
+        from midas.application.helpers import page_text
+        action = Retrieve(('find terms',), backends=(Backend('frozen-source'),))
+        search = Search(action.queries[0], action.backends[0])
+        result = SearchResult('a'*64, (Match(('N.first', 'N.later'), 'project/Main.lean', 1, 1),))
+        checked = {'N.first': 'def N.first : Nat\n'+('-- large source\n'*2000),
+                   'N.later': 'theorem N.later : True'}
+        rows, _, displayed = retrieval_summary(action, ((result, search),), checked)
+        archive = prepare_archive(self.scope, 'a'*64, rows, (self.a.save(b'provenance'),), self.a)
+        first = page_text(self.a.data[archive.pages[0].id])
+        self.assertIn(b'N.later', first)
+        self.assertNotIn(checked['N.later'].encode(), first)
+        for name, index, offset in displayed:
+            self.assertTrue(rows[index].encode()[offset:].startswith(checked[name].encode()))
 
     def test_checked_search_source_is_not_repeated_within_entry_or_as_another_lookup(self):
         action = Retrieve(('first query', 'second query'), backends=(Backend('frozen-source'),))
@@ -457,12 +474,57 @@ class ToolsTests(unittest.TestCase):
         result = SearchResult('a'*64, (Match(('N.example',), 'project/Main.lean', 1, 1, source),))
         searches = tuple((result, Search(query, action.backends[0])) for query in action.queries)
         checked = {'N.example': 'def N.example : Nat\n\n'+source}
-        rows, positions = retrieval_summary(action, searches, checked)
+        rows, positions, displayed = retrieval_summary(action, searches, checked)
         self.assertEqual(rows[0], 'Search (frozen-source): first query')
         self.assertEqual(rows[1].splitlines()[:2], ['N.example', 'Source: project/Main.lean:1'])
         self.assertEqual(rows[1].count(source), 1)
         self.assertEqual('\n'.join(rows).count('def N.example : Nat'), 1)
         self.assertEqual(positions, (('N.example', 1),))
+        self.assertEqual(tuple((name, index) for name, index, _ in displayed), positions)
+        self.assertEqual(rows[-1], 'No new matches; declaration types or definitions were already shown.')
+        self.assertEqual('\n'.join(rows).count(source), 1)
+
+    def test_retrieval_removes_seen_details_without_refilling_or_promoting_tail(self):
+        action = Retrieve(('find terms',), backends=(Backend('frozen-source'),))
+        search = Search(action.queries[0], action.backends[0])
+        hits = tuple(f'N.hit{i}' for i in range(50))
+        result = SearchResult('a'*64, tuple(Match((name,), 'project/Main.lean', i+1, i+1,
+            f'def hit{i} : Nat := {i}') for i, name in enumerate(hits)))
+        checked = {name: f'def {name} : Nat' for name in hits[:12]}
+        rows, positions, displayed = retrieval_summary(action, ((result, search),), checked,
+            seen=tuple('_root_.N.«hit'+str(i)+'»' for i in range(12)))
+        self.assertEqual(len(rows), 1+38)
+        self.assertEqual(rows[1], '13. N.hit12')
+        self.assertEqual(rows[-1], '50. N.hit49')
+        self.assertEqual(positions, ())
+        self.assertEqual(displayed, ())
+
+    def test_retrieval_keeps_names_and_failures_and_deduplicates_explicit_details(self):
+        action = Retrieve(('first query', 'second query'), ('N.known',), (Backend('leanexplore'),))
+        result = SearchResult('a'*64, tuple(Match((name,)) for name in ('N.known', 'N.failed', 'N.hint')))
+        searches = tuple((result, Search(query, action.backends[0])) for query in action.queries)
+        checked = {'N.known': 'theorem N.known : True', 'N.failed': 'N.failed: unavailable'}
+        rows, positions, displayed = retrieval_summary(action, searches, checked,
+            seen=('N.known',), available={'N.known'})
+        self.assertEqual(rows[0], checked['N.known'])
+        self.assertEqual('\n'.join(rows).count('N.known'), 1)
+        self.assertEqual(rows.count('N.hint'), 2)
+        self.assertIn('N.failed\nN.failed: unavailable', rows)
+        self.assertIn('N.failed', rows)
+        self.assertEqual(displayed, (('N.known', 0, 0),))
+        self.assertEqual(positions, (('N.known', 0), ('N.failed', 2)))
+
+    def test_retrieval_filters_multi_name_hits_and_keeps_anonymous_sources(self):
+        action = Retrieve(('find terms',), backends=(Backend('frozen-source'),))
+        search = Search(action.queries[0], action.backends[0])
+        result = SearchResult('a'*64, (
+            Match(('N.old', 'N.new'), 'project/Main.lean', 1, 1, 'def new : Nat := 0'),
+            Match((), 'project/Main.lean', 2, 2, '-- useful comment')))
+        rows, _, displayed = retrieval_summary(action, ((result, search),), {}, seen=('N.old',))
+        self.assertNotIn('N.old', '\n'.join(rows))
+        self.assertIn('N.new', rows[1])
+        self.assertIn('-- useful comment', rows[2])
+        self.assertEqual(tuple((name, index) for name, index, _ in displayed), (('N.new', 1),))
 
     def test_probe_display_preserves_diagnostics_goals_flags_and_inspection(self):
         case = dict(id='inspect', operation='tactic', code='run_tac do\n  pure ()', setup='', expected=None)

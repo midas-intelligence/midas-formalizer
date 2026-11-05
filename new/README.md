@@ -1358,6 +1358,14 @@ with automatically checked declarations embedded in their numbered entries.
 Search titles remain declaration names. Checked details replace the indexed
 excerpt beneath the source location instead of adding a separate lookup entry.
 The indexed source remains a fallback when lookup source is unavailable.
+New search displays omit declarations whose type or definition has already reached
+a prover prompt, including source-prefix and inherited definitions. Names alone and
+failed lookups do not count. Deduplication preserves the original ranks and detail
+allowance without fetching replacements, so a search may display fewer than 50 hits.
+Explicit name lookups remain available. The seen names survive resume and fork
+within the same owner/context; paged details count only when the start of their
+type or source is included in the prompt, after the configured evidence window
+is applied.
 A flat declaration-to-record index preserves review access
 after pagination. Original
 artifacts remain archive provenance. Container descriptors preserve object/array

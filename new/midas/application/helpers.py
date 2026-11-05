@@ -16,6 +16,24 @@ from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retr
 from . import records as r, token_usage
 
 
+def shown_declarations(reader, scope):
+    """Names included in prepared prover prompts for this exact owner/context."""
+    saved = reader.record('application.shown-declarations', scope.owner.obligation_id)
+    if saved is None:
+        return set()
+    generation, context, names = codec.decode(r.read(reader, saved.artifact, r.DATA))
+    return set(names) if (generation, context) == (scope.owner.generation, scope.context.sha256) else set()
+
+
+def remember_declarations(reader, scope, names):
+    previous = shown_declarations(reader, scope)
+    names = previous.union(names)
+    if names == previous:
+        return Effect()
+    return r.save(reader, 'application.shown-declarations', scope.owner.obligation_id,
+                  codec.encode([scope.owner.generation, scope.context.sha256, sorted(names)]))
+
+
 def begin(flow, reader, turn, plan, artifacts=(), parent=None):
     values = tuple(artifact(a.data) for a in artifacts)
     request, original = artifact(plan.request.payload), artifact(turn.payload)
@@ -175,6 +193,7 @@ def reduce(flow, reader, invocation, accepted, binding):
     # Continuation validates owner/context; memory may have advanced at dispatch.
     flow.strategy.on_helper(snapshot, turn, plan, evidence, searches=searches)
     rows, provenance, checked = [], [], {}
+    available, displayed_records = set(), ()
     lookup_records = []
     for item in evidence:
         provenance.extend(item.artifacts)
@@ -204,6 +223,8 @@ def reduce(flow, reader, invocation, accepted, binding):
                 summaries = lookup_sources(records, environment_id=request.scope.environment_id,
                     index=index, prefix=SourceFile(packet['logical'], packet['source'].encode()), reader=source_reader)
                 checked.update((record['query'], summary) for record, summary in zip(records, summaries))
+                available.update(record['query'] for record in records
+                                 if record['status'] == 'available' and record.get('type'))
                 continue
             if isinstance(item.stage.action, Probe):
                 rows.append('Probe failed: '+(item.error or item.status.value))
@@ -213,9 +234,11 @@ def reduce(flow, reader, invocation, accepted, binding):
             except ValueError:
                 rows.append(dict(status=item.error or 'advisory', artifact=reference.id))
     if isinstance(request.action, Retrieve):
-        summaries, positions = retrieval_summary(request.action,
-            tuple((result, search.action) for result, search in zip(searches, search_stages(request))), checked)
+        summaries, positions, displayed = retrieval_summary(request.action,
+            tuple((result, search.action) for result, search in zip(searches, search_stages(request))), checked,
+            seen=shown_declarations(reader, request.scope), available=available)
         lookup_records = [[name, len(rows)+index] for name, index in positions]
+        displayed_records = tuple((name, len(rows)+index, offset) for name, index, offset in displayed)
         rows.extend(summaries)
     if searches:
         provenance.extend(r.unref(v) for v in saved['searches'])
@@ -223,6 +246,18 @@ def reduce(flow, reader, invocation, accepted, binding):
         provenance.append(r.unref(saved['request']))
     buffer = Buffer()
     archive = prepare_archive(request.scope, key, rows, tuple(dict.fromkeys(provenance)), buffer)
+    declarations = {}
+    for name, index, offset in displayed_records:
+        declarations.setdefault(str(index), []).append((name, offset))
+    # Follow the start of each actual type/source, even when a long name list
+    # or a previous declaration's body pushes it onto a later page.
+    for page in buffer.artifacts if declarations else ():
+        fragments = codec.load_record(page.source, limit=16000)[4]
+        names = tuple(dict.fromkeys(name for row in fragments if row[0] == 'text'
+                                   for name, offset in declarations.get(row[1][0], ())
+                                   if row[2] <= offset < row[2]+len(row[4].encode())))
+        if names:
+            extra.append(r.record(reader, 'application.page-declarations', page.reference.sha256, list(names)))
     archive_data = artifact(archive.payload)
     _, state = r.owner_state(reader, request.scope.owner.obligation_id)
     archives = r.value(reader, 'application.archives', request.scope.owner.obligation_id) or []

@@ -89,6 +89,7 @@ class WireRequest:
     setup: bytes | None
     snapshot: Snapshot = field(repr=False, compare=False)
     input_bytes: int
+    declarations: tuple[str, ...] = ()
     id: str = field(init=False)
 
     def __post_init__(self):
@@ -211,4 +212,6 @@ def build(snapshot: Snapshot, options: Options, *, renderer: Renderer,
             _content(writer, _section(section), breakpoint=index in points)
             writer.add(b'}')
         writer.add(b']}')
-    return WireRequest(prompt.role, prompt.renderer, prompt.contract, writer.finish(), setup, snapshot, input_bytes(prompt))
+    declarations = tuple(dict.fromkeys(n for s in prompt.sections for n in s.declarations))
+    return WireRequest(prompt.role, prompt.renderer, prompt.contract, writer.finish(), setup, snapshot,
+                       input_bytes(prompt), declarations)

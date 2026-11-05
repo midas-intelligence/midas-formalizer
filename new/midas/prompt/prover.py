@@ -109,6 +109,10 @@ prefixes; an empty array searches all frozen roots. leanexplore requires an empt
 prefixes array. For scoped search, use the displayed frozen-source roots, including
 project when offered, or a file, directory or module within them.
 project searches the frozen project sources.
+Search results omit declarations whose type or definition has already been shown
+in a prover prompt or earlier in this retrieval. Names alone do not count; omitted
+hits are not replaced, so fewer than 50 results may remain. Explicit name lookups
+can still request those declarations again.
 Frozen-source search returns up to 50 results, with source details for the first
 12 and names for the rest. Exact file/module prefixes give those files a ranking
 preference within the selected scope. Large excerpts may continue on another page.

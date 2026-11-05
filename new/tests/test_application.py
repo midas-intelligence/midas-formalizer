@@ -1080,6 +1080,58 @@ class Contracts(unittest.TestCase):
             self.assertEqual(Compiler.calls.count('lookup'), 2)
             self.assertEqual(searches.call_count, 1)
 
+    def test_repeated_search_omits_only_displayed_details_across_resume_and_fork(self):
+        from midas.application import helpers, records as r
+        from midas.tools import SearchService, SourceEntry, SourceIndex
+        from tests.test_tools import Artifacts
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        retrieve = dict(mode='retrieve', rationale='Find declarations.', queries=['Nat'], names=[],
+                        backends=[dict(name='frozen-source', prefixes=['project'])])
+        for large, forked in ((False, False), (True, False), (True, True)):
+            with self.subTest(large=large, forked=forked):
+                artifacts = Artifacts()
+                padding = ' -- '+('padding '*450) if large else ''
+                source = 'namespace Fixture\n'+''.join(
+                    f'def term{i:02} : Nat := {i}{padding}\n' for i in range(70))+'end Fixture\n'
+                index = SourceIndex(self.environment.id,
+                    (SourceEntry('project/Support.lean', artifacts.save(source.encode())),))
+                self.app.search_factory = lambda: SearchService(index=index, source_reader=artifacts)
+                name = 'forked-search' if forked else 'paged-search' if large else 'small-search'
+                with self.start(name, workflow='scripted', config=replace(Config(), prover=route),
+                        script=tuple(('prover', response(a)) for a in (retrieve, retrieve, proof()))) as run:
+                    owner = run.workflow.graph(run.writer).nodes[0].owner
+                    for _ in range(1000):
+                        run.step()
+                        archives = helpers.advertised(run.writer, owner)
+                        if archives:
+                            break
+                        time.sleep(.001)
+                    self.assertEqual(len(archives), 1)
+                    shown = r.value(run.writer, 'application.page-declarations', archives[0].pages[0].sha256)
+                    self.assertTrue(shown)
+                    if large:
+                        self.assertLess(len(shown), 12)
+                        self.assertGreater(len(archives[0].pages), 1)
+                    else:
+                        self.assertEqual(len(shown), 12)
+                following = (self.app.fork(self.root/name, self.root/(name+'-child'),
+                    script=(('prover', response(retrieve)), ('prover', response(proof()))))
+                    if forked else self.app.resume(self.root/name))
+                with following as run:
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    archives = helpers.advertised(run.writer, owner)
+                    self.assertEqual(len(archives), 2)
+                    text = b'\n'.join(helpers.page_text(r.read(run.writer, page, 16000))
+                                      for page in archives[1].pages).decode()
+                    for i in range(50):
+                        term = f'Fixture.term{i:02}'
+                        if term in shown:
+                            self.assertNotIn(term, text)
+                        else:
+                            self.assertIn(term, text)
+                    self.assertNotIn('Fixture.term50', text)
+                    self.assertEqual(run.writer.counter('owner:'+owner.obligation_id, 'retrieval'), 1 if forked else 2)
+
     def test_runs_and_resume_reuse_package_postings_with_fresh_application_caches(self):
         from threading import Event
         from midas.application import preparation
