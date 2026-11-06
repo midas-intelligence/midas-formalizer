@@ -34,14 +34,29 @@ partial def ownSorry (env : Environment) (added : NameSet) (e : Expr)
 
 partial def scan (imports : Environment) (records : Array Json := #[])
     (external : NameSet := {}) : FrontendM (Array Json × NameSet) := do
+  updateCmdPos
   let before ← getCommandState
-  let done ← processCommand
+  let ictx ← getInputContext
+  let scope := before.scopes.head!
+  -- Elaboration resets the per-command message log. Check parser diagnostics
+  -- first, then elaborate the same syntax so each command is parsed only once.
+  let (cmd, ps, messages) := Parser.parseCommand ictx
+    { env := before.env, options := scope.opts, currNamespace := scope.currNamespace,
+      openDecls := scope.openDecls } (← getParserState) {}
+  if messages.hasErrors then
+    for message in messages.toList do
+      IO.eprintln (← message.toString)
+    throw (IO.userError "input contains Lean parse errors")
+  modify fun s => { s with commands := s.commands.push cmd }
+  setParserState ps
+  setMessages messages
+  elabCommandAtFrontend cmd
+  let done := Parser.isTerminalCommand cmd
   let after ← getCommandState
   if after.messages.hasErrors then
     for message in after.messages.toList do
       IO.eprintln (← message.toString)
     throw (IO.userError "input contains Lean elaboration errors")
-  let cmd := (← get).commands.back!
   let added := after.env.constants.map₂.toList.filter (fun (n, _) => !before.env.contains n)
   let addedNames := added.foldl (fun names (n, _) => names.insert n) ({} : NameSet)
   let positions := namePositions cmd
@@ -52,9 +67,9 @@ partial def scan (imports : Environment) (records : Array Json := #[])
     !hasAtom cmd "where" && !hasAtom cmd "termination_by" && !hasAtom cmd "decreasing_by"
   let mut records := records
   let mut external := external
-  let fileMap := (← read).inputCtx.fileMap
+  let fileMap := ictx.fileMap
   let mut hasAuthored := false
-  let freshMessages := after.messages.toList.drop before.messages.toList.length
+  let freshMessages := after.messages.toList
   let mut hasHole := freshMessages.any (fun message => MessageData.hasTag (· == `hasSorry) message.data)
   -- Examples need not remain in the environment. Preserve an explicit source
   -- hole even if the file disabled its warning.
@@ -68,8 +83,18 @@ partial def scan (imports : Environment) (records : Array Json := #[])
     let value := ci.value? true
     let unfinished := value.any (ownSorry after.env addedNames ·)
     hasHole := hasHole || unfinished
-    if ci.type.hasSorry || ci.type.hasMVar || ci.type.hasFVar || value.any Expr.hasSyntheticSorry then
-      throw (IO.userError s!"{(privateToUserName n).toString}: incomplete type or recovered elaboration error")
+    let failure := if ci.type.hasSorry then some "type contains sorry"
+      else if ci.type.hasMVar then some "type contains metavariables"
+      else if ci.type.hasFVar then some "type contains free variables"
+      else if value.any Expr.hasSyntheticSorry then some "value contains synthetic sorry (recovered elaboration error)"
+      else none
+    if let some reason := failure then
+      let pos := (ranges.map (·.selectionRange.pos)).getD
+        (fileMap.toPosition (cmd.getPos?.getD (← get).cmdPos))
+      let type ← runCommandElabM <| liftTermElabM do return (← Meta.ppExpr ci.type).pretty
+      let messages ← if freshMessages.isEmpty then pure "(none)"
+        else do pure (String.join (← freshMessages.mapM (·.toString)))
+      throw (IO.userError s!"{ictx.fileName}:{pos.line}:{pos.column}: {(privateToUserName n).toString}: {reason}\ntype: {type}\ncommand messages:\n{messages}")
     let typeRefs := ci.type.getUsedConstants
     let valueRefs := (value.map Expr.getUsedConstants).getD #[]
     for ref in typeRefs ++ valueRefs do

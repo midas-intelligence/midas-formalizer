@@ -210,6 +210,19 @@ def signature (type : Expr) (levels : List Name) (context : Json := closedContex
     ("universes", toJson (levels.map Midas.Identity.name)),
     ("context", context)]
 
+-- Unnamed instance binders carry macro scopes containing the compiling module.
+-- Exporting the same source in another module can change those scopes. Erase
+-- them only from binder names; all other signature structure remains exact.
+def exportSignature (sig : Json) : CommandElabM Json := do
+  let type ← checked (readExpr (← checked (field sig "target")))
+  -- The cached traversal preserves sharing in large expression DAGs.
+  let type ← liftCoreM <| Core.transform type (post := fun e => return .done (match e with
+    | .lam n t b bi => .lam n.eraseMacroScopes t b bi
+    | .forallE n t b bi => .forallE n.eraseMacroScopes t b bi
+    | .letE n t v b nd => .letE n.eraseMacroScopes t v b nd
+    | _ => e))
+  return sig.setObjVal! "target" (← checked (Midas.Identity.expr type))
+
 def parse {α : Type} (x : Except String α) : TermElabM α :=
   match x with | .ok a => pure a | .error e => throwError "{e}"
 
@@ -1078,8 +1091,11 @@ def auditSource (packet : Json) (before : Environment) : CommandElabM Json := do
   for target in targets do
     let n ← checked (readName (← checked (field target "constant")))
     let ci ← getConstInfo n
-    unless (← signature ci.type ci.levelParams) == (← checked (field target "signature")) do
-      throwError "export target signature mismatch: {n}"
+    let actual ← signature ci.type ci.levelParams
+    let expected ← checked (field target "signature")
+    unless actual == expected do
+      unless (← exportSignature actual) == (← exportSignature expected) do
+        throwError "export target signature mismatch: {n}"
     auditConstant ci assumptions
   return Json.mkObj [("format", toJson (if allowSorry then "midas-source-audit-sorry-v1" else "midas-source-audit-v1")),
     ("request", ← checked (field packet "request")), ("targets", toJson targets)]

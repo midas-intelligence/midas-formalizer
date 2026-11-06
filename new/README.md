@@ -539,8 +539,10 @@ process. Explicitly trusted compiled dependencies are mounted read-only from the
 frozen environment and checked again after the final audit. The original project's
 compiled files are excluded. The audit elaborates the complete entry and independently
 kernel-replays its declarations, including non-target declarations. Selected target
-signatures must match exactly. Native proof caches and retained import workers are
-not used for this stage.
+signatures must match exactly after erasing generated macro scopes from binder
+names, which can change when compiling the source in another module. Binder kinds,
+types, constants and universes remain exact. Native proof caches and retained
+import workers are not used for this stage.
 
 `prepare_library(environment, modules, replay, dependencies, staging)` captures an
 environment-admitted source closure. That earlier replay supplies provenance and

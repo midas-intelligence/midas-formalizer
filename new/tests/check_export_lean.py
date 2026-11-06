@@ -36,6 +36,13 @@ def main():
         (project/'Joint.lean').write_text('def witness : Nat := sorry\ntheorem property : witness = witness := by sorry\n')
         (project/'Library.lean').write_text('import Dep\ntheorem target : Dep.value = 7 := by sorry\n')
         (project/'Context.lean').write_text('structure Box where\n  value : Nat\ndef twice : Nat → Nat\n  | 0 => 0\n  | n+1 => twice n + 2\ntheorem target : twice 2 = 4 := by sorry\n')
+        (project/'Instances.lean').write_text('''universe u
+theorem target {G : Type u} [Mul G] [One G] (g : G) : g * 1 = g * 1 := by sorry
+theorem named {G : Type u} [mul : Mul G] [one : One G] (g : G) : g * 1 = g * 1 := by sorry
+theorem nested : (fun {G : Type} [Inhabited G] => (default : G)) =
+    (fun {G : Type} [Inhabited G] => (default : G)) := by sorry
+''')
+        paths = ('Main.lean', 'Joint.lean', 'Library.lean', 'Context.lean', 'Instances.lean')
         with Executor(root, workers=1, compiler_slots=1, compiler_memory_mib=4096) as executor:
             def execute(inv, callback, *, succeeds=True):
                 workspace = root/str(uuid4())
@@ -76,11 +83,11 @@ def main():
                     max_heartbeat=context.limits.max_heartbeat, max_rec_depth=context.limits.max_rec_depth)))
                 env = Environment.prepare(root/'package', PackageConfig('4.35.0-rc3', toolchain,
                     (('project', project), ('library', dep)),
-                    tuple('project/' + p for p in ('Main.lean', 'Joint.lean', 'Library.lean', 'Context.lean')),
+                    tuple('project/' + p for p in paths),
                     ('project', 'library/lib', 'toolchain/lib/lean')), context)
                 checker = Checker(env, '/tmp/midas-new-checker-runtime')
                 selections = {p: inspect(checker, SelectionRequest(p, all_unfinished=True), context)
-                              for p in ('Main.lean', 'Joint.lean', 'Library.lean', 'Context.lean')}
+                              for p in paths}
                 compiled, _ = scan(env.roots['library']/'lib')
                 sources, _ = scan(env.roots['library']/'src')
                 source = replace(sources.files[0], path='src/Dep.lean')
@@ -144,12 +151,52 @@ def main():
                 print(label + ': integration, clean build, kernel audit, publication and standalone recheck passed', flush=True)
                 return integrated.decode()['packet']['source']
 
-            for path, code in (('Main.lean', 'by trivial'), ('Context.lean', 'by rfl'), ('Library.lean', 'by rfl')):
+            # The same unnamed instance has a different generated binder name
+            # when the export is compiled under a new module. Keep the frozen
+            # signatures from Instances, including nested lambda binders.
+            selected = selections['Instances.lean']
+            owner = OwnerVersion(selected.identities[0].id, 0)
+            for allow_sorry in (False, True):
+                source = selected.source if allow_sorry else selected.source.replace(b'by sorry', b'by rfl')
+                audit = checker.prepare('audit', selected, owner, values.save(source), values,
+                                        allow_sorry=allow_sorry)
+                value = audit.decode()
+                value['packet']['logical'] = 'Partial/PInstances.lean'
+                audit = replace(audit, payload=codec.encode(value))
+                inv = issue_check(audit, values)
+                result, receipt = execute(inv, checker.execute)
+                checker.admit_receipt(audit, inv, result, receipt, values, authority)
+            print('cross-module strict and partial instance audits: passed', flush=True)
+
+            # Only generated binder scopes may differ. Each mutation changes a
+            # separate signature field while keeping the source well-typed.
+            for change in ('binder kind', 'instance type', 'universe parameters', 'universe level', 'binder name'):
+                value = audit.decode()
+                sig = next(t['signature'] for t in value['packet']['targets'] if t['constant'] == name('target'))
+                target = sig['target']
+                if change == 'binder kind':
+                    target[4][2] = 'implicit'
+                elif change == 'instance type':
+                    target[4][3][1][1] = name('Add')
+                elif change == 'universe parameters':
+                    sig['universes'].append(name('extra'))
+                elif change == 'universe level':
+                    target[3][1] = ['succ', target[3][1]]
+                else:
+                    target[1] = name('H')
+                altered = replace(audit, payload=codec.encode(value))
+                result, _ = execute(issue_check(altered, values), checker.execute, succeeds=False)
+                assert result.diagnostics is not None, (change, result)
+                assert b'export target signature mismatch: target' in values.data[result.diagnostics.id], change
+            print('binder kind, type, universe and authored-name mismatches: rejected', flush=True)
+
+            for path, code in (('Main.lean', 'by trivial'), ('Context.lean', 'by rfl'),
+                               ('Library.lean', 'by rfl'), ('Instances.lean', 'by intros; rfl')):
                 selected = selections[path]
-                admitted, _ = prove(selected, 0, code)
-                graph = ProofGraph(0, (admitted.candidate.owner.obligation_id,), (node(selected, 0, admitted),))
+                nodes = tuple(node(selected, i, prove(selected, i, code)[0]) for i in range(len(selected.identities)))
+                graph = ProofGraph(0, tuple(n.owner.obligation_id for n in nodes), nodes)
                 finish(path[:-5], selected, graph, library=state['library'] if path == 'Library.lean' else None)
-                unfinished = replace(graph, nodes=(replace(graph.nodes[0], selected=None),))
+                unfinished = replace(graph, nodes=(replace(graph.nodes[0], selected=None), *graph.nodes[1:]))
                 finish('partial-' + path[:-5], selected, unfinished, allow_sorry=True,
                        library=state['library'] if path == 'Library.lean' else None)
 
