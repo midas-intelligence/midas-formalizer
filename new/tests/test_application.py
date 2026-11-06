@@ -212,7 +212,7 @@ class Contracts(unittest.TestCase):
         finding = dict(category='progress', location='goal', issue='True is inhabited.', suggested_revision=advice)
         for verdict in ('accept', 'reject'):
             with self.subTest(verdict=verdict):
-                raw = model_json(dict(verdict=verdict, rationale='Independent review decision.',
+                raw = model_json(dict(child_declarations=[], verdict=verdict, rationale='Independent review decision.',
                     findings=[finding] if verdict == 'reject' else [], question='', urls=[]))
                 captured = []
                 original = prover.render
@@ -252,7 +252,7 @@ class Contracts(unittest.TestCase):
             calls.append((request.role, decode(raw, limit=8*1024**2).get('reasoning')))
             reply = (response(dict(mode='stop', rationale='No proof found.', objection=None))
                      if request.role == 'prover' else model_json(dict(
-                         verdict='accept', rationale='The request is justified.', findings=[], question='', urls=[])))
+                         child_declarations=[], verdict='accept', rationale='The request is justified.', findings=[], question='', urls=[])))
             return ModelOutput(raw=reply, usage=Usage(0, 0, 0, 0))
         self.app.transports = {Route.from_config(route).scope: transport}
         config = replace(Config(), prover=replace(route, reasoning_effort='high'),
@@ -270,7 +270,7 @@ class Contracts(unittest.TestCase):
         from midas.strategy import Turn
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         action = dict(mode='stop', rationale='The statement cannot be proved.', objection=None)
-        review = model_json(dict(verdict='accept', rationale='The request is justified.', findings=[], question='', urls=[]))
+        review = model_json(dict(child_declarations=[], verdict='accept', rationale='The request is justified.', findings=[], question='', urls=[]))
         run = self.start(workflow='scripted', config=replace(Config(), prover=route, reviewer=route),
                          script=(('prover', response(action)), ('reviewer', review)))
         owner = self.selected.identities[0].id
@@ -313,7 +313,7 @@ class Contracts(unittest.TestCase):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         action = response(dict(mode='stop', rationale='Definitions are not shown.',
             objection=dict(category='context_mismatch', evidence='The source prefix has no declaration.')))
-        review = model_json(dict(verdict='reject', rationale='Inspect the imported definitions.',
+        review = model_json(dict(child_declarations=[], verdict='reject', rationale='Inspect the imported definitions.',
             findings=[dict(category='context_mismatch', location='goal', issue='Definitions are uninspected.',
                            suggested_revision='Use retrieve to inspect the definitions.')], question='', urls=[]))
         script = tuple(('prover', action) for _ in range(4)) + tuple(('reviewer', review) for _ in range(3))
@@ -367,10 +367,10 @@ class Contracts(unittest.TestCase):
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         research_route = ModelRoute(provider='openai', model='fixture')
         action = dict(mode='stop', rationale='No route found.', objection=None)
-        research = model_json(dict(verdict='research', rationale='Investigate.', findings=[], question='Which constructor?', urls=[]))
+        research = model_json(dict(child_declarations=[], verdict='research', rationale='Investigate.', findings=[], question='Which constructor?', urls=[]))
         answer = model_json(dict(answer='Use True.intro as the proof.', unresolved=[]))
         finding = dict(category='progress', location='goal', issue='There is a constructor.', suggested_revision='')
-        malformed = dict(verdict='reject', rationale='Use the constructor.', findings=[finding], question='', urls=[])
+        malformed = dict(child_declarations=[], verdict='reject', rationale='Use the constructor.', findings=[finding], question='', urls=[])
         rejected = dict(malformed, findings=[dict(finding, suggested_revision='Apply True.intro.')])
         captured, original = [], reviewer.render
         def capture(snapshot):
@@ -584,9 +584,9 @@ class Contracts(unittest.TestCase):
                 def ask(helper):
                     fields = dict(rationale='Find the next step.', question='How does True.intro apply?')
                     if caller == 'reviewer':
-                        return model_json(dict(verdict=helper, findings=[], urls=[], **fields))
+                        return model_json(dict(child_declarations=[], verdict=helper, findings=[], urls=[], **fields))
                     return response(dict(mode=helper, **fields, **({'urls': []} if helper == 'web_search' else {})))
-                rejected = model_json(dict(verdict='reject', rationale='The node has a proof.', question='', urls=[],
+                rejected = model_json(dict(child_declarations=[], verdict='reject', rationale='The node has a proof.', question='', urls=[],
                     findings=[dict(category='progress', location='goal', issue='True has a constructor.',
                                    suggested_revision='Apply True.intro.')]))
                 final = rejected if caller == 'reviewer' else response(proof())
@@ -1385,9 +1385,9 @@ class Contracts(unittest.TestCase):
                                    usefulness='Provides the required fact.', depends_on=[])]
         action['proof_body'] = 'by exact support'
         invalid = dict(mode='recall', rationale='Read missing evidence.', result_id='missing-result')
-        research = model_json(dict(verdict='research', rationale='Check the plan.', findings=[],
+        research = model_json(dict(child_declarations=[], verdict='research', rationale='Check the plan.', findings=[],
                                   question='Can the child use the constructor?', urls=[]))
-        accept = model_json(dict(verdict='accept', rationale='The constructor suffices.', findings=[], question='', urls=[]))
+        accept = model_json(dict(child_declarations=[], verdict='accept', rationale='The constructor suffices.', findings=[], question='', urls=[]))
         answer = model_json(dict(answer='Review-specific supporting answer.', unresolved=[]))
         child = proof()
         child['proof_body'] = 'by trivial'

@@ -1019,6 +1019,25 @@ This schema is versioned as `prover-action-v3`. A new direct proof replaces the
 previous decomposition; keeping proposed
 children requires a complete decomposition or an exact revision of its fragments.
 
+Accepted decomposition reviews include `child_declarations`, a list of
+`{"child": "entry-key", "names": ["Nat.add", "Nat.add_zero"]}` rows. The reviewer
+selects useful declaration names for each pending child; an empty `names` list is
+appropriate when no useful declarations are known. Rejections, helper verdicts,
+and stop reviews use an empty `child_declarations` list. The review contract is
+`review-verdict-v2`. Suggestions returned with non-accept decisions or stop reviews
+are ignored. Unknown child keys and invalid declaration identifiers are skipped;
+valid suggestions for existing children still apply.
+
+Before a child's next prover call, the application looks up the selected names in
+that child's frozen source/import context and checked dependency aliases. Checked
+types and available original definition sources appear as ordinary evidence with
+the problem. Large results use the existing evidence pages and prompt budget.
+These automatic lookups consume no model turn or retrieval allowance. Unknown
+names and terminal lookup failures are shown as feedback and child work continues.
+Names are deduplicated and sorted before lookup so prompt excerpts have a stable
+order. Shared children combine suggestions, and saved lookup progress survives
+resume and fork.
+
 Replacement means supplying a different `renderer(snapshot) -> Prompt` callable.
 It may change instructions, the schema, and the ordering/presentation of context.
 The application selects that callable for each configured model; there are no

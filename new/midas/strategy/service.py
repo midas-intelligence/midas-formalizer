@@ -178,8 +178,10 @@ class Strategy:
                 return self.on_stop_review(snapshot, response.value, evidence=admitted.raw)
             review = AdmittedReview(snapshot.attempt.candidate, admitted.receipt,
                                     response.value['verdict'] == 'accept')
-            return self.on_review(snapshot, policy, review, evidence=admitted.raw,
-                                  diagnostics=(response.value['rationale'],))
+            result = self.on_review(snapshot, policy, review, evidence=admitted.raw,
+                                    diagnostics=(response.value['rationale'],))
+            selections = response.value.get('child_declarations', ()) if review.approved else ()
+            return replace(result, child_declarations=tuple((row['child'], tuple(row['names'])) for row in selections))
         action, mode = response.value, response.mode
         # Compute memory changes only after the complete semantic action validates.
         if mode in ('proof', 'decomposition', 'candidate', 'revise'):

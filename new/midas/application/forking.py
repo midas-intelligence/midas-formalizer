@@ -46,7 +46,8 @@ def fork(application, parent, directory, *, config=None, package=None, workflow=
                     child.writer.import_receipt(reader, key)
                 after = page[-1]
             scopes = ('application.owners', 'application.submissions', 'application.jobs', 'application.archives',
-                      'application.guidance', 'application.page-declarations', 'application.shown-declarations')
+                      'application.guidance', 'application.page-declarations', 'application.shown-declarations',
+                      'application.child-declarations')
             joint, coordinator = joint_targets(selection), joint_coordinator(selection)
             for scope in scopes:
                 after = ''

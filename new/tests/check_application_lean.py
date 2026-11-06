@@ -74,17 +74,33 @@ def main():
         print('standalone bundle recheck passed', flush=True)
         decompose = dict(action, mode='decomposition', proof_body='by have witness := h; trivial',
             children=[dict(name='h', statement='1 = 1', proof='Use reflexivity.', usefulness='Test dependency.', depends_on=[])])
-        review = b'{"verdict":"accept","rationale":"The glue uses its stated premise.","findings":[],"question":"","urls":[]}'
-        investigate = model_json(dict(verdict='research', rationale='Check the supporting argument.', findings=[],
+        review = b'{"verdict":"accept","rationale":"The glue uses its stated premise.","findings":[],"question":"","urls":[],"child_declarations":[]}'
+        suggested_review = model_json(dict(verdict='accept', rationale='Use reflexivity.', findings=[],
+            question='', urls=[], child_declarations=[dict(child='h',
+                names=['Nat.add_zero', 'Nat.add', 'MidasMissingDeclaration'])]))
+        investigate = model_json(dict(child_declarations=[], verdict='research', rationale='Check the supporting argument.', findings=[],
             question='What proves reflexivity?', urls=[]))
         researched = model_json(dict(answer='Reflexivity follows from rfl.', unresolved=[]))
         research_config = replace(config, research=ModelRoute(provider='openai', model='fixture'))
         with app.start(root/'decomposition', package=package, selection=selected, config=research_config, workflow='scripted',
             script=(('prover', response(decompose)), ('prover', response(proof())),
-                    ('reviewer', investigate), ('reviewer', review), ('research', researched))) as run:
+                    ('reviewer', investigate), ('reviewer', suggested_review), ('research', researched))) as run:
             result = run.run()
             assert result.exit_code == 0, result
             assert run.writer.status_snapshot().accounting.turns == 5
+            from midas.application import declarations, helpers, records as r
+            child = next(n for n in run.workflow.graph(run.writer).nodes if n.owner.obligation_id not in run.workflow.graph(run.writer).roots)
+            snapshot = run.workflow.snapshot(run.writer, child.owner)
+            saved = declarations.current(run.writer, child.owner, snapshot.version.context)
+            assert saved['completed'] == ['MidasMissingDeclaration', 'Nat.add', 'Nat.add_zero']
+            assert snapshot.usage.retrieval == 0
+            pages = [page for archive in helpers.advertised(run.writer, child.owner) for page in archive.pages]
+            evidence = b'\n'.join(helpers.page_text(r.read(run.writer, page, 16000)) for page in pages)
+            assert b'theorem Nat.add_zero :' in evidence, evidence
+            assert b'def Nat.add :' in evidence, evidence
+            assert b'MidasMissingDeclaration:' in evidence, evidence
+            shown = helpers.shown_declarations(run.writer, snapshot.version)
+            assert {'Nat.add_zero', 'Nat.add'} <= shown, shown
         with app.resume(root/'decomposition') as run:
             assert run.run().exit_code == 0
         with app.fork(root/'decomposition', root/'fork') as run:
@@ -119,7 +135,7 @@ def main():
             assert result.exit_code == 0, result
             owner = selected.identities[0].id
             assert run.writer.counter('owner:'+owner, 'retrieval') == 1
-            assert run.writer.counter('owner:'+owner, 'probe') == 2
+            assert run.writer.counter('owner:'+owner, 'probe') == 1
             assert run.writer.status_snapshot().accounting.turns == 3
             from midas.application import helpers, records as r
             archives = helpers.advertised(run.writer, run.workflow.graph(run.writer).nodes[0].owner)
@@ -138,7 +154,7 @@ def main():
                     'The equality appears unprovable.'))
             finding = dict(category='mathematical', location='goal', issue='Equality is reflexive.',
                            suggested_revision='Use by rfl to prove 1 = 1.')
-            verdict = model_json(dict(verdict='accept' if approved else 'reject',
+            verdict = model_json(dict(child_declarations=[], verdict='accept' if approved else 'reject',
                 rationale='False cannot be proved.' if approved else 'Reflexivity proves the child.',
                 findings=[] if approved else [finding], question='', urls=[]))
             with app.start(root/name, package=package, selection=selected, config=config, workflow='scripted',

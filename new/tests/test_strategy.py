@@ -230,8 +230,8 @@ class ProtocolTests(unittest.TestCase):
                 interpret(response(action), role='prover', contract='prover-action-v3')
 
     def test_review_findings_and_research_invariants(self):
-        value = dict(verdict='accept', rationale='A valid plan.', findings=[], question='', urls=[])
-        parse = lambda v: interpret(model_json(v), role='reviewer', contract='review-verdict-v1')
+        value = dict(child_declarations=[], verdict='accept', rationale='A valid plan.', findings=[], question='', urls=[])
+        parse = lambda v: interpret(model_json(v), role='reviewer', contract='review-verdict-v2')
         self.assertEqual(parse(value).mode, 'review')
         with self.assertRaises(ValueError):
             parse(dict(value, verdict='reject'))
@@ -243,6 +243,25 @@ class ProtocolTests(unittest.TestCase):
             parse(dict(value, question='Hidden research'))
         with self.assertRaisesRegex(ValueError, 'does not accept URLs'):
             parse(dict(value, verdict='research', question='Explain this.', urls=['https://example.test']))
+
+    def test_review_declaration_selections_are_ignored_for_non_accept_decisions(self):
+        value = dict(child_declarations=[dict(child='first', names=['Nat.mul', 'Nat.add', 'Nat.mul']),
+                                        dict(child='second', names=[])],
+                     verdict='accept', rationale='A useful plan.', findings=[], question='', urls=[])
+        parse = lambda v: interpret(model_json(v), role='reviewer', contract='review-verdict-v2')
+        self.assertEqual(parse(value).value['child_declarations'][0]['names'], ['Nat.add', 'Nat.mul'])
+        with self.assertRaises(ValueError):
+            parse(dict(value, child_declarations=[dict(child='first', names=['Nat.add'] * 17)]))
+        finding = dict(category='progress', location='plan', issue='The plan makes no progress.',
+                       suggested_revision='Use an intermediate construction.')
+        for verdict in ('reject', 'research', 'web_search'):
+            for selections in (value['child_declarations'], None, {'malformed': 'ignored'},
+                               [dict(child='first', names=['by trivial'])] * 300):
+                with self.subTest(verdict=verdict, selections=selections):
+                    result = parse(dict(value, verdict=verdict, child_declarations=selections,
+                        findings=[finding] if verdict == 'reject' else [],
+                        question='' if verdict == 'reject' else 'Which construction applies?'))
+                    self.assertEqual(result.value['child_declarations'], [])
 
 
 class CandidateTests(unittest.TestCase):
@@ -700,7 +719,12 @@ class StateTests(unittest.TestCase):
         self.assertEqual(Turn.load(dispatched.turn.payload), dispatched.turn)
         self.assertEqual(prepared.turn.stop_request_hash, request.id)
         self.assertIsNone(prepared.turn.candidate_hash)
-        verdict = dict(verdict='accept', rationale='The missing hypothesis is necessary.', findings=[], question='', urls=[])
+        verdict = dict(child_declarations=[], verdict='accept', rationale='The missing hypothesis is necessary.', findings=[], question='', urls=[])
+        with_suggestions = dict(verdict, child_declarations=[dict(child='child', names=['Nat.add'])])
+        ignored = self.strategy.on_model(snapshot, self.policy, dispatched,
+            admitted(artifacts, dispatched, model_json(with_suggestions)), artifacts)
+        self.assertTrue(ignored.stopped)
+        self.assertFalse(ignored.child_declarations)
         output = admitted(artifacts, dispatched, model_json(verdict))
         result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
         self.assertTrue(result.stopped)
@@ -745,7 +769,7 @@ class StateTests(unittest.TestCase):
         snapshot = replace(snapshot, stop_request=StopRequest(snapshot.version.owner, 'No route found.', artifact('stop')))
         dispatched, _, _ = dispatch(snapshot, artifacts)
         finding = dict(category='progress', location='goal', issue='A constructor is available.', suggested_revision='')
-        verdict = dict(verdict='reject', rationale='The goal is provable.', findings=[finding], question='', urls=[])
+        verdict = dict(child_declarations=[], verdict='reject', rationale='The goal is provable.', findings=[finding], question='', urls=[])
         with self.assertRaisesRegex(ValueError, 'feedback on how to continue'):
             self.strategy.on_model(snapshot, self.policy, dispatched,
                 admitted(artifacts, dispatched, model_json(verdict)), artifacts)
@@ -764,7 +788,7 @@ class StateTests(unittest.TestCase):
             request = StopRequest(snapshot.version.owner, 'No construction is possible.', artifact('stop'))
             snapshot = replace(snapshot, stop_request=request)
             dispatched, _, _ = dispatch(snapshot, artifacts)
-            raw = model_json(dict(verdict=helper, rationale='Check the construction.', findings=[],
+            raw = model_json(dict(child_declarations=[], verdict=helper, rationale='Check the construction.', findings=[],
                                   question='Which construction applies?', urls=[]))
             result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
             stage = result.helper.stages[0]
@@ -965,10 +989,12 @@ class StateTests(unittest.TestCase):
         self.assertIsNone(result.graph)
         self.assertEqual(result.work[0].operation, 'review')
         dispatched, _, _ = dispatch(snapshot, artifacts)
-        raw = model_json(dict(verdict='accept', rationale='Valid reduction.', findings=[], question='', urls=[]))
+        raw = model_json(dict(child_declarations=[dict(child='child', names=['Nat.add_zero'])],
+                             verdict='accept', rationale='Valid reduction.', findings=[], question='', urls=[]))
         result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
         self.assertEqual(result.graph.node(snapshot.version.owner).state, ProofState.CONDITIONAL)
         self.assertIsNone(result.memory)
+        self.assertEqual(result.child_declarations, (('child', ('Nat.add_zero',)),))
         other = replace(snapshot.attempt.candidate, source=artifact('changed'))
         altered = replace(snapshot, attempt=Attempt(other, True, check(other)))
         with self.assertRaises(ValueError):
@@ -1006,7 +1032,7 @@ class StateTests(unittest.TestCase):
         for helper in ('research', 'web_search'):
             artifacts, snapshot = fixture(conditional=True)
             dispatched, _, _ = dispatch(snapshot, artifacts)
-            raw = model_json(dict(verdict=helper, rationale='Check the endpoint.', findings=[],
+            raw = model_json(dict(child_declarations=[], verdict=helper, rationale='Check the endpoint.', findings=[],
                                   question='Does the estimate include zero?', urls=[]))
             result = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, raw), artifacts)
             self.assertEqual(result.helper.charge, helper)

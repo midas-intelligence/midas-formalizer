@@ -8,7 +8,7 @@ from ..prompt import prover, reviewer
 from .memory import Update, text
 
 RESPONSE_BYTES = 8 * 1024**2
-CONTRACTS = {'prover': 'prover-action-v3', 'reviewer': 'review-verdict-v1'}
+CONTRACTS = {'prover': 'prover-action-v3', 'reviewer': 'review-verdict-v2'}
 
 
 def _validator(schema, root):
@@ -93,6 +93,10 @@ def interpret(payload, *, role, contract):
         if type(queries) is list:
             action['queries'] = [query for query in queries if type(query) is str]
             discarded_queries = len(action['queries']) != len(queries)
+    if role == 'reviewer' and value.get('verdict') != 'accept':
+        # Suggestions have no meaning for rejection or helper continuation.
+        # Discard them before validation, even if their contents are malformed.
+        value['child_declarations'] = []
     _default(role)(value)
     if role == 'prover':
         action = value['action']
@@ -105,6 +109,8 @@ def interpret(payload, *, role, contract):
         return Response(action['mode'], action, Update.from_value(value['memory_update']))
     verdict = value['verdict']
     text(value['rationale'])
+    for row in value['child_declarations']:
+        row['names'] = sorted(set(row['names']))
     if verdict == 'reject':
         if not value['findings']:
             raise DomainError('Review rejection requires findings')

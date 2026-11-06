@@ -449,7 +449,8 @@ class Workflow:
                 if not proposal.work:
                     continue
                 try:
-                    effect = self.model_job(reader, snapshot, proposal.work[0])
+                    from .declarations import plan as declarations_plan
+                    effect = declarations_plan(self, reader, snapshot) or self.model_job(reader, snapshot, proposal.work[0])
                     key = effect.work[0].intent.request.job.semantic_key
                 except ValueError as error:
                     effect = r.save_owner(reader, node.owner.obligation_id,
@@ -494,6 +495,9 @@ class Workflow:
             return self.on_model(reader, invocation, accepted, binding)
         if kind == 'helper':
             from .helpers import reduce
+            return reduce(self, reader, invocation, accepted, binding)
+        if kind == 'child-declarations':
+            from .declarations import reduce
             return reduce(self, reader, invocation, accepted, binding)
         if kind == 'export':
             return self.on_export(reader, invocation, accepted, binding[1], *binding[2:])
@@ -545,6 +549,8 @@ class Workflow:
         try:
             proposal = self.strategy.on_model(snapshot, self.policy, Dispatch(turn, invocation.request.request_ref),
                 accepted.value, reader, submission_id=str(uuid5(UUID(invocation.original_execution_id), 'submission')))
+            from .declarations import remember
+            declarations = remember(reader, saved, proposal.child_declarations, accepted.value.raw) if binding[2] else Effect()
         except ValueError as error:
             # Keep semantic rejection details in the next prompt, including when
             # an unavailable helper was syntactically valid. Bound before encoding
@@ -557,7 +563,8 @@ class Workflow:
                     evidence, diagnostics=diagnostics))
             proposal = self.strategy.on_failure(snapshot, self.policy, 'protocol', evidence=evidence,
                                                diagnostics=diagnostics)
-        effects = [clear]
+            declarations = Effect()
+        effects = [clear, declarations]
         if proposal.objection:
             from .repairs import report
             effects.append(report(self, reader, proposal.objection))

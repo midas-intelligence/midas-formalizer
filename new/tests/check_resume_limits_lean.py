@@ -29,7 +29,7 @@ def main():
         decompose = dict(proof(), mode='decomposition', proof_body='by have witness := h; trivial',
             children=[dict(name='h', statement='1 = 1', proof='Use reflexivity.',
                            usefulness='Proves the target.', depends_on=[])])
-        review = b'{"verdict":"accept","rationale":"The glue uses its premise.","findings":[],"question":"","urls":[]}'
+        review = b'{"verdict":"accept","rationale":"The glue uses its premise.","findings":[],"question":"","urls":[],"child_declarations":[]}'
         with app.start(root/'run', package=package, selection=selected, config=config,
                        workflow='scripted', script=(('prover', response(decompose)),
                        ('prover', response(proof())), ('reviewer', review))) as run:
