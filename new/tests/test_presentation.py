@@ -5,10 +5,10 @@ from unittest.mock import patch
 
 from midas.application import presentation
 from midas.prompt import Snapshot, prover, subject
-from midas.strategy import Lesson, Memory, Observation, expand, fragments
+from midas.strategy import Lesson, Memory, Observation, expand, fragments, revise, update_memory
 from tests.test_domain import artifact, uid
 from tests.test_source import signature
-from tests.test_strategy import context, decomposition
+from tests.test_strategy import context, decomposition, proof
 
 
 class PresentationTests(unittest.TestCase):
@@ -58,24 +58,86 @@ class PresentationTests(unittest.TestCase):
             self.assertEqual(rest[:-len(fence)-1].decode(), raw)
             self.assertNotIn(fence, raw.encode())
 
-    def test_memory_preserves_lesson_ids_diagnostics_pins_and_omissions(self):
+    def test_memory_displays_latest_check_preserving_lessons_pins_and_omissions(self):
         old = Observation('checker', 'rejected', artifact('old'), ('old failure\n  exact line',), 2)
         latest = replace(old, status='binding_failed', messages=('latest failure\n  another line',), omitted=1)
         saved = Memory(strategy='Try an invariant.', lessons=(Lesson('invariant', 'Keep its boundary case.'),),
                        observations=(old, latest), pins=('result-a',), evicted=3)
         sections = presentation.memory(saved)
         rendered = prover.render(Snapshot((subject('goal', signature()), *sections)))
-        history = next(s for s in rendered.sections if s.kind == 'history')
+        self.assertFalse(any(s.kind == 'history' for s in rendered.sections))
         feedback = next(s for s in rendered.sections if s.kind == 'feedback')
         memory = next(s for s in rendered.sections if s.kind == 'memory')
-        self.assertIn(old.messages[0].encode(), history.text)
-        self.assertIn(b'2 diagnostic message(s) omitted', history.text)
+        self.assertNotIn(old.messages[0].encode(), feedback.text)
+        self.assertNotIn(b'2 diagnostic message(s) omitted', feedback.text)
         self.assertIn(latest.messages[0].encode(), feedback.text)
         self.assertIn(b'1 diagnostic message(s) omitted', feedback.text)
         self.assertIn(b'Lesson invariant:\nKeep its boundary case.', memory.text)
         self.assertIn(b'Pinned evidence:\nresult-a', memory.text)
         self.assertIn(b'3 older memory record(s) evicted', memory.text)
-        self.assertNotIn(old.evidence.id.encode(), history.text)
+        self.assertNotIn(old.evidence.id.encode(), feedback.text)
+        self.assertEqual(saved.observations, (old, latest))
+
+    def test_latest_failed_edit_keeps_current_check_until_a_new_check_arrives(self):
+        old = Observation('checker', 'rejection', artifact('old'), ('Outdated compiler error.',))
+        current = replace(old, evidence=artifact('current'), messages=('Current compiler error.',))
+        first_edit = Observation('revision', 'revision_failed', artifact('first-edit'), ('First failed edit.',))
+        last_edit = replace(first_edit, evidence=artifact('last-edit'), messages=('Latest failed edit.',))
+        protocol = Observation('protocol', 'protocol', artifact('protocol'), ('Invalid action.',))
+        objection = Observation('objection', 'missing_assumption', artifact('objection'), ('A hypothesis is missing.',))
+        saved = Memory(observations=(objection, old, current, first_edit, last_edit, protocol))
+        before = saved.payload
+        sections = presentation.memory(saved)
+        self.assertEqual(presentation.memory(Memory.load(saved.payload)), sections)
+        text = b'\n'.join(s.text for s in sections)
+        for message in (*current.messages, *last_edit.messages, *objection.messages):
+            self.assertIn(message.encode(), text)
+        for message in (*old.messages, *first_edit.messages, *protocol.messages):
+            self.assertNotIn(message.encode(), text)
+        self.assertEqual(sum(s.kind == 'feedback' for s in sections), 2)
+        for source in ('checker', 'review'):
+            with self.subTest(source=source):
+                next_check = replace(current, source=source, evidence=artifact('next'), messages=('New candidate feedback.',))
+                updated = update_memory(saved, observation=next_check)
+                text = b'\n'.join(s.text for s in presentation.memory(updated))
+                self.assertIn(b'New candidate feedback.', text)
+                self.assertIn(objection.messages[0].encode(), text)
+                for message in (*old.messages, *current.messages, *first_edit.messages, *last_edit.messages):
+                    self.assertNotIn(message.encode(), text)
+        self.assertEqual(saved.payload, before)
+
+    def test_hidden_check_protocol_failure_still_supersedes_old_candidate_errors(self):
+        old = Observation('checker', 'rejection', artifact('old'), ('An outdated error.',))
+        failed_edit = Observation('revision', 'revision_failed', artifact('edit'), ('An outdated edit failure.',))
+        latest = Observation('checker', 'protocol', artifact('latest'), ('A hidden protocol failure.',))
+        self.assertEqual(presentation.memory(Memory(observations=(old, failed_edit, latest))), ())
+
+    def test_consecutive_revisions_replace_code_and_errors_without_prompt_growth(self):
+        ctx = context()
+        draft = expand(dict(proof(), proof_body='by exact candidate_0'), ctx, uid('base'))
+        memory = Memory(lessons=(Lesson('approach', 'Keep the useful approach.'),))
+        sizes = []
+        for index in range(4):
+            with self.subTest(revision=index), patch('json.dumps', side_effect=AssertionError('JSON encode')), \
+                 patch('json.loads', side_effect=AssertionError('JSON decode')):
+                memory = update_memory(memory, observation=Observation('checker', 'rejection',
+                    artifact('check-'+str(index)), (f'Unknown identifier candidate_{index}.',)))
+                rendered = prover.render(Snapshot((subject('goal', signature()),
+                    presentation.candidate(draft, ctx), *presentation.memory(memory))))
+                text = b'\n'.join(s.text for s in rendered.sections)
+                sizes.append(len(text))
+                self.assertEqual(text.count(f'by exact candidate_{index}'.encode()), 1)
+                self.assertEqual(text.count(f'Unknown identifier candidate_{index}.'.encode()), 1)
+                self.assertIn(b'Keep the useful approach.', text)
+                for previous in range(index):
+                    self.assertNotIn(f'candidate_{previous}'.encode(), text)
+                if index < 3:
+                    action = dict(mode='revise', rationale='Use the next candidate.', edits=[
+                        dict(path='/entries/parent/proof', old=f'candidate_{index}', new=f'candidate_{index+1}')])
+                    draft = revise(action, draft, ctx, uid('revision-'+str(index)))
+        # The initial rationale differs; subsequent equal-size revisions stay flat.
+        self.assertEqual(len(set(sizes[1:])), 1)
+        self.assertEqual(len(memory.observations), 4)
 
     def test_review_evidence_filters_search_records_and_binds_research_to_candidate(self):
         from midas.application import helpers, records as r

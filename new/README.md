@@ -911,11 +911,23 @@ enter domain's atomic `accept_joint` path together. Candidates with only closed
 definition dependencies retain the direct-attempt classification.
 
 `Draft` saves the binary submission and separate English guidance. Exact named
-fragment edits apply sequentially on private values and either produce a complete
-new draft or fail without effects. They reject stale bases, overlapping/ambiguous
-matches, no-ops, changed inherited definitions, changed target statements and
-structural changes. Local references bind to the controller-allocated new
-submission ID. `fragments` exposes the exact strings for prompt presentation.
+fragment edits all resolve against the displayed base before any replacements.
+Disjoint spans apply atomically, independent of edit order; each affected fragment
+is rebuilt once. A whole-fragment replacement cannot share its path with another
+edit. Revisions either produce a complete new draft or fail without effects. They
+reject stale bases, overlapping edits, ambiguous matches, no-ops, changed inherited
+definitions, changed target statements and structural changes. Local references
+bind to the controller-allocated new submission ID. `fragments` exposes the exact
+strings for prompt presentation.
+An edit that cannot apply (including missing or ambiguous old text, an unadvertised
+fragment path, or a no-op) returns revision feedback with the candidate unchanged.
+The next prover prompt includes the reason and correction guidance. These failures
+consume model turns but no protocol revision allowance or mathematical attempt.
+Consecutive revisions replace the displayed candidate. Prompts include only the
+latest candidate check/review feedback and the latest failed-edit message after
+that check, if any. A failed edit leaves the current check relevant; a new check
+supersedes both earlier check and edit failures. Older results stay saved, while
+strategy, lessons, objections and helper evidence retain their existing treatment.
 
 The controller supplies an immutable `Snapshot`, then calls `Strategy.plan`.
 Returned `Work` values describe operations to lower through the owning component.
@@ -994,7 +1006,7 @@ adaptation keeps these responsibilities without importing the old implementation
 | --- | --- |
 | Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v10`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v1`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
-| Retained history dictionary | Flat, complete retained observation sections in saved order. No nested reference dictionary or prior-session access. |
+| Retained history dictionary | Flat retained observations; superseded candidate-check and edit failures are excluded from prompts. Current feedback keeps complete selected messages. No prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
 | Current turn: memory, feedback and evidence | Strategy, named lessons, pins, evidence pages and latest feedback, followed by changing capabilities and the action request. Omitted diagnostics and evicted memory are counted. |
 | Research context and question | Readable source, exact task, proof guidance, checked interfaces, available candidate/evidence and the question. |

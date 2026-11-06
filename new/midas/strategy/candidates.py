@@ -12,6 +12,10 @@ MAX_BYTES = 8 * 1024**2
 EMPTY = pack([])
 
 
+class RevisionError(ValueError):
+    """An edit cannot apply to the current candidate and needs model revision."""
+
+
 @dataclass(frozen=True, slots=True)
 class Subject:
     kind: str
@@ -443,41 +447,62 @@ def fragments(draft, context):
 
 
 def revise(action, base, context, submission_id):
-    """Sequential exact edits on private decoded values; failure has no effects."""
+    """Resolve exact edits against the base, then apply disjoint spans atomically."""
     uuid(submission_id)
-    original = load_submission(base.submission)
-    if submission_id == original['submission_id']:
-        raise ValueError('Revision requires a fresh submission identity')
     value = load_submission(base.submission)
+    original_id = value['submission_id']
+    if submission_id == original_id:
+        raise ValueError('Revision requires a fresh submission identity')
     guidance = load_record(base.guidance, limit=MAX_BYTES)
     paths = _fragments(value, guidance, context, base.unproved)
     edits = action['edits']
     if not edits:
-        raise ValueError('Revision requires edits')
-    for edit in edits:
+        raise RevisionError('Revision requires edits')
+    pending = {}
+    for index, edit in enumerate(edits, 1):
         if edit['path'] not in paths:
-            raise ValueError('Unadvertised fragment path')
+            raise RevisionError('Unadvertised fragment path: ' + edit['path'])
         owner, key = paths[edit['path']]
         old, new = edit['old'], edit['new']
         current = owner[key]
+        first, end = 0, len(current)
         if old is not None:
             if not old:
-                raise ValueError('Old fragment must be nonempty')
+                raise RevisionError('Old fragment must be nonempty')
             first = current.find(old)
             if first < 0 or current.find(old, first + 1) >= 0:
-                raise ValueError('Old fragment must match exactly once')
-            new = current[:first] + new + current[first + len(old):]
-        if new == current:
-            raise ValueError('No-op fragment edit')
+                matches = 'no matches' if first < 0 else 'multiple matches'
+                raise RevisionError(f'Edit {index} at {edit["path"]}: '
+                                    f'Old fragment must match exactly once ({matches})')
+            end = first + len(old)
+        if new == (current if old is None else old):
+            raise RevisionError('No-op fragment edit: ' + edit['path'])
+        pending.setdefault(edit['path'], []).append((first, end, new, index))
+    changed = False
+    for path, replacements in pending.items():
+        replacements.sort(key=lambda replacement: replacement[0])
+        for left, right in zip(replacements, replacements[1:]):
+            # Equal starts also catch two whole replacements of an empty fragment.
+            if right[0] < left[1] or right[0] == left[0]:
+                raise RevisionError(f'Edits {left[3]} and {right[3]} at {path}: Overlapping edits')
+        owner, key = paths[path]
+        current = owner[key]
+        parts, end = [], 0
+        for first, stop, new, _ in replacements:
+            parts.extend((current[end:first], new))
+            end = stop
+        parts.append(current[end:])
+        new = ''.join(parts)
         text(new, 1024**2, empty=True)
+        changed |= new != current
         owner[key] = new
-    if value == original and pack(guidance, MAX_BYTES) == base.guidance:
-        raise ValueError('Revision has no net changes')
+    if not changed:
+        raise RevisionError('Revision has no net changes')
     guidance['rationale'] = action['rationale']
     value['submission_id'] = submission_id
     for entry in value['entries']:
         for dep in entry['dependencies']:
-            if dep['entry']['submission_id'] == original['submission_id']:
+            if dep['entry']['submission_id'] == original_id:
                 dep['entry']['submission_id'] = submission_id
     # Revisions cannot silently turn proposed child bindings into proof jobs.
     # A complete candidate is required when changing the set of unproved entries.

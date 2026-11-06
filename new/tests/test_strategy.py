@@ -20,6 +20,7 @@ from midas.strategy import (Attempt, Context, Dispatch, Draft, Lesson, Memory, O
     Prerequisite, Reference, Snapshot, StopRequest, Strategy, Subject, Turn, Update, Version,
     child_context, consumers, expand, fragments, interpret, reopen, revise, update_memory)
 from midas.strategy.memory import pack
+from midas.strategy.candidates import RevisionError
 from midas.tools import Scope, StageEvidence, prepare_archive
 from tests.test_domain import artifact, candidate, check, node, receipt, review, select, uid
 
@@ -402,36 +403,83 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(second['dependencies'][0]['parameter'], 'first')
         self.assertEqual(len(value['definitions']), 1)
 
-    def test_exact_edits_are_sequential_atomic_and_rebind_local_references(self):
-        draft = expand(decomposition(), context(), uid('base'))
+    def test_exact_edits_share_base_are_order_independent_and_rebind_local_references(self):
+        draft = expand(dict(decomposition(), proof_body='by exact first second'), context(), uid('base'))
         action = dict(mode='revise', rationale='Change the glue.', edits=[
-            dict(path='/entries/parent/proof', old='second', new='first'),
-            dict(path='/entries/parent/proof', old='first', new='second.elim')])
+            dict(path='/entries/parent/proof', old='first', new='second.elim'),
+            dict(path='/entries/parent/proof', old='second', new='first')])
         result = revise(action, draft, context(), uid('revision'))
         value = load_submission(result.submission)
-        self.assertEqual(value['entries'][0]['proof'], 'by exact second.elim')
+        self.assertEqual(value['entries'][0]['proof'], 'by exact second.elim first')
+        reversed_edits = dict(action, edits=list(reversed(action['edits'])))
+        self.assertEqual(revise(reversed_edits, draft, context(), uid('revision')).payload, result.payload)
         self.assertTrue(all(d['entry']['submission_id'] == uid('revision') for e in value['entries'] for d in e['dependencies']))
-        self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], 'by exact second')
+        self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], 'by exact first second')
         bad = deepcopy(action)
         bad['edits'].append(dict(path='/entries/0/proof', old=None, new='by trivial'))
         with self.assertRaises(ValueError):
             revise(bad, draft, context(), uid('bad'))
         self.assertEqual(Draft.load(draft.payload), draft)
 
+    def test_revision_cannot_match_text_introduced_by_another_edit(self):
+        draft = expand(decomposition(), context(), uid('base'))
+        before = draft.payload
+        action = dict(mode='revise', rationale='Change the glue.', edits=[
+            dict(path='/entries/parent/proof', old='second', new='first'),
+            dict(path='/entries/parent/proof', old='first', new='second.elim')])
+        with self.assertRaisesRegex(RevisionError, 'Edit 2 .*no matches'):
+            revise(action, draft, context(), uid('revision'))
+        self.assertEqual(draft.payload, before)
+
+    def test_revision_rejects_overlapping_edits_including_whole_fragments(self):
+        draft = expand(decomposition(), context(), uid('base'))
+        before = draft.payload
+        for olds in (('exact second', 'second'), ('second', 'second'),
+                     (None, 'second'), ('second', None), (None, None)):
+            with self.subTest(olds=olds):
+                action = dict(mode='revise', rationale='Change the glue.', edits=[
+                    dict(path='/proof', old=None, new='An uncommitted plan.'),
+                    *(dict(path='/entries/parent/proof', old=old, new='by trivial') for old in olds)])
+                with self.assertRaisesRegex(RevisionError, 'Edits .* /entries/parent/proof: Overlapping edits'):
+                    revise(action, draft, context(), uid('revision'))
+                self.assertEqual(draft.payload, before)
+        empty = dict(mode='revise', rationale='Describe a departure.', edits=[
+            dict(path='/proof_departures', old=None, new='First description.'),
+            dict(path='/proof_departures', old=None, new='Second description.')])
+        with self.assertRaisesRegex(RevisionError, 'Overlapping edits'):
+            revise(empty, draft, context(), uid('revision'))
+        self.assertEqual(draft.payload, before)
+
+    def test_revision_preserves_adjacent_unicode_edits_and_rejects_net_noops(self):
+        draft = expand(dict(proof(), proof_body='by exact αβ'), context(), uid('base'))
+        action = dict(mode='revise', rationale='Change adjacent names.', edits=[
+            dict(path='/entries/parent/proof', old='α', new='γδ'),
+            dict(path='/entries/parent/proof', old='β', new=''),
+            dict(path='/proof_departures', old=None, new='Use another witness.')])
+        result = revise(action, draft, context(), uid('revision'))
+        self.assertEqual(load_submission(result.submission)['entries'][0]['proof'], 'by exact γδ')
+        self.assertEqual(load_record(result.guidance, limit=8*1024**2)['proof_departures'], 'Use another witness.')
+        action['edits'] = [dict(path='/entries/parent/proof', old='α', new=''),
+                           dict(path='/entries/parent/proof', old='β', new='αβ')]
+        with self.assertRaisesRegex(RevisionError, 'no net changes'):
+            revise(action, draft, context(), uid('revision'))
+
     def test_revisions_reject_noops_overlapping_matches_and_goal_changes(self):
         action = proof()
         action['proof_body'] = 'aaaa'
         base = expand(action, context(), uid('base'))
         for edits in ([dict(path='/entries/parent/proof', old='aaa', new='b')],
+                      [dict(path='/entries/parent/proof', old='missing', new='b')],
+                      [dict(path='/entries/parent/proof', old='', new='b')],
                       [dict(path='/entries/parent/proof', old=None, new='aaaa')],
                       [dict(path='/entries/parent/proof', old=None, new='b'),
                        dict(path='/entries/parent/proof', old=None, new='aaaa')]):
-            with self.subTest(edits=edits), self.assertRaises(ValueError):
+            with self.subTest(edits=edits), self.assertRaises(RevisionError):
                 revise(dict(mode='revise', rationale='Edit.', edits=edits), base, context(), uid('new'))
         ctx = Context(context().selection_id, (Subject('lemma', 'child', 'goal', 'True'),))
         base = expand(proof(), ctx, uid('lemma'))
         self.assertNotIn('/entries/parent/statement', dict(fragments(base, ctx)))
-        with self.assertRaises(ValueError):
+        with self.assertRaises(RevisionError):
             revise(dict(mode='revise', rationale='Edit.', edits=[dict(path='/entries/parent/statement', old=None, new='False')]),
                    base, ctx, uid('changed'))
 
@@ -972,6 +1020,39 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'direct_allowance_exhausted'):
             self.strategy.on_model(exhausted, self.policy, exhausted_dispatch,
                 admitted(artifacts, exhausted_dispatch, response(action)), artifacts, submission_id=uid('new'))
+
+    def test_failed_edit_returns_revision_feedback_without_charges_or_partial_effects(self):
+        artifacts, snapshot = fixture()
+        base = expand(dict(proof(), proof_body='aaaa'), snapshot.context, uid('base'))
+        snapshot = replace(snapshot, base=base,
+            usage=OwnerUsage(protocol=self.policy.config.mathematics.protocol))
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        before = base.payload
+        for olds, detail in ((('missing',), 'no matches'), (('aaa',), 'multiple matches'),
+                             (('aaaa', 'aaaa'), 'Overlapping edits')):
+            with self.subTest(olds=olds):
+                action = dict(mode='revise', rationale='Fix the proof.', edits=[
+                    dict(path='/proof', old=None, new='An uncommitted proof plan.'),
+                    *(dict(path='/entries/parent/proof', old=old, new='by trivial') for old in olds)])
+                update = dict(strategy='Uncommitted memory.', upsert=[], forget=[],
+                              pin_evidence=[], unpin_evidence=[])
+                output = admitted(artifacts, dispatched, response(action, update))
+                result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts,
+                                                submission_id=uid('failed-edit'))
+                self.assertEqual(result.reason, 'revision_failed')
+                self.assertEqual(result.work[0].operation, 'revise')
+                self.assertIsNone(result.revision_charge)
+                self.assertIsNone(result.decision)
+                self.assertIsNone(result.draft)
+                self.assertIsNone(result.stopped)
+                self.assertEqual(base.payload, before)
+                self.assertEqual(result.memory.strategy, snapshot.memory.strategy)
+                observation = result.memory.observations[-1]
+                self.assertEqual(observation.status, 'revision_failed')
+                self.assertEqual(observation.evidence, output.raw)
+                self.assertIn('at /entries/parent/proof', observation.messages[0])
+                self.assertIn(detail, observation.messages[0])
+                self.assertIn('No edits were applied.', observation.messages[1])
 
     def test_unrelated_graph_commit_preserves_turn_but_owner_state_change_does_not(self):
         artifacts, snapshot = fixture()

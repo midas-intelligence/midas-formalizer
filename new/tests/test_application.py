@@ -397,6 +397,56 @@ class Contracts(unittest.TestCase):
             self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'stop_requests'), 1)
             self.assertIn('Apply True.intro.', Memory.load(r.read(run.writer, state.memory)).observations[-1].messages)
 
+    def test_failed_edits_reach_next_prompt_and_recover_without_protocol_allowance(self):
+        from midas.application import records as r
+        from midas.controller import Accepted
+        from midas.policy import Failure
+        from midas.provider import ModelOutput, Route
+        from midas.strategy import Memory
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        config = replace(Config(), prover=route, mathematics=replace(Config().mathematics, protocol=0))
+        for old, detail in (('missing text', b'no matches'), ('duplicate', b'multiple matches')):
+            with self.subTest(old=old):
+                calls, checks = [], []
+                def transport(request, raw, *args):
+                    calls.append(raw)
+                    if len(calls) == 1:
+                        action = dict(proof(), proof_body='by\n  -- duplicate duplicate\n  exact True.intro')
+                    else:
+                        if len(calls) >= 3:
+                            self.assertIn(b'FEEDBACK observation-', raw)
+                            self.assertIn(b'Old fragment must match exactly once', raw)
+                            self.assertIn(detail, raw)
+                            self.assertIn(b'/entries/parent/proof', raw)
+                            self.assertIn(b'No edits were applied.', raw)
+                            self.assertIn(b'-- duplicate duplicate', raw)
+                            self.assertNotIn(b'Action rejected:', raw)
+                            self.assertNotEqual(raw, calls[1])
+                        action = dict(mode='revise', rationale='Fix the existing proof.', edits=[
+                            dict(path='/entries/parent/proof', old=old if len(calls) <= 4 else None,
+                                 new='by trivial')])
+                    return ModelOutput(raw=response(action), usage=Usage(0, 0, 0, 0))
+                self.app.transports = {Route.from_config(route).scope: transport}
+                with self.start(name=detail.decode().replace(' ', '-'), workflow='live', config=config) as run:
+                    operation = run.controller.operations.proof
+                    def admit(*args, **kwargs):
+                        checks.append(True)
+                        return Accepted(failure=Failure.REJECTION) if len(checks) == 1 else operation.admit(*args, **kwargs)
+                    run.controller.operations = replace(run.controller.operations,
+                        proof=replace(operation, admit=admit))
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    self.assertEqual(len(calls), 5)
+                    self.assertEqual(len(checks), 2)
+                    owner = self.selected.identities[0].id
+                    _, state = r.owner_state(run.writer, owner)
+                    failures = [o for o in Memory.load(r.read(run.writer, state.memory)).observations
+                                if o.status == 'revision_failed']
+                    self.assertEqual(len(failures), 3)
+                    self.assertFalse(state.stopped)
+                    self.assertEqual(run.writer.counter('owner:'+owner, 'protocol'), 0)
+                    self.assertEqual(run.writer.counter('owner:'+owner, 'direct'), 2)
+                    self.assertEqual(run.writer.status_snapshot().accounting.turns, 5)
+
     def test_protocol_rejection_is_saved_but_omitted_from_next_model_prompt(self):
         from midas.application import records as r
         from midas.provider import ModelOutput, Route

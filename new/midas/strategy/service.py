@@ -9,7 +9,7 @@ from ..policy import Policy
 from ..prompt import Section, Snapshot as Display, build, prover, reviewer
 from ..tools import (Backend, HelperRequest, Probe, Research, Retrieve, Scope, WebSearch,
                      expand_probe_bodies, finish_helper, plan_helper, read_page)
-from .candidates import expand, revise, supplied
+from .candidates import RevisionError, expand, revise, supplied
 from .memory import Observation, pack, update_memory
 from .protocol import CONTRACTS, RESPONSE_BYTES, interpret
 from .state import (ArtifactData, Attempt, AttemptDecision, Changes, Dispatch, Objection,
@@ -190,7 +190,15 @@ class Strategy:
             if mode == 'revise':
                 if snapshot.base is None:
                     raise ValueError('Revision requires an exact dispatched base')
-                draft = revise(action, snapshot.base, snapshot.context, submission_id)
+                try:
+                    draft = revise(action, snapshot.base, snapshot.context, submission_id)
+                except RevisionError as error:
+                    observation = Observation.select('revision', 'revision_failed', admitted.raw,
+                        (str(error)[:1800], 'No edits were applied. Use the exact current editable fragment '
+                         'for every old, with no overlapping edits; or use one edit with old set to null '
+                         'to replace the whole fragment.'))
+                    return Changes(snapshot.version, _resume(snapshot, dispatch.turn), reason='revision_failed',
+                                   memory=update_memory(snapshot.memory, observation=observation))
             else:
                 draft = expand(action, snapshot.context, submission_id)
             decision = policy.candidate(draft.mode, snapshot.usage)

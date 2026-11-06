@@ -84,8 +84,10 @@ same chosen objects. Preserve monomorphic values across uses and universe instan
 No joint output is committed until the whole group checks.
 Use revise only when CAPABILITIES marks it available, and only for exact displayed
 fragment names. Null old replaces a whole fragment; otherwise old must match
-exactly once. Structural changes require a complete new proof, decomposition or
-candidate.
+exactly once in the displayed candidate. All edits match that same candidate
+before any replacement; edit order has no effect. Overlapping edits, including
+a whole-fragment replacement combined with another edit to that fragment, are
+rejected. Structural changes require a complete new proof, decomposition or candidate.
 
 Helper results, including successful probes and evidence pages, are advisory;
 submit the complete proof for ordinary checking. Difficulty, resource interruptions,

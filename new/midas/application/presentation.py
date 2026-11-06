@@ -85,15 +85,30 @@ def candidate(draft, context, *, selected=None, checked=None):
 
 def memory(value):
     sections = []
-    # Complete observations are stable history records; strategy/lessons are
-    # changing turn material. Never flatten diagnostic newlines or lose notices.
-    observations = tuple(o for o in value.observations if o.status != 'protocol')
+    # Saved observations remain intact. A new check supersedes earlier check
+    # and edit failures; a failed edit keeps the current check relevant.
+    observations = []
+    seen_check = seen_revision = False
+    for observation in reversed(value.observations):
+        if observation.source in ('checker', 'review'):
+            if seen_check:
+                continue
+            seen_check = True
+        elif observation.source == 'revision':
+            if seen_check or seen_revision:
+                continue
+            seen_revision = True
+        if observation.status == 'protocol':
+            continue
+        observations.append(observation)
+    observations.reverse()
     for index, observation in enumerate(observations):
         rows = [f'{observation.source}: {observation.status}'.encode()]
         rows.extend(message.encode() for message in observation.messages)
         if observation.omitted:
             rows.append(f'{observation.omitted} diagnostic message(s) omitted.'.encode())
-        kind = 'feedback' if index == len(observations) - 1 else 'history'
+        kind = 'feedback' if (observation.source in ('checker', 'review', 'revision')
+                              or index == len(observations) - 1) else 'history'
         sections.append(Section(kind, f'observation-{index+1}', b'\n\n'.join(rows)))
     rows = []
     if value.strategy:
