@@ -32,7 +32,8 @@ def status(output):
 def metadata(output):
     return {'error': output.error, 'phase': output.phase, 'delivery': output.delivery.value,
         'usage': [output.usage.input_tokens, output.usage.cache_tokens, output.usage.output_tokens, output.usage.cost_microusd],
-        'cache_write_tokens': output.cache_write_tokens, 'request_id': output.request_id,
+        'cache_write_tokens': output.cache_write_tokens, 'reasoning_tokens': output.reasoning_tokens,
+        'request_id': output.request_id,
         'response_id': output.response_id, 'thread_id': output.thread_id, 'turn_id': output.turn_id,
         'retry_after_ms': output.retry_after_ms, 'diagnostics': list(output.diagnostics),
         'termination': output.termination.value}

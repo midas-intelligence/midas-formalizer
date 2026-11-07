@@ -34,6 +34,7 @@ class CostTests(unittest.TestCase):
         self.assertEqual(admitted.outcome.usage, result.usage)
         self.assertEqual(self.artifacts.data[admitted.raw.id], output.raw)
         self.assertEqual(admitted.outcome.cache_write_tokens, output.cache_write_tokens)
+        self.assertEqual(admitted.outcome.reasoning_tokens, output.reasoning_tokens)
         return result
 
     def test_cache_partition_cost_is_saved_in_worker_result_and_receipt(self):
@@ -41,6 +42,12 @@ class CostTests(unittest.TestCase):
         self.assertEqual(result.usage, Usage(100, 20, 10, 240))
         self.assertEqual(result.status, ResultStatus.SUCCEEDED)
         self.assertIsNone(self.output.usage.cost_microusd)
+
+    def test_reasoning_breakdown_is_saved_without_charging_output_twice(self):
+        for reasoning in (None, 0, 7):
+            with self.subTest(reasoning=reasoning):
+                result = self.execute(replace(self.output, reasoning_tokens=reasoning))
+                self.assertEqual(result.usage, Usage(100, 20, 10, 240))
 
     def test_missing_prices_and_required_telemetry_remain_unknown(self):
         for prices, usage, writes in (

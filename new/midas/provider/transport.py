@@ -94,16 +94,20 @@ def normalize_usage(value):
                 return x if type(x) is int and 0 <= x < 2**63 else None
         return None
     if not isinstance(value, dict):
-        return Usage(), None
+        return Usage(), None, None
     details = value.get('input_tokens_details')
     details = details if isinstance(details, dict) else {}
     merged = dict(value)
     merged.update({k: v for k, v in details.items() if k in ('cached_tokens', 'cache_write_tokens')})
+    output_details = value.get('output_tokens_details')
+    if isinstance(output_details, dict) and 'reasoning_tokens' in output_details:
+        merged['reasoning_tokens'] = output_details['reasoning_tokens']
     value = merged
     usage = Usage(number('input_tokens', 'inputTokens'),
                   number('cached_tokens', 'cachedInputTokens', 'cacheReadInputTokens'),
                   number('output_tokens', 'outputTokens'), number('cost_microusd'))
-    return usage, number('cache_write_tokens', 'cacheWriteInputTokens', 'cacheWriteTokens')
+    return (usage, number('cache_write_tokens', 'cacheWriteInputTokens', 'cacheWriteTokens'),
+            number('reasoning_tokens', 'reasoningOutputTokens'))
 
 
 class Collector:
@@ -154,7 +158,7 @@ class Collector:
             raise TransportError('output_limit')
 
     def usage(self, value):
-        self.value['usage'], self.value['cache_write_tokens'] = normalize_usage(value)
+        self.value['usage'], self.value['cache_write_tokens'], self.value['reasoning_tokens'] = normalize_usage(value)
 
     async def run(self, operation, cancel, deadline):
         if cancel.is_set():

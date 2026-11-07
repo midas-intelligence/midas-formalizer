@@ -179,6 +179,7 @@ class ModelOutput:
     delivery: DeliveryCertainty = DeliveryCertainty.DELIVERED
     usage: Usage = Usage()
     cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None  # Included in usage.output_tokens; None means unreported.
     request_id: str | None = None
     response_id: str | None = None
     thread_id: str | None = None
@@ -201,6 +202,8 @@ class ModelOutput:
         natural(self.retry_after_ms, 'retry delay')
         if self.cache_write_tokens is not None:
             natural(self.cache_write_tokens, 'cache write tokens')
+        if self.reasoning_tokens is not None:
+            natural(self.reasoning_tokens, 'reasoning tokens')
         for key in ('request_id', 'response_id', 'thread_id', 'turn_id'):
             if getattr(self, key) is not None:
                 bounded_text(getattr(self, key), key, 1024)
@@ -210,7 +213,8 @@ class ModelOutput:
             bounded_text(diagnostic, 'diagnostic')
         if self.delivery == DeliveryCertainty.NOT_SENT and (self.raw or self.response_id or self.turn_id
                 or any(x not in (None, 0) for x in (self.usage.input_tokens, self.usage.cache_tokens,
-                    self.usage.output_tokens, self.usage.cost_microusd, self.cache_write_tokens))):
+                    self.usage.output_tokens, self.usage.cost_microusd, self.cache_write_tokens,
+                    self.reasoning_tokens))):
             raise DomainError('Never-sent result contains evidence of model work')
 
     def validate_limits(self, limits):

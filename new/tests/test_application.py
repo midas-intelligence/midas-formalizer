@@ -565,7 +565,8 @@ class Contracts(unittest.TestCase):
         calls = []
         def transport(request, raw, setup, cancel, deadline):
             calls.append(request.wire.sha256)
-            return ModelOutput(raw=response(action), usage=Usage(100, 20, 10), cache_write_tokens=10)
+            return ModelOutput(raw=response(action), usage=Usage(100, 20, 10), cache_write_tokens=10,
+                               reasoning_tokens=7)
         self.app.transports = {Route.from_config(route).scope: transport}
         with self.start(workflow='live', config=replace(Config(), prover=route, reviewer=route)) as run:
             self.assertEqual(self.finish(run).exit_code, 0)
@@ -577,6 +578,11 @@ class Contracts(unittest.TestCase):
             self.assertEqual(sample[1], 100)
             self.assertIsNone(token_usage.sample(run.writer, owner, 'reviewer', Route.from_config(route)))
             self.assertIsNone(token_usage.sample(run.writer, owner, 'prover', Route.from_config(replace(route, model='other'))))
+            execution = next(key for key in run.writer.executions('RECEIVED')
+                             if run.writer.invocation(key).request.job.kind.value == 'MODEL')
+            report_ref = run.writer.result(execution).output
+            report = codec.load_record(run.writer.read_artifact(report_ref, max_bytes=16384), limit=16384)
+            self.assertEqual(report['outcome']['reasoning_tokens'], 7)
             run.writer.validate(force_artifacts=True)
         view = self.app.inspect(self.root/'run')
         self.assertEqual(record(view)['usage']['cost_microusd'], 240)
@@ -585,6 +591,8 @@ class Contracts(unittest.TestCase):
             self.assertEqual(self.finish(run).exit_code, 0)
             self.assertEqual(run.writer.status_snapshot().accounting.actual.cost_microusd, 240)
             self.assertEqual(token_usage.sample(run.writer, owner, 'prover', Route.from_config(route)), sample)
+            report = codec.load_record(run.writer.read_artifact(report_ref, max_bytes=16384), limit=16384)
+            self.assertEqual(report['outcome']['reasoning_tokens'], 7)
         self.assertEqual(len(calls), 1)
 
     def test_calibrated_token_window_reaches_provider_without_deleting_saved_pages(self):
@@ -640,7 +648,7 @@ class Contracts(unittest.TestCase):
         web_route = ModelRoute(provider='openai', model='fixture')
         web_answer = model_json(dict(answer='Reference on True.intro.', sources=[dict(
             url='https://example.test/true', title='True constructors', location='Section 1',
-            excerpt='', summary='True.intro constructs True.', hypotheses='None.', accessed=True)], unresolved=[]))
+            excerpt='', summary='True.intro constructs True.', hypotheses='None.')], unresolved=[]))
         guidance = model_json(dict(answer='Apply True.intro to the exact goal.', unresolved=[]))
         for caller in ('prover', 'reviewer'):
             with self.subTest(caller=caller):
@@ -692,7 +700,7 @@ class Contracts(unittest.TestCase):
                     last_caller = [raw for role, raw in calls if role == caller][-1]
                     self.assertIn(b'Apply True.intro to the exact goal.', last_caller)
 
-    def test_web_search_handoff_preserves_answer_with_access_warning_and_hides_actions(self):
+    def test_web_search_handoff_preserves_answer_without_access_checks_and_hides_actions(self):
         from midas.application import helpers, records as r
         from midas.provider import ModelOutput, Route
         from tests.test_tools import events
@@ -702,15 +710,16 @@ class Contracts(unittest.TestCase):
         answer = model_json(dict(answer='Use True.intro to finish the proof.', sources=[dict(
             url='https://example.test/proof', title='Supporting proof', location='Lemma 1',
             excerpt='True has a constructor.', summary='Apply the constructor.',
-            hypotheses='No extra assumptions.', accessed=True)], unresolved=['Check the declaration name.']))
-        for action in ('search', 'openPage'):
+            hypotheses='No extra assumptions.')], unresolved=['Check the declaration name.']))
+        for action in ('none', 'search', 'openPage'):
             with self.subTest(action=action):
                 prompts = []
                 replies = iter((response(web_search), response(proof())))
                 def transport(request, raw, *args):
                     if request.role == 'web_search':
-                        return ModelOutput(raw=answer, events=events(dict(type='webSearch',
-                            id='private-web-action', action=dict(type=action))), usage=Usage(1, 0, 1, 0))
+                        recorded = b'' if action == 'none' else events(dict(type='webSearch',
+                            id='private-web-action', action=dict(type=action)))
+                        return ModelOutput(raw=answer, events=recorded, usage=Usage(1, 0, 1, 0))
                     prompts.append(raw)
                     return ModelOutput(raw=next(replies), usage=Usage(1, 0, 1, 0))
                 self.app.transports = {Route.from_config(setting).scope: transport
@@ -721,21 +730,17 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(len(prompts), 2)
                     after = prompts[1]
                     for content in (b'Use True.intro to finish the proof.', b'https://example.test/proof',
-                                    b'Supporting proof', b'Check the declaration name.'):
+                                    b'Supporting proof', b'Lemma 1', b'True has a constructor.',
+                                    b'Apply the constructor.', b'No extra assumptions.', b'Check the declaration name.'):
                         self.assertIn(content, after)
                     for clutter in (b'0/actions', b'private-web-action', b'0/answer', b'0/status',
-                                    b'midas-web-search-evidence-v1'):
+                                    b'midas-web-search-evidence-v2', b'Accessed (', b'Web search claimed access'):
                         self.assertNotIn(clutter, after)
-                    warning = b'Warning: Web search claimed access without an open/find or matching document view'
-                    if action == 'search':
-                        self.assertLess(after.index(warning), after.index(b'Web-search results (advisory):'))
-                    else:
-                        self.assertNotIn(warning, after)
                     owner = run.workflow.graph(run.writer).nodes[0].owner
                     archive, = helpers.advertised(run.writer, owner)
                     self.assertEqual(len(archive.pages), 1)
                     evidence = codec.load_record(r.read(run.writer, archive.provenance[0]), limit=131072)
-                    self.assertEqual(evidence['actions'], [['private-web-action', action, []]])
+                    self.assertEqual(evidence['actions'], [] if action == 'none' else [['private-web-action', action]])
                     self.assertIn(b'Source 1: Supporting proof', after)
                     self.assertNotIn(evidence['sources'][0]['id'].encode(), after)
 

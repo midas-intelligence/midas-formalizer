@@ -69,7 +69,8 @@ for line in sys.stdin:
         if mode == 'hang':
             time.sleep(10)
         send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1',
-              'tokenUsage':{'total':{'inputTokens':12,'outputTokens':4,'cachedInputTokens':3}}}})
+              'tokenUsage':{'total':{'inputTokens':12,'outputTokens':4,'cachedInputTokens':3,
+                                     'reasoningOutputTokens':2}}}})
         send({'id':message['id'],'result':{'turn':{'id':'turn-1'}}})
         if mode == 'tool':
             send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn-1',
@@ -85,5 +86,6 @@ for line in sys.stdin:
         continue
     elif method == 'thread/read':
         send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1',
-              'tokenUsage':{'total':{'inputTokens':12,'outputTokens':5,'cachedInputTokens':3}}}})
+              'tokenUsage':{'total':{'inputTokens':12,'outputTokens':5,'cachedInputTokens':3,
+                                     'reasoningOutputTokens':3}}}})
     send({'id':message['id'],'result':result})

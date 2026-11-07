@@ -15,7 +15,6 @@ from midas.prompt.wire import _prefix
 from midas.provider import ModelRequest, Route
 from midas.provider.wire import validate_wire
 from midas.tools import Research, Scope, Stage, WebSearch, research_evidence, web_search_evidence
-from midas.tools.protocol import pack
 from tests.test_provider import Artifacts, LIMITS
 from tests.test_source import signature
 
@@ -402,15 +401,17 @@ class PromptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'allowance'):
             web_searcher.render(turn)
 
-    def test_web_search_schema_matches_existing_advisory_evidence_contract(self):
+    def test_web_search_schema_matches_advisory_evidence_without_access_claims(self):
         schema = decode(web_searcher.SCHEMA, limit=16384)
         self.assertEqual(set(schema['properties']), {'answer', 'sources', 'unresolved'})
+        source = dict(url='https://example.test/paper', title='Paper', location='Section 2',
+                      excerpt='', summary='The question remains open.', hypotheses='Positive integers.')
+        self.assertEqual(set(schema['properties']['sources']['items']['properties']), set(source))
         artifacts = Artifacts()
         stage = Stage('a'*64, 0, Scope(OwnerVersion('obl_'+'b'*64, 0), 'env_'+'c'*64,
                       artifacts.save(b'context')), WebSearch('Find a reference.', web_calls=2))
-        payload = schema_bytes(dict(answer='The question remains open.', sources=[], unresolved=['Exact bound?']))
-        frame = pack(dict(type='webSearch', id='one', action=dict(type='search')))
-        evidence = web_search_evidence(stage, payload, len(frame).to_bytes(8, 'little') + frame)
+        payload = schema_bytes(dict(answer='The question remains open.', sources=[source], unresolved=['Exact bound?']))
+        evidence = web_search_evidence(stage, payload, b'')
         self.assertIn(b'advisory', evidence)
 
     def test_invalid_inputs_and_escaped_limits_fail_before_dispatch(self):

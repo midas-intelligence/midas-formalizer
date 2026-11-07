@@ -806,33 +806,33 @@ class ToolsTests(unittest.TestCase):
     def web_search_value(self, **source_changes):
         return {'answer':'Use the theorem.', 'sources':[dict(url='https://example.test/paper', title='Paper',
                 location='Theorem 2', excerpt='compact sets are closed', summary='Useful', hypotheses='Hausdorff',
-                accessed=True, **source_changes)], 'unresolved':[]}
+                **source_changes)], 'unresolved':[]}
 
-    def test_web_search_access_claims_quotes_and_binary_evidence(self):
+    def test_web_search_admits_sources_without_access_checks_and_bounds_quotes(self):
         stage = self.stage(WebSearch('question'))
         value = self.web_search_value()
         raw = json.dumps(value).encode()
         event = {'type':'webSearch', 'id':'w1', 'action':{'type':'openPage'}}
-        with patch('json.dumps', side_effect=AssertionError('JSON')), patch('json.loads', side_effect=AssertionError('JSON')):
-            result = codec.load_record(web_search_evidence(stage, raw, events(event)), limit=131072)
-        self.assertEqual(result['authority'], 'advisory')
-        self.assertEqual(result['stage'], stage.sha256)
-        self.assertEqual(result['warnings'], [])
-        warned = codec.load_record(web_search_evidence(stage, raw,
-            events(dict(event, action={'type':'search'}))), limit=131072)
-        self.assertEqual(warned['warnings'], [
-            'Web search claimed access without an open/find or matching document view'])
-        for field in ('answer', 'sources', 'unresolved'):
-            self.assertEqual(warned[field], result[field])
-        viewed = dict(event, action={'type':'other', 'results':[{'type':'text_result', 'ref_id':'turn1view0', 'url':value['sources'][0]['url']}]})
-        matched = codec.load_record(web_search_evidence(stage, raw, events(viewed)), limit=131072)
-        self.assertEqual(matched['warnings'], [])
+        for recorded in (b'', events({'type':'turn/completed'}), events(event),
+                         events(dict(event, action={'type':'search'}))):
+            with self.subTest(recorded=recorded), patch('json.dumps', side_effect=AssertionError('JSON')), \
+                    patch('json.loads', side_effect=AssertionError('JSON')):
+                result = codec.load_record(web_search_evidence(stage, raw, recorded), limit=131072)
+                summary = web_search_summary(pack(result, 131072))
+            self.assertEqual(result['authority'], 'advisory')
+            self.assertEqual(result['stage'], stage.sha256)
+            self.assertEqual(result['answer'], value['answer'])
+            self.assertEqual(result['sources'], [dict(value['sources'][0], id=f'{stage.helper_id}S1')])
+            self.assertEqual(result['unresolved'], value['unresolved'])
+            self.assertNotIn('warnings', result)
+            self.assertTrue(summary.startswith('Web-search results (advisory):\nUse the theorem.'))
+            self.assertIn('Excerpt: compact sets are closed', summary)
         value['sources'] *= 6
         value['sources'][0]['excerpt'] = 'one two three four five'
         with self.assertRaisesRegex(ValueError, 'quote allowance'):
             web_search_evidence(stage, json.dumps(value).encode(), events(event))
 
-    def test_web_search_pages_lead_with_warning_and_preserve_all_response_text(self):
+    def test_web_search_pages_preserve_all_response_text(self):
         from midas.application.helpers import page_text
         stage = self.stage(WebSearch('question'))
         value = self.web_search_value()
@@ -854,9 +854,8 @@ class ToolsTests(unittest.TestCase):
                      for i in range(len(archive.pages))]
             displays = [page_text(page.payload).decode() for page in pages]
         self.assertGreater(len(pages), 1)
-        self.assertTrue(displays[0].startswith('Warning: Web search claimed access'))
+        self.assertTrue(displays[0].startswith('Web-search results (advisory):'))
         self.assertIn('First mathematical step.', displays[0])
-        self.assertLess(displays[0].index('Warning:'), displays[0].index('Web-search results'))
         # Page framing is separate from the source text: reconstruct exact UTF-8 fragments.
         restored = ''.join(row[4] for page in pages
                            for row in codec.load_record(page.payload, limit=16000)[4])
@@ -866,21 +865,22 @@ class ToolsTests(unittest.TestCase):
             self.assertIn(str(content), restored)
         for question in value['unresolved']:
             self.assertIn(question, restored)
-        for clutter in ('0/actions', 'private-web-action', 'midas-web-search-evidence-v1', self.scope.environment_id):
+        for clutter in ('0/actions', 'private-web-action', 'midas-web-search-evidence-v2', self.scope.environment_id):
             self.assertNotIn(clutter, ''.join(displays))
         saved = codec.load_record(evidence, limit=131072)
-        self.assertEqual(saved['actions'][0], ['private-web-action', 'search', []])
+        self.assertEqual(saved['actions'][0], ['private-web-action', 'search'])
         self.assertIn('Source 1: Paper', restored)
         self.assertNotIn(saved['sources'][0]['id'], restored)
 
     def test_web_search_web_limits_duplicates_and_malformed_response(self):
         event = {'type':'webSearch', 'id':'w1', 'action':{'type':'search'}}
+        self.assertEqual(web_actions(b'', limit=1), ())
         self.assertEqual(len(web_actions(events(event, event), limit=1)), 1)
         with self.assertRaises(ValueError):
             web_actions(events(event, dict(event, action={'type':'openPage'})), limit=2)
         with self.assertRaises(ValueError):
             web_actions(events(event, dict(event, id='w2')), limit=1)
-        for raw in (b'', b'\x00', events(event)[:-1]):
+        for raw in (b'\x00', events(event)[:-1]):
             with self.assertRaises(ValueError):
                 web_actions(raw, limit=2)
         stage = self.stage(WebSearch('question'))

@@ -1004,7 +1004,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v10`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v1`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v10`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat retained observations; superseded candidate-check and edit failures are excluded from prompts. Current feedback keeps complete selected messages. No prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
@@ -1100,7 +1100,7 @@ proofs, decomposition, joint candidates, revisions, stop requests and helpers. T
 reviewer returns `{verdict, rationale, findings, question, urls}`. The researcher
 returns `{answer, unresolved}` for mathematical guidance. The web-searcher returns
 `{answer, sources, unresolved}` for resources and references, with source locations,
-hypotheses and access information. Response interpretation, semantic validation, helper lowering and
+hypotheses, excerpts and summaries. Response interpretation, semantic validation, helper lowering and
 budget enforcement belong to the strategy/application layer. Replacing a
 schema requires a matching interpreter there; transport never interprets actions.
 Both prover and reviewer call either helper directly and resume their original turn
@@ -1208,7 +1208,7 @@ modules plus `__init__.py`:
 | `tools/bm25_score.py` | Compound token fields, identifier budgets and scoped span scoring |
 | `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
 | `tools/research.py` | Mathematical guidance validation and advisory evidence |
-| `tools/web_search.py` | Reference validation, recorded web actions, access claims, quote bounds and advisory provenance |
+| `tools/web_search.py` | Reference validation, web-call bounds, recorded action IDs/types, quote bounds and advisory provenance |
 | `tools/evidence.py` | Readable search/probe results, frozen declaration excerpts, staged binary archives, indexed pages and duplicate-delivery keys |
 
 These replace the tools responsibilities of `combined_retrieval`, `discovery`,
@@ -1365,18 +1365,18 @@ must first bind that compiler request to the planned stage. Checker retains the
 per-case start/completion protocol. `admit_research` and `admit_web_search` consume
 admitted provider results bound by the controller to their respective stages.
 Research accepts bounded answers and unresolved questions without web events.
-Web search additionally requires recorded web actions and validates sources. Access claims without an
-open/find or matching document view produce a warning before the answer, while
-preserving the response, sources and unresolved questions. The cumulative 25-word
-quote bound per URL still applies. Access and quotations remain provider-reported.
+Web search validates sources and bounds any recorded web actions; an answer can be
+admitted without browsing. Source entries contain URL, title, location, excerpt,
+summary and hypotheses, with no access flag or access checks. The cumulative 25-word
+quote bound per URL still applies. Quotations remain provider-reported.
 None of these tools creates proof authority.
 
 Requests, results and archives use shallow binary records. The bounded external
 wire decoder is shared in `domain/wire.py`; provider imports that same decoder.
 Search/research wire parsing and large source/evidence handling make no JSON-library
 calls. `prepare_archive` stages fixed pages of at most 16,000 bytes and a bounded
-index. Guidance is projected to plain text before paging. Web-search results have access warnings
-first, then the answer, sources and unresolved questions. Sources use numbered
+index. Guidance is projected to plain text before paging. Web-search results contain
+the answer, sources and unresolved questions. Sources use numbered
 labels; source IDs and web-action metadata stay in the original evidence and are
 not presented in prompts. Search and probe records
 are also projected to plain text before paging, so the
@@ -2854,11 +2854,20 @@ avoiding repeated copying of the accumulated response.
 
 Worker output consists of raw UTF-8, length-prefixed binary advisory events and a
 small binary report. The report retains request/response/thread/turn IDs, error
-phase, delivery certainty, nullable usage, cache-write telemetry and retry-after
-metadata. Unknown telemetry remains unknown. Costs and retry decisions stay in
+phase, delivery certainty, nullable usage, cache-write and reasoning-token
+telemetry, and retry-after metadata. Unknown telemetry remains unknown. Costs and retry decisions stay in
 policy. A pre-send cancellation or connection failure is `NOT_SENT`; a write
 failure is `UNKNOWN`; an HTTP response is `DELIVERED`, including errors. Closing a
 local HTTP stream does not imply cancellation of remote computation.
+
+The report's `outcome.reasoning_tokens` records the provider-reported count from
+Responses `usage.output_tokens_details.reasoning_tokens` or Codex
+`tokenUsage.total.reasoningOutputTokens`. A reported zero is preserved; absent or
+invalid counts remain null. The count survives receipt admission and resume,
+including when available on failed or cancelled calls. It is a breakdown of the
+existing output-token total, so pricing and budget accounting do not add it again.
+Only this numeric count is saved; reasoning text is not retained. Older reports
+do not contain a recoverable reasoning-token count.
 
 `worker_payload(result)` gives controller/storage the exact small result bytes to
 save. `admit_receipt` requires the controller's `ReceiptVerifier`, verifies those

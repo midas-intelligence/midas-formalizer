@@ -52,7 +52,7 @@ Use verdict research when enabled for mathematical guidance or answers, with a
 question, empty URLs and empty findings. Use verdict web_search when enabled to
 find resources and references, with a question, up to six source URLs and empty
 findings. For accept/reject use an empty question and URLs. Both helpers continue
-this review. Source access claims and quotations are advisory; check their exact
+this review. Source information and quotations are advisory; check their exact
 hypotheses and applicability. Review does not update prover memory.
 Return exactly one JSON object matching the supplied output schema.
 Every request starts a fresh session. The supplied sections are the complete

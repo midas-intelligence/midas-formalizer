@@ -162,7 +162,7 @@ A smaller `live.json` can omit settings that should use defaults:
 Configure a reviewer for independent review of decompositions and node stop requests. The prover and reviewer can call either helper directly:
 
 - `research`: mathematical guidance, proof strategies and answers to questions, without browsing.
-- `web_search`: resources and references, with bounded web search and source access checks.
+- `web_search`: resources and references, with bounded optional web search.
 
 Each helper is disabled when its route is omitted or unconfigured. The researcher
 supports the same transports as the prover; the web-searcher requires OpenAI Codex.

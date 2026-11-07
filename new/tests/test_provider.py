@@ -197,7 +197,8 @@ class ProviderTests(unittest.TestCase):
     def test_usage_and_exact_wire_one_call(self):
         calls = []
         stream = Chunks([sse(terminal(usage={'input_tokens':12,'output_tokens':5,
-                              'input_tokens_details':{'cached_tokens':3,'cache_write_tokens':2}}))])
+                              'input_tokens_details':{'cached_tokens':3,'cache_write_tokens':2},
+                              'output_tokens_details':{'reasoning_tokens':4}}))])
         def handler(req):
             calls.append(req.content)
             self.assertEqual(req.headers['Authorization'], 'Bearer test-secret')
@@ -207,16 +208,47 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(stream.closed)
         self.assertEqual(out.usage, Usage(12,3,5,None))
         self.assertEqual(out.cache_write_tokens, 2)
+        self.assertEqual(out.reasoning_tokens, 4)
         self.assertEqual(out.request_id, 'request-1')
         self.assertEqual(out.delivery, Delivery.DELIVERED)
 
     def test_null_and_invalid_usage(self):
         out = self.http(lambda _: httpx.Response(200, stream=Chunks([sse(terminal())])))
         self.assertEqual(out.usage, Usage())
-        usage, writes = normalize_usage({'inputTokens':True,'outputTokens':-1,'cachedInputTokens':0,
+        self.assertIsNone(out.reasoning_tokens)
+        usage, writes, reasoning = normalize_usage({'inputTokens':True,'outputTokens':-1,'cachedInputTokens':0,
                                          'cacheWriteInputTokens':4,'input_tokens_details':[]})
         self.assertEqual(usage, Usage(None,0,None,None))
         self.assertEqual(writes, 4)
+        self.assertIsNone(reasoning)
+
+    def test_reasoning_usage_preserves_zero_and_rejects_invalid_counts(self):
+        for count, expected in ((0, 0), (4, 4), (None, None), (-1, None),
+                                (True, None), (1.5, None), ('4', None), (2**63, None)):
+            for value in ({'output_tokens_details': {'reasoning_tokens': count}},
+                          {'reasoningOutputTokens': count}):
+                with self.subTest(value=value):
+                    self.assertEqual(normalize_usage(value)[2], expected)
+        for value in (None, [], {}, {'output_tokens_details': None}, {'output_tokens_details': []},
+                      {'output_tokens_details': {}}):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_usage(value), (Usage(), None, None))
+        collector = Collector(LIMITS)
+        collector.usage({'output_tokens': 5, 'output_tokens_details': {'reasoning_tokens': 4}})
+        collector.usage({'output_tokens': 7})
+        self.assertEqual(collector.value['usage'].output_tokens, 7)
+        self.assertIsNone(collector.value['reasoning_tokens'])
+
+    def test_reasoning_output_validation_and_never_sent_guard(self):
+        for count in (-1, True, 1.5, '4', 2**63):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                ModelOutput(reasoning_tokens=count)
+        for count in (None, 0):
+            ModelOutput(error='cancelled', phase='preparing', delivery=Delivery.NOT_SENT,
+                        reasoning_tokens=count)
+        with self.assertRaisesRegex(ValueError, 'Never-sent'):
+            ModelOutput(error='cancelled', phase='preparing', delivery=Delivery.NOT_SENT,
+                        reasoning_tokens=1)
 
     def test_fragmented_stream_and_unicode_repair(self):
         body = sse({'type':'response.output_text.delta','delta':'∀'},
@@ -277,9 +309,14 @@ class ProviderTests(unittest.TestCase):
         body = sse({'type':'response.output_text.delta','delta':'partial'})
         out = self.http(lambda _: httpx.Response(200, stream=Chunks([body])))
         self.assertEqual((out.raw,out.error), (b'partial','transient'))
-        body = sse({'type':'response.incomplete','response':{'status':'incomplete','usage':{'output_tokens':7}}})
+        body = sse({'type':'response.incomplete','response':{'status':'incomplete',
+            'usage':{'output_tokens':7, 'output_tokens_details':{'reasoning_tokens':6}}}})
         out = self.http(lambda _: httpx.Response(200, stream=Chunks([body])))
         self.assertEqual((out.error,out.usage.output_tokens), ('malformed_output',7))
+        self.assertEqual(out.reasoning_tokens, 6)
+        p, inv, result, receipt, auth = self.service(out)
+        admitted = p.admit_receipt(self.request, inv, result, receipt, self.a, auth)
+        self.assertEqual(admitted.outcome.reasoning_tokens, 6)
 
     def test_limits_include_comments_and_unterminated_frames(self):
         req = replace(self.request, limits=replace(LIMITS,output_bytes=8,frame_bytes=128,event_bytes=256))
@@ -300,12 +337,14 @@ class ProviderTests(unittest.TestCase):
         self.assertIn(b'declined',out.events)
 
     def test_late_executor_cancel_preserves_receipt_usage(self):
-        p,inv,result,receipt,auth = self.service(ModelOutput(raw=b'proof',usage=Usage(5,0,2,None)))
+        p,inv,result,receipt,auth = self.service(ModelOutput(raw=b'proof',usage=Usage(5,0,2,None),
+                                                           reasoning_tokens=1))
         result = replace(result,status=ResultStatus.CANCELLED)
         receipt = replace(receipt,result_ref=self.a.save(worker_payload(result)))
         admitted = p.admit_receipt(self.request,inv,result,receipt,self.a,auth)
         self.assertEqual(admitted.status,ResultStatus.CANCELLED)
         self.assertEqual(admitted.outcome.usage,Usage(5,0,2,None))
+        self.assertEqual(admitted.outcome.reasoning_tokens, 1)
 
     def test_component_import_boundaries(self):
         import ast
@@ -340,6 +379,7 @@ class ProviderTests(unittest.TestCase):
         admitted = provider.admit_receipt(self.request,inv,result,receipt,self.a,auth)
         self.assertEqual(self.a.data[admitted.raw.id],b'proof')
         self.assertEqual(admitted.outcome.raw,b'')
+        self.assertIsNone(admitted.outcome.reasoning_tokens)
         self.assertEqual(result.status,ResultStatus.SUCCEEDED)
 
     def test_receipt_seal_invocation_and_artifact_tampering(self):
@@ -359,6 +399,7 @@ class ProviderTests(unittest.TestCase):
         p,inv,result,receipt,auth = self.service(output)
         admitted = p.admit_receipt(self.request,inv,result,receipt,self.a,auth)
         self.assertEqual((admitted.outcome.cache_write_tokens,admitted.outcome.delivery),(3,Delivery.UNKNOWN))
+        self.assertIsNone(admitted.outcome.reasoning_tokens)
 
     def test_empty_failure_survives_content_addressed_staging(self):
         from midas.storage import Staging
@@ -449,6 +490,7 @@ class CodexTests(unittest.TestCase):
         self.assertIsNone(out.error)
         self.assertEqual(out.raw,b'{"proof":"by trivial"}')
         self.assertEqual(out.usage,Usage(12,3,5,None))
+        self.assertEqual(out.reasoning_tokens,3)
         self.assertEqual(calls.count('turn/start'),1)
         self.assertEqual(out.termination,Termination.TERMINATED)
 
