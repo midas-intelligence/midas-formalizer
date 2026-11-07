@@ -397,11 +397,14 @@ class Checker:
 
     @staticmethod
     def _audit_result(result, packet, digest):
-        codec.fields(result, ('format', 'request', 'targets'))
+        codec.fields(result, ('format', 'request', 'targets', *(('aliases', 'layout') if 'share' in packet else ())))
         expected = 'midas-source-audit-sorry-v1' if packet.get('allow_sorry', False) else 'midas-source-audit-v1'
         if (result['format'] != expected or result['request'] != digest
                 or codec.encode(result['targets']) != codec.encode(packet['targets'])):
             raise ValueError('Source audit differs from requested targets')
+        if 'share' in packet:
+            ev.source_aliases(result['aliases'], packet['share'])
+            ev.source_layout(result['layout'], packet)
 
     @staticmethod
     def _admit_phases(phases, expected, result, invocation, reader):

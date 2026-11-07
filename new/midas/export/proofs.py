@@ -10,6 +10,7 @@ from ..source import (CheckedDeclaration, Edit, GeneratedSource, RenderPolicy, R
                       add_imports, apply_edits, declarations, integrate, lean_name, merge_imports,
                       parse_identifier, proof_application)
 from .protocol import NodeSnapshot
+from .names import ExportNames
 
 
 def same(left, right):
@@ -72,7 +73,7 @@ def bind_peers(selection, graph, candidate, packet, reader, *, available):
             raise ValueError('Assembly definition signature changed')
         namespace = 'MidasReplay_' + reference.evidence.sha256
         rows, root = _prefix_proof(proof, namespace)
-        policy = RenderPolicy(computable=b'noncomputable' not in
+        policy = RenderPolicy(readable=True, computable=b'noncomputable' not in
             selection.source[target.declaration.start:target.replacement.start])
         helpers = declarations(rows, policy=policy, emitted=contexts)
         invocation = proof_application(root, ev.closed(proof['signature']), policy=policy)
@@ -107,8 +108,8 @@ def named(proof):
 
 
 def application(name, universes):
-    return '@' + lean_name(name, absolute=True) + (
-        '.{' + ', '.join(lean_name(u) for u in universes) + '}' if universes else '')
+    return '@' + lean_name(name, absolute=True, readable=True) + (
+        '.{' + ', '.join(lean_name(u, readable=True) for u in universes) + '}' if universes else '')
 
 
 def compose(parent, children, dependencies):
@@ -166,11 +167,14 @@ def compose(parent, children, dependencies):
             alias = namespace
             for tag, part in reversed(parts):
                 alias = [tag, alias, part]
-            append(dict(name=alias, signature=child['signature'],
-                source=application(child_root, child['signature']['universes']), requires=[child_root]))
+            alias_row = dict(name=alias, signature=child['signature'],
+                source=application(child_root, child['signature']['universes']), requires=[child_root])
+            if 'type_source' in child:
+                alias_row['type_source'] = child['type_source']
+            append(alias_row)
             aliases.append(alias)
         append(dict(original, name=root, requires=aliases,
-            source='open ' + lean_name(namespace, absolute=True) + ' in\n' + original['source']))
+            source='open ' + lean_name(namespace, absolute=True, readable=True) + ' in\n' + original['source']))
         value, requires = application(root, parent['signature']['universes']), [root]
     else:
         rows, root = named(parent)
@@ -185,7 +189,10 @@ def compose(parent, children, dependencies):
                 append(row)
             value += ' (' + application(child_root, child['signature']['universes']) + ')'
             requires.append(child_root)
-    append(dict(name=ev.ROOT, signature=parent['signature'], source=value, requires=requires))
+    final = dict(name=ev.ROOT, signature=parent['signature'], source=value, requires=requires)
+    if 'type_source' in parent:
+        final['type_source'] = parent['type_source']
+    append(final)
     result = {k: v for k, v in parent.items() if k != 'assumptions'}
     result.update(declarations=output, imports=list(imports))
     # Inputs have already passed certificate admission. The compiler boundary
@@ -279,11 +286,14 @@ def _partial_sources(selection, graph, reader):
         yield proof, identity.id, fresh, root
 
 
-def render_partial(selection, graph, reader, *, available=frozenset(), maximum=64*1024**2):
-    return _render(selection, _partial_sources(selection, graph, reader), available=available, maximum=maximum)
+def render_partial(selection, graph, reader, *, available=frozenset(), maximum=64*1024**2,
+                   aliases=(), generated=None, regions=None, calls=None):
+    return _render(selection, _partial_sources(selection, graph, reader), available=available, maximum=maximum,
+                   aliases=aliases, generated=generated, regions=regions, calls=calls)
 
 
-def render(selection, references, reader, *, available=frozenset(), maximum=64*1024**2):
+def render(selection, references, reader, *, available=frozenset(), maximum=64*1024**2,
+           aliases=(), generated=None, regions=None, calls=None):
     if selection.selected.remaining_unfinished:
         raise ValueError('Cannot integrate unselected unfinished declarations')
     if len(references) != len(selection.identities):
@@ -295,11 +305,13 @@ def render(selection, references, reader, *, available=frozenset(), maximum=64*1
             proof = load(reader, reference.evidence)
             rows, root = named(proof)
             yield proof, reference.evidence.id, rows, root
-    return _render(selection, sources(), available=available, maximum=maximum)
+    return _render(selection, sources(), available=available, maximum=maximum, aliases=aliases,
+                   generated=generated, regions=regions, calls=calls)
 
 
-def _render(selection, sources, *, available, maximum):
+def _render(selection, sources, *, available, maximum, aliases=(), generated=None, regions=None, calls=None):
     replacements, imports, emitted, contexts = [], (), {}, {}
+    names = ExportNames(selection.source, aliases)
     signatures = {}
     def closed(value):
         found = signatures.get(id(value))
@@ -308,6 +320,7 @@ def _render(selection, sources, *, available, maximum):
             signatures[id(value)] = found
         return found[1]
     for target, identity, (proof, path, rows, root) in zip(selection.selected.targets, selection.identities, sources):
+        names.add(rows, root, target.selector)
         root_signature = Signature(*(codec.encode(proof['signature'][key]) for key in ('target', 'universes', 'context')))
         if any(getattr(root_signature, key) != getattr(identity, key) for key in ('target', 'universes', 'context')):
             raise ValueError('Integration proof signature differs from selected target')
@@ -322,13 +335,21 @@ def _render(selection, sources, *, available, maximum):
             emitted[key] = row
             fresh.append(CheckedDeclaration(key, closed(row['signature']),
                 SourceFile(path, row['source'].encode()),
-                tuple(dict.fromkeys(map(codec.encode, row['requires'])))))
-        policy = RenderPolicy(computable=target.kind == 'def' and b'noncomputable' not in
+                tuple(dict.fromkeys(map(codec.encode, row['requires']))),
+                SourceFile(path + '/type', row['type_source'].encode()) if 'type_source' in row else None))
+        policy = RenderPolicy(readable=True, computable=target.kind == 'def' and b'noncomputable' not in
             selection.source[target.declaration.start:target.replacement.start])
+        spans = [] if aliases or generated is not None else None
+        sections = [] if aliases else None
         helpers = declarations(tuple(fresh), external=frozenset(emitted), policy=policy,
-                               maximum=maximum, emitted=contexts)
+                               maximum=maximum, emitted=contexts, spans=spans, sections=sections)
+        names.contexts(contexts.values())
+        helpers = names.rewrite(helpers, maximum=maximum, spans=spans or (), sections=sections or (),
+                                generated=generated)
         invocation = proof_application(codec.encode(root), closed(proof['signature']), policy=policy,
                                        maximum=maximum)
+        invocation = names.rewrite(invocation, maximum=maximum)
         replacements.append(RootReplacement(target.selector, invocation, helpers))
         imports = merge_imports(imports, tuple(proof.get('imports', ())))
-    return integrate(selection, tuple(replacements), imports=imports, available=available, maximum=maximum)
+    return integrate(selection, tuple(replacements), imports=imports, available=available, maximum=maximum,
+                     regions=regions, calls=calls)

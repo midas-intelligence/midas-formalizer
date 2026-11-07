@@ -121,6 +121,19 @@ class Contracts(unittest.TestCase):
             cert = certificate(packet, request.sha256)
             ev.proof_for(codec.decode(codec.encode(cert)), packet, request.sha256)
 
+    def test_proof_source_types_are_bounded_and_preserve_the_submitted_statement(self):
+        request = prepare_proof(self.selection, 0, self.candidate, self.artifacts, statement='True -- authored type')
+        packet = request.decode()['packet']
+        cert = certificate(packet, request.sha256)
+        cert['type_source'] = cert['declarations'][0]['type_source'] = packet['statement']
+        ev.proof_for(cert, packet, request.sha256)
+        for container in (cert, cert['declarations'][0]):
+            for invalid in ('False', 'x' * (1024**2 + 1), None):
+                container['type_source'] = invalid
+                with self.assertRaises(ValueError):
+                    ev.proof_for(cert, packet, request.sha256)
+            container['type_source'] = packet['statement']
+
     def test_lookup_only_uses_prefix_and_no_goal_expansion(self):
         with patch('midas.checker.requests.signature', side_effect=AssertionError('decoded goal')):
             request = prepare_lookup(self.selection, 0, self.owner, ('True',))

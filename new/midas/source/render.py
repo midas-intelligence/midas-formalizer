@@ -11,7 +11,7 @@ from ..domain import ByteSpan, Signature
 from ..domain import encoding as graph
 from ..domain.cache import Memo
 from ..domain.identity import CLOSED, extends, validate_signature
-from .context import Context, _render_context, add_imports, context_opens
+from .context import Context, _ContextScope, _context_namespaces, _render_context, add_imports, context_opens
 from .names import lean_name, parse_identifier
 from .terms import RenderPolicy, _Renderer
 from .text import Builder, Edit, GeneratedSource, MAX_BYTES, SourceFile, apply_edits
@@ -157,12 +157,15 @@ class CheckedDeclaration:
     signature: Signature
     proof: SourceFile
     requires: tuple[bytes, ...] = ()
+    type_source: SourceFile | None = None
 
     def __post_init__(self):
         if not lean_name(graph.decode(self.name)):
             raise ValueError('Proof declaration needs a name')
         if not isinstance(self.signature, Signature) or not isinstance(self.proof, SourceFile):
             raise ValueError('Expected a signature and authored proof')
+        if self.type_source is not None and not isinstance(self.type_source, SourceFile):
+            raise ValueError('Expected a source type')
         if type(self.requires) is not tuple or any(type(name) is not bytes for name in self.requires):
             raise ValueError('Expected immutable declaration dependencies')
         if len(set(self.requires)) != len(self.requires):
@@ -184,7 +187,7 @@ def _references(expression):
 
 
 def declarations(values: tuple[CheckedDeclaration, ...], *, external=frozenset(),
-                 policy=RenderPolicy(), maximum=MAX_BYTES, emitted=None):
+                 policy=RenderPolicy(), maximum=MAX_BYTES, emitted=None, spans=None, sections=None):
     """Emit each context and named declaration once, with dependencies first."""
     if type(values) is not tuple or type(external) is not frozenset:
         raise ValueError('Expected immutable declarations and external names')
@@ -195,7 +198,9 @@ def declarations(values: tuple[CheckedDeclaration, ...], *, external=frozenset()
         previous = by_name.get(declaration.name)
         if previous is not None:
             if (previous.signature != declaration.signature or previous.proof.data != declaration.proof.data
-                    or previous.requires != declaration.requires):
+                    or previous.requires != declaration.requires
+                    or (previous.type_source.data if previous.type_source else None) !=
+                       (declaration.type_source.data if declaration.type_source else None)):
                 raise ValueError('Conflicting shared declaration')
             continue
         by_name[declaration.name] = declaration
@@ -214,20 +219,30 @@ def declarations(values: tuple[CheckedDeclaration, ...], *, external=frozenset()
     except CycleError as error:
         raise ValueError('Cyclic source declarations') from error
     writer = Builder(maximum)
+    scope = _ContextScope(writer, sections=sections)
     emitted = {} if emitted is None else emitted
     for name in order:
-        _render_context(_named_context(signatures[name]), writer, emitted)
+        _render_context(_named_context(signatures[name]), writer, emitted, scope=scope, spans=spans)
     for name in order:
         declaration, signature = by_name[name], signatures[name]
         renderer = _Renderer(policy, maximum)
-        writer.append(context_opens(_named_context(signature)))
+        scope.open(_context_namespaces(_named_context(signature)))
+        start = writer.size
         writer.append(b'set_option autoImplicit true in\n')
         writer.append((('def ' if policy.computable else 'noncomputable def ')
                        + lean_name(graph.decode(name), absolute=True, readable=policy.readable) + ' : ').encode())
-        writer.append(renderer.finish(_target(renderer, signature)))
+        if declaration.type_source is None:
+            writer.append(renderer.finish(_target(renderer, signature)))
+        else:
+            writer.append(b'(\n')
+            writer.authored(declaration.type_source)
+            writer.append(b'\n)')
         writer.append(b' := (\n')
         writer.authored(declaration.proof)
         writer.append(b'\n)\n\n')
+        if spans is not None:
+            spans.append((graph.decode(name), ByteSpan(start, writer.size)))
+    scope.close()
     return writer.finish()
 
 
@@ -268,7 +283,8 @@ class RootReplacement:
     declarations: GeneratedSource = GeneratedSource(b'')
 
 
-def integrate(selection, roots, *, imports=(), available=frozenset(), current_module=None, maximum=MAX_BYTES):
+def integrate(selection, roots, *, imports=(), available=frozenset(), current_module=None, maximum=MAX_BYTES,
+              regions=None, calls=None):
     """Replace exactly the selected bodies; preserve authored scopes and attributes."""
     if type(roots) is not tuple or any(not isinstance(root, RootReplacement) for root in roots):
         raise ValueError('Expected immutable checked root replacements')
@@ -293,4 +309,12 @@ def integrate(selection, roots, *, imports=(), available=frozenset(), current_mo
         writer.append(b'\n')
         edits.append(Edit(target.replacement, writer.finish()))
     result = apply_edits(source, tuple(edits), maximum=maximum)
-    return add_imports(result, imports, available=available, current_module=current_module, maximum=maximum)
+    augmented = add_imports(result, imports, available=available, current_module=current_module, maximum=maximum)
+    if regions is not None or calls is not None:
+        shift = len(augmented.data) - len(result.data)
+        for edit in sorted(edits, key=lambda edit: (edit.span.start, edit.span.end)):
+            spans = regions if edit.span.start == edit.span.end else calls
+            if spans is not None:
+                spans.append([edit.span.start + shift, edit.span.start + shift + len(edit.replacement.data)])
+            shift += len(edit.replacement.data) - (edit.span.end - edit.span.start)
+    return augmented

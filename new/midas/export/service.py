@@ -28,10 +28,12 @@ def _selected(selection, graph, allow_sorry):
     return proofs.roots(selection, graph), ()
 
 
-def _source(selection, graph, roots, reader, allow_sorry, available):
+def _source(selection, graph, roots, reader, allow_sorry, available, *, aliases=(), generated=None, regions=None, calls=None):
     if allow_sorry:
-        return proofs.render_partial(selection, graph, reader, available=available)
-    return proofs.render(selection, roots, reader, available=available)
+        return proofs.render_partial(selection, graph, reader, available=available, aliases=aliases,
+                                     generated=generated, regions=regions, calls=calls)
+    return proofs.render(selection, roots, reader, available=available, aliases=aliases,
+                         generated=generated, regions=regions, calls=calls)
 
 
 def _request(value, metadata, refs):
@@ -154,7 +156,9 @@ class Export:
             raise ValueError('Library differs from export profile/environment')
         roots, nodes = _selected(selection, graph, allow_sorry)
         owner = nodes[0].owner if nodes else roots[0].owner
-        source = _source(selection, graph, roots, reader, allow_sorry, frozenset(environment.manifest.modules))
+        generated, regions, calls = [], [], []
+        source = _source(selection, graph, roots, reader, allow_sorry, frozenset(environment.manifest.modules),
+                         generated=generated, regions=regions, calls=calls)
 
         def save(data):
             ref = staging.write_bounded(data, max_bytes=64*1024**2)
@@ -174,6 +178,9 @@ class Export:
         rows = library.decode() if library else []
         value['operation'] = 'integrate'
         value['packet']['inventory'] = inventory_ref.to_dict()
+        value['packet']['share'] = generated
+        value['packet']['regions'] = regions
+        value['packet']['calls'] = calls
         files = [('src/' + selection.selected.request.source, source_ref),
                  ('inventory.bin', inventory_ref),
                  ('lean-toolchain', save(('leanprover/lean4:v' + settings.version + '\n').encode()))]
@@ -185,13 +192,31 @@ class Export:
         self._layout(request.decode(), SourceReader(), source=source.data)
         return request
 
-    def prepare_verification(self, integration, selection, graph, reader):
+    def prepare_verification(self, integration, selection, graph, reader, staging):
+        """Reuse Lean-proven duplicates before independently checking the reduced source."""
         if not current(integration, selection, graph) or integration.request.kind != JobKind.INTEGRATE:
             raise ValueError('Verification requires the current admitted integration')
         value = integration.request.decode()
+        evidence = codec.decode(read(reader, integration.evidence))
+        self.checker._audit_result(evidence, value['packet'], integration.request.sha256)
+        aliases = evidence.get('aliases', [])
+        value['packet'].pop('share', None)
+        regions = value['packet'].pop('regions')
+        calls = value['packet'].pop('calls')
+        inputs = list(integration.request.inputs)
+        if regions:
+            from .projection import project
+            source = project(value['packet']['source'].encode(), regions, evidence['layout'], aliases, calls=calls)
+            reference = staging.write_bounded(source.data, max_bytes=64*1024**2)
+            reference.verify(source.data, max_bytes=64*1024**2)
+            path = 'src/' + value['packet']['logical']
+            value['export']['files'] = [[p, reference.to_dict() if p == path else ref]
+                                        for p, ref in value['export']['files']]
+            value['packet']['source'] = source.data.decode()
+            inputs.append(reference)
         value['operation'] = 'audit'
         metadata = dict(value['export'], integration=integration.request.sha256)
-        return _request(value, metadata, (*integration.request.inputs, integration.evidence))
+        return _request(value, metadata, (*inputs, integration.evidence))
 
     def _layout(self, value, reader, *, source=None):
         """Profile validation also runs on recovered receipts, before stage authority."""
@@ -282,7 +307,8 @@ class Export:
             owner = nodes[0].owner if nodes else roots[0].owner
             packet = value['packet']
             codec.fields(packet, ('source', 'logical', 'offset', 'targets', 'inventory',
-                                  *(('allow_sorry',) if request.allow_sorry else ())))
+                                  *(('allow_sorry',) if request.allow_sorry else ()),
+                                  *(('share', 'regions', 'calls') if request.kind == JobKind.INTEGRATE else ())))
             targets = [{'constant': codec.load_json(target.constant), 'signature': signature(identity)}
                        for target, identity in zip(selection.selected.targets, selection.identities)]
             if (value['candidate'] is not None or value['owner'] != [owner.obligation_id, owner.generation]
@@ -291,13 +317,21 @@ class Export:
                 raise ValueError('Export audit targets differ from the selected signatures')
             self._layout(value, reader)
             if request.kind == JobKind.INTEGRATE:
+                generated, regions, calls = [], [], []
                 source = _source(selection, graph, roots, reader, request.allow_sorry,
-                    frozenset(self.checker.environment.manifest.modules))
-                if source.data.decode() != value['packet']['source']:
+                    frozenset(self.checker.environment.manifest.modules), generated=generated, regions=regions, calls=calls)
+                if (source.data.decode() != value['packet']['source'] or generated != packet['share']
+                        or regions != packet['regions'] or calls != packet['calls']):
                     raise ValueError('Integration differs from selected proof sources')
-            elif (integration is None or self.prepare_verification(integration, selection, graph, reader).payload
-                  != request.payload):
-                raise ValueError('Verification differs from current integration')
+            else:
+                reference = dict(request.files)['src/' + packet['logical']]
+                class ExactSource:
+                    def write_bounded(self, data, *, max_bytes):
+                        reference.verify(data, max_bytes=max_bytes)
+                        return reference
+                if (integration is None or self.prepare_verification(integration, selection, graph, reader,
+                        ExactSource()).payload != request.payload):
+                    raise ValueError('Verification differs from current integration')
         admitted = self.checker.admit_receipt(request.compiler, invocation, result, receipt, reader, authority)
         if request.kind == JobKind.ASSEMBLE:
             parent = graph.node(invocation.request.job.owner).selected

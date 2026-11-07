@@ -268,6 +268,20 @@ class ContextTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
+    def test_declarations_preserve_source_types_without_structural_rendering(self):
+        sig = signature(['forall', name('n'), 'explicit', ['const', name('Nat'), []], ['const', name('Nat'), []]])
+        type_source = SourceFile('authored-type', 'Nat → Nat -- original notation'.encode())
+        declaration = CheckedDeclaration(graph.encode(name('helper')), sig, SourceFile('proof', b'fun n => n'),
+                                         type_source=type_source)
+        with patch('midas.source.render._target', side_effect=AssertionError('expanded type')):
+            result = declarations((declaration,), policy=RenderPolicy(readable=True))
+        self.assertIn(type_source.data + b'\n) := (', result.data)
+        self.assertNotIn(b'_midas', result.data)
+        self.assertNotIn('«'.encode(), result.data)
+        self.assertEqual(result.authored_location(result.data.index(b'Nat')).path, 'authored-type')
+        with self.assertRaisesRegex(ValueError, 'Conflicting'):
+            declarations((declaration, replace(declaration, type_source=SourceFile('other', b'Nat'))))
+
     def test_candidate_and_probe_share_rendering_and_authored_maps(self):
         proof = SourceFile('proof', b'by\n  trivial')
         statement = SourceFile('statement', b'True')
@@ -322,12 +336,16 @@ class RenderTests(unittest.TestCase):
             declarations((parent, replace(child, requires=(parent_name,))))
 
     def test_type_dependencies_and_definition_contexts_precede_proofs(self):
-        ctx = make_context('scope', [{'name': 'x', 'type': 'Nat', 'value': '1'}])
+        ctx = make_context('scope', [{'name': 'x', 'type': 'Nat', 'value': '1'},
+                                     {'name': 'y', 'type': 'Nat', 'value': 'x + 1'}])
         a_name, b_name = graph.encode(name('a')), graph.encode(name('b'))
         first = CheckedDeclaration(a_name, signature(['sort', ['zero']], context=ctx), SourceFile('a', b'True'))
         second = CheckedDeclaration(b_name, signature(['const', name('a'), []], context=ctx), SourceFile('b', b'by trivial'))
         result = declarations((second, first))
-        self.assertEqual(result.data.count(b'noncomputable def _root_.MidasContext_'), 1)
+        self.assertEqual(result.data.count(b'noncomputable def _root_.MidasContext_'), 2)
+        for row in ctx[2]:
+            self.assertEqual(result.data.count(('open ' + row['namespace']).encode()), 1)
+            self.assertNotIn(('open ' + row['namespace'] + ' in').encode(), result.data)
         self.assertLess(result.data.index('«a»'.encode()), result.data.index('«b»'.encode()))
 
     def test_integration_preserves_unselected_source_and_exact_roots(self):
@@ -342,6 +360,18 @@ class RenderTests(unittest.TestCase):
             integrate(selection, roots[:1])
         with self.assertRaises(ValueError):
             integrate(selection, roots + roots[:1])
+
+    def test_export_spans_follow_imports_and_prior_replacements(self):
+        _, _, _, selection = selected_problem()
+        helpers = (b'def Midas.witness := 0\n', b'def Midas.property : True := trivial\n')
+        roots = (RootReplacement('witness', GeneratedSource(b'@Midas.witness'), GeneratedSource(helpers[0])),
+                 RootReplacement('property', GeneratedSource(b'by rfl'), GeneratedSource(helpers[1])))
+        regions, calls = [], []
+        result = integrate(selection, roots, imports=('Lean',), available=frozenset({'Lean'}),
+                           regions=regions, calls=calls)
+        self.assertTrue(result.data.startswith(b'import Lean\n'))
+        self.assertEqual([result.data[a:b] for a, b in regions], list(helpers))
+        self.assertEqual([result.data[a:b] for a, b in calls], [b'@Midas.witness\n', b'by rfl\n'])
 
     def test_proof_application_uses_telescope(self):
         sig = signature(['forall', name('x'), 'explicit', ['const', name('Nat'), []], ['const', name('True'), []]])

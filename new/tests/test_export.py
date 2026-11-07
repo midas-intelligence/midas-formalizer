@@ -165,6 +165,10 @@ class Harness:
             value = (ev.replay_receipt(packet['certificate'], request.sha256) if packet['mode'] == 'replay' else
                      {'format': 'midas-source-audit-sorry-v1' if packet.get('allow_sorry') else 'midas-source-audit-v1',
                       'request': request.sha256, 'targets': packet['targets']})
+            if 'share' in packet:
+                from tests.test_export_projection import fake_layout
+                value['aliases'] = getattr(self, 'audit_aliases', [])
+                value['layout'] = fake_layout(packet)
             data = codec.encode(value)
             return ProcessResult(Outcome.COMPLETED, 0, 1, 100, 100, None, empty, empty,
                                  evidence=Diagnostic(data, len(data), False))
@@ -188,7 +192,7 @@ class Harness:
         return self.admit(request)
 
     def verify(self, integration):
-        request = self.export.prepare_verification(integration, self.selection, self.graph, self.artifacts)
+        request = self.export.prepare_verification(integration, self.selection, self.graph, self.artifacts, self.artifacts)
         return self.admit(request, integration=integration)
 
 
@@ -198,6 +202,38 @@ class Contracts(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.h = Harness(self.root)
+
+    def test_verification_uses_admitted_aliases_and_publishes_reduced_source(self):
+        from midas.source import parse_identifier
+        h = self.h
+        parent = h.conditional()
+        assembly = h.export.prepare_assembly(h.selection, h.graph, h.owner, parent, h.artifacts)
+        h.graph = accept_assembly(h.graph, h.admit(assembly, parent_request=parent))
+        h.audit_aliases = [[parse_identifier('Midas.h_2'), parse_identifier('Midas.h')]]
+        integration = h.integrate()
+        original = integration.request.decode()['packet']['source']
+        verified = h.verify(integration)
+        packet = verified.request.decode()['packet']
+        self.assertNotIn('share', packet)
+        self.assertIn('def _root_.Midas.h_2', original)
+        self.assertNotIn('Midas.h_2', packet['source'])
+        self.assertIn('namespace Midas', packet['source'])
+        self.assertNotIn('open _root_.Midas (h)', packet['source'])
+        self.assertIn('by have _ := h; trivial', packet['source'])
+        self.assertLess(len(packet['source']), len(original))
+        destination = self.root/'shared'
+        h.export.materialize(verified, h.selection, h.graph, h.artifacts, destination)
+        self.assertEqual((destination/'src/Main.lean').read_text(), packet['source'])
+        saved, reader = read_bundle(destination)
+        self.assertEqual(h.export.prepare_recheck(saved, reader).decode()['packet']['source'], packet['source'])
+
+    def test_source_aliases_reject_unknown_forward_chained_and_duplicate_names(self):
+        from midas.source import parse_identifier
+        a, b, c, missing = map(parse_identifier, ('Midas.a', 'Midas.b', 'Midas.c', 'Midas.missing'))
+        for aliases in ([[b, missing]], [[a, b]], [[b, b]], [[b, a], [c, b]], [[b, a], [b, a]]):
+            with self.subTest(aliases=aliases), self.assertRaises(ValueError):
+                ev.source_aliases(aliases, [a, b, c])
+        self.assertEqual(ev.source_aliases([[b, a], [c, a]], [a, b, c]), [[b, a], [c, a]])
 
     def test_lifecycle_and_clean_verification_use_distinct_stages(self):
         h = self.h
@@ -227,7 +263,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(admitted.kind, CheckKind.ASSEMBLY)
         h.graph = accept_assembly(h.graph, admitted)
         integration = h.integrate()
-        self.assertIn('dependencies', integration.request.decode()['packet']['source'])
+        self.assertIn('open _root_.Midas renaming h_2 → h in', integration.request.decode()['packet']['source'])
         h.verify(integration)
 
     def test_partial_export_of_unresolved_root_preserves_graph_and_recheck_option(self):
@@ -268,7 +304,7 @@ class Contracts(unittest.TestCase):
         integrated = h.integrate(allow_sorry=True)
         source = integrated.request.decode()['packet']['source']
         self.assertIn('by have _ := h; trivial', source)
-        self.assertIn('dependencies', source)
+        self.assertIn('open _root_.Midas renaming h_2 → h in', source)
         self.assertIn('sorry', source)
         self.assertIn(child.owner, integrated.request.expected_versions)
         inv = issue(integrated.request, h.artifacts)
@@ -375,7 +411,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(h.export.plan(h.selection, h.graph, integration=integrated, verification=verified)[0].kind,
                          JobKind.INTEGRATE)
         with self.assertRaises(ValueError):
-            h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
+            h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts, h.artifacts)
         with self.assertRaises(ValueError):
             h.export.materialize(verified, h.selection, h.graph, h.artifacts, self.root/'stale')
 
@@ -389,7 +425,7 @@ class Contracts(unittest.TestCase):
         library = Library(h.environment.id, codec.encode([{'name': 'Dep', 'package': None, 'assets': [], 'options': [], 'source': ref.to_dict(), 'compiled': compiled}]))
         integrated = h.integrate(profile='library', library=library)
         h.verify(integrated)
-        request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
+        request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts, h.artifacts)
         _, result, _ = h.run(request, corrupt_build=True)
         self.assertEqual(result.status, ResultStatus.FAILED)
         self.assertIn(b'Rebuilt dependency differs', h.artifacts.data[result.diagnostics.id])
@@ -401,7 +437,7 @@ class Contracts(unittest.TestCase):
         library = Library(h.environment.id, codec.encode([*codec.decode(library.payload),
             {'name': 'Second', 'package': None, 'assets': [], 'options': [], 'source': other_ref.to_dict(), 'compiled': other_compiled}]))
         integrated = h.integrate(profile='library', library=library)
-        request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
+        request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts, h.artifacts)
         _, result, _ = h.run(request, mutate_previous=True)
         self.assertEqual(result.status, ResultStatus.FAILED)
         self.assertIn(b'Rebuilt dependency changed', h.artifacts.data[result.diagnostics.id])
@@ -434,7 +470,7 @@ class Contracts(unittest.TestCase):
                                    source=None, compiled={'.olean': 'a'*64}))
             library = Library(h.environment.id, codec.encode(rows))
             integrated = h.integrate(profile='library', library=library)
-            request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
+            request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts, h.artifacts)
             for changed_at in (None, 'before', 'build', 'audit'):
                 with self.subTest(trusted=trusted, changed_at=changed_at):
                     frozen.write_bytes(b'changed' if changed_at == 'before' else b'admitted')
@@ -474,7 +510,7 @@ class Contracts(unittest.TestCase):
         self.assertNotIn('modules', packet)
         self.assertEqual(h.artifacts.read_artifact(inventory_ref, max_bytes=64*1024**2), library.payload)
         self.assertLess(len(integrated.request.payload), len(library.payload)//5)
-        request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts)
+        request = h.export.prepare_verification(integrated, h.selection, h.graph, h.artifacts, h.artifacts)
         self.assertEqual(request.decode()['packet']['inventory'], packet['inventory'])
         self.assertEqual(dict(request.files)['inventory.bin'], inventory_ref)
         # A warm content admission cannot admit a missing frozen input.
@@ -594,7 +630,7 @@ class Contracts(unittest.TestCase):
     def test_missing_build_or_changed_output_cannot_authenticate_verification(self):
         h = self.h
         integration = h.integrate()
-        request = h.export.prepare_verification(integration, h.selection, h.graph, h.artifacts)
+        request = h.export.prepare_verification(integration, h.selection, h.graph, h.artifacts, h.artifacts)
         inv, result, receipt = h.run(request)
         report = codec.load_record(h.artifacts.data[result.output.id], limit=65536)
         report['phases'].pop(0)

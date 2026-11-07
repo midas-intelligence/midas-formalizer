@@ -41,15 +41,18 @@ def prefix_proof(proof, namespace):
                 memo[id(item)] = result
         return memo.get(id(value), value)
     pattern = re.compile(r"(?<![\w'«])(?:«MidasCandidateResult»|MidasCandidateResult)(?![\w'»])")
-    result = []
-    for row in proof['declarations']:
-        text, parts, offset = row['source'], [], 0
+    def source(text):
+        parts, offset = [], 0
         for match in pattern.finditer(code_only(text)):
             parts.extend((text[offset:match.start()], '«' + namespace + '»'))
             offset = match.end()
         parts.append(text[offset:])
+        return SourceFile(namespace, ''.join(parts).encode())
+    result = []
+    for row in proof['declarations']:
         result.append(CheckedDeclaration(codec.encode(rename(row['name'])), ev.closed(expression(row['signature'])),
-            SourceFile(namespace, ''.join(parts).encode()), tuple(codec.encode(rename(n)) for n in row['requires'])))
+            source(row['source']), tuple(codec.encode(rename(n)) for n in row['requires']),
+            source(row['type_source']) if 'type_source' in row else None))
     return tuple(result), codec.encode(['str', ['anonymous'], namespace])
 
 

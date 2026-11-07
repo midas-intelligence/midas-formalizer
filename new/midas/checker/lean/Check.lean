@@ -953,12 +953,20 @@ def check (packet : Json) (original : Environment) : CommandElabM Json := do
       let proof ← checked (field packet "certificate")
       return proof
     saveNative "producer" proofBefore root
+    -- Retain authored statements for export. Internally closed/abstracted types
+    -- use ordinary Lean notation with explicit universes, not structural syntax.
+    -- Replay continues to check the exact expression; export checks this source.
+    let typeSource ← if hasStatement then checked (str packet "statement") else
+      withDeclarationContext statementContext <| liftTermElabM <| Midas.Identity.present target (source := true)
+    let declarationType ← if polymorphic || deps.isEmpty then pure typeSource else
+      withDeclarationContext workContext <| liftTermElabM <| Midas.Identity.present expected (source := true)
     let decl := Json.mkObj [("name", Midas.Identity.name root),
       ("signature", ← signature expected levels workContext), ("source", toJson proofSource),
+      ("type_source", toJson declarationType),
       ("requires", toJson (#[] : Array Json))]
     let proof := Json.mkObj [("format", toJson "midas-source-proof-v1"),
       ("request", ← checked (field packet "request")), ("purpose", toJson purpose),
-      ("signature", sig), ("declarations", toJson #[decl])]
+      ("signature", sig), ("type_source", toJson typeSource), ("declarations", toJson #[decl])]
     return attachImports <| if polymorphic then proof.setObjVal! "assumptions" assumptions else proof
   let declarations ← ((← getEnv).constants.map₂.toList.filter (fun (n, _) => !before.contains n)).toArray.mapM (fun (_, c) => encodeDecl c)
   return attachImports <| Json.mkObj [("format", toJson "midas-lean-certificate-v1"),
@@ -1001,7 +1009,84 @@ def checkBindings (packet : Json) (original : Environment) : CommandElabM Json :
 
 -- Export audit starts from imports and processes the complete proposed source.
 -- It checks every source declaration, including unselected unfinished work.
-partial def finishSource : FrontendM Unit := do
+private def exportName (n : Name) : Name := n.eraseMacroScopes.replacePrefix `_root_ .anonymous
+
+private def exportOpen (decl : Syntax) : Option (Array Json) := Id.run do
+  let mut pairs := #[]
+  if decl.getKind == ``Parser.Command.openOnly then
+    if exportName decl[0].getId != `Midas then return none
+    for id in decl[2].getArgs do
+      let alias := id.getId
+      pairs := pairs.push (toJson #[Midas.Identity.name alias, Midas.Identity.name (`Midas ++ alias)])
+  else if decl.getKind == ``Parser.Command.openRenaming then
+    if exportName decl[0].getId != `Midas then return none
+    for item in decl[2].getSepArgs do
+      pairs := pairs.push (toJson #[Midas.Identity.name item[2].getId,
+        Midas.Identity.name (`Midas ++ item[0].getId)])
+  else return none
+  return some pairs
+
+private def exportSyntax (stx : Syntax) : Array Json × Std.HashSet (Nat × Nat) := Id.run do
+  let mut result := #[]
+  let mut labels : Std.HashSet (Nat × Nat) := {}
+  let mut pending := [stx]
+  while !pending.isEmpty do
+    let stx := pending.head!
+    pending := pending.tail!
+    -- Induction/cases labels carry constructor hover information, but they
+    -- name alternatives rather than terms and must remain unqualified.
+    if stx.getKind == ``Parser.Tactic.inductionAltLHS then
+      if let .ident (.original _ start _ stop) .. := stx[1][1] then
+        labels := labels.insert (start.byteIdx, stop.byteIdx)
+    if stx.getKind == ``Parser.Term.open || stx.getKind == ``Parser.Tactic.open then
+      if let some pairs := exportOpen stx[1] then
+        result := result.push (toJson #[toJson (stx.getPos?.getD 0).byteIdx,
+          toJson (stx[1].getTailPos?.getD 0).byteIdx, toJson pairs])
+    pending := stx.getArgs.toList ++ pending
+  return (result, labels)
+
+private partial def exportDeclId (stx : Syntax) : Option Syntax :=
+  if stx.getKind == ``Parser.Command.declId then some stx[0]
+  else stx.getArgs.findSome? exportDeclId
+
+private partial def exportDeclaration (stx : Syntax) : Option Syntax :=
+  if stx.getKind == ``Parser.Command.declaration then some stx
+  else stx.getArgs.findSome? exportDeclaration
+
+private def exportReferences (trees : PersistentArray InfoTree) (generated : NameSet)
+    (labels : Std.HashSet (Nat × Nat)) : Array Json := Id.run do
+  let refs := trees.foldl (init := ({} : Std.HashMap (Nat × Nat) Name)) fun refs tree =>
+    tree.foldInfo (init := refs) fun ctx info refs => Id.run do
+      let .ofTermInfo ti := info | return refs
+      if ti.isBinder then return refs
+      let .ident (.original _ start _ stop) raw id _ := ti.stx | return refs
+      if raw.isEmpty || labels.contains (start.byteIdx, stop.byteIdx) then return refs
+      let expr := ti.expr.consumeMData.getAppFn
+      if expr.isFVar then return refs
+      let choices : List (Name × List String) :=
+        Lean.ResolveName.resolveGlobalName ctx.env ctx.options ctx.currNamespace ctx.openDecls id
+      let target : Option (Name × List String) := if let .const n _ := expr then
+        -- Tactic-local opens need not appear in the InfoTree's naming context.
+        -- The elaborated constant is authoritative for an ordinary identifier.
+        -- For dotted applications, retain the field-notation check so replacing
+        -- a method name cannot discard its receiver.
+        if ti.expr.consumeMData.isConst || (id.isAtomic && generated.contains n) then some (n, []) else
+          choices.find? (fun (target, fields) => target == n && fields.isEmpty)
+        else if choices.length == 1 && choices[0]!.2.isEmpty then some choices[0]! else none
+      let some (n, _) := target | return refs
+      if !generated.contains n then
+        let opens := ctx.openDecls.filter fun decl => match decl with
+          | .explicit _ target => !generated.contains target
+          | _ => true
+        let moved := Lean.ResolveName.resolveGlobalName ctx.env ctx.options `Midas opens id
+        if moved == choices && choices.contains (n, []) &&
+            !generated.contains (`Midas ++ id.getRoot) then return refs
+      return refs.insert (start.byteIdx, stop.byteIdx) (privateToUserName n)
+  return refs.toArray.qsort (fun a b => a.1.1 < b.1.1) |>.map fun ((start, stop), n) =>
+    toJson #[toJson start, toJson stop, Midas.Identity.name n]
+
+partial def finishSource (generated : NameSet := {}) (layout : Array Json := #[]) : FrontendM (Array Json) := do
+  let before ← getCommandState
   let done ← processCommand
   if (← getCommandState).messages.hasErrors then
     if recursionDepthMessages (← getCommandState).messages then
@@ -1009,7 +1094,32 @@ partial def finishSource : FrontendM Unit := do
     for message in (← getCommandState).messages.toList do
       IO.eprintln (← message.toString)
     throw (IO.userError "export source failed to elaborate")
-  unless done do finishSource
+  let mut layout := layout
+  if generated.isEmpty then
+    if done then return layout
+    return ← finishSource generated layout
+  let command := (← get).commands.back!
+  if let some id := exportDeclId command then
+    let name := exportName id.getId
+    if generated.contains name then
+      let (inlines, labels) := exportSyntax command
+      let mut opens := #[]
+      let mut seen : NameSet := {}
+      for decl in before.scopes.head!.openDecls do
+        if let .explicit alias target := decl then
+          if generated.contains target && !seen.contains alias then
+            seen := seen.insert alias
+            opens := opens.push (toJson #[Midas.Identity.name alias, Midas.Identity.name target])
+      layout := layout.push <| Json.mkObj [
+        ("name", Midas.Identity.name name),
+        ("namespace", Midas.Identity.name before.scopes.head!.currNamespace),
+        ("declaration_start", toJson ((exportDeclaration command).getD command).getPos?.get!.byteIdx),
+        ("span", toJson #[(command.getPos?.getD 0).byteIdx, (command.getTailPos?.getD 0).byteIdx]),
+        ("name_span", toJson #[(id.getPos?.getD 0).byteIdx, (id.getTailPos?.getD 0).byteIdx]),
+        ("references", toJson (exportReferences (← getCommandState).infoState.trees generated labels)),
+        ("opens", toJson opens), ("inline", toJson inlines)]
+  if done then return layout
+  finishSource generated layout
 
 -- Source exports also contain trusted local structure/class declarations. Rebuild
 -- their inductive blocks in the fresh kernel before replaying dependent values.
@@ -1080,6 +1190,41 @@ def auditSourceDeclarations (before : Environment) (assumptions : List Name := [
     unless progressed do throwError "source kernel replay failed or has undeclared dependencies"
     pending := rest
 
+-- Compare kernel expressions after replacing already-proven aliases. Source text
+-- alone cannot establish that definitions elaborated in different scopes agree.
+-- Hash tables index expressions without serializing or expanding shared DAGs.
+def sourceAliases (names : Array Json) : CommandElabM (Array Json) := do
+  let mut aliases : Std.HashMap Name Name := {}
+  let mut types : Std.HashMap Name (List Name × ExprStructEq × Bool) := {}
+  let mut bodies : Std.HashMap (List Name × ExprStructEq × ExprStructEq × Bool) Name := {}
+  let mut output := #[]
+  for raw in names do
+    let n ← checked (readName raw)
+    let .defnInfo d ← getConstInfo n | throwError "expected generated definition: {n}"
+    let normalize := fun e : Expr => liftCoreM <| Core.transform e (post := fun e => return .done <|
+      match e with
+      | .const c us => mkConst (aliases[c]?.getD c) us
+      | .forallE _ t b bi => .forallE .anonymous t b bi
+      | .lam _ t b bi => .lam .anonymous t b bi
+      | .letE _ t v b nd => .letE .anonymous t v b nd
+      | .mdata _ b => b
+      | _ => e)
+    let type ← normalize d.type
+    let value ← normalize d.value
+    let shape := (d.levelParams, ExprStructEq.mk type, d.hints.isAbbrev)
+    let key := (d.levelParams, ExprStructEq.mk type, ExprStructEq.mk value, d.hints.isAbbrev)
+    let mut representative := bodies[key]?
+    if let .const target us := value then
+      if us == d.levelParams.map Level.param && types[target]? == some shape then
+        representative := some target
+    if let some canonical := representative then
+      aliases := aliases.insert n canonical
+      output := output.push (toJson #[raw, Midas.Identity.name canonical])
+    else
+      types := types.insert n shape
+      bodies := bodies.insert key n
+  return output
+
 def auditSource (packet : Json) (before : Environment) : CommandElabM Json := do
   -- Anonymous is a prefix of every declaration name. Apply the same safe
   -- declaration/axiom audit and independent kernel replay to the whole source,
@@ -1097,8 +1242,11 @@ def auditSource (packet : Json) (before : Environment) : CommandElabM Json := do
       unless (← exportSignature actual) == (← exportSignature expected) do
         throwError "export target signature mismatch: {n}"
     auditConstant ci assumptions
-  return Json.mkObj [("format", toJson (if allowSorry then "midas-source-audit-sorry-v1" else "midas-source-audit-v1")),
+  let result := Json.mkObj [("format", toJson (if allowSorry then "midas-source-audit-sorry-v1" else "midas-source-audit-v1")),
     ("request", ← checked (field packet "request")), ("targets", toJson targets)]
+  if let .ok names := packet.getObjValAs? (Array Json) "share" then
+    return result.setObjVal! "aliases" (toJson (← sourceAliases names))
+  return result
 
 -- Only the child materializes raw declarations. The import parent decodes the
 -- packet header but never imports or retains request-owned compiled data.
@@ -1163,8 +1311,12 @@ def main (args : List String) : IO UInt32 := do
   Midas.Check.launchEnvironment.set (some env)
   let action : FrontendM Json := do
     if (← IO.ofExcept (Midas.Check.str packet "mode")) == "audit" then
-      Midas.Check.finishSource
-      return ← runCommandElabM <| Midas.Check.withRecursionFailure (Midas.Check.auditSource packet env)
+      let names := (packet.getObjValAs? (Array Json) "share").toOption.getD #[]
+      let generated ← names.foldlM (init := ({} : NameSet)) fun set n => do
+        return set.insert (← IO.ofExcept (Midas.Check.readName n))
+      let layout ← Midas.Check.finishSource generated
+      let result ← runCommandElabM <| Midas.Check.withRecursionFailure (Midas.Check.auditSource packet env)
+      return if (packet.getObjVal? "share").isOk then result.setObjVal! "layout" (toJson layout) else result
     let before ← Midas.Check.seek offset
     let original := (← getCommandState).env
     setCommandState before

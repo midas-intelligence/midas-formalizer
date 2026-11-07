@@ -6,14 +6,22 @@ Only kernel-irrelevant expression metadata is erased. -/
 namespace Midas.Identity
 open Lean Elab Command
 
--- Advisory text travels separately from the exact identity graph. Produce it
--- while the checked type and its declaration context are already in memory.
-def present (type : Expr) : MetaM String := do
-  withOptions (fun opts => pp.maxSteps.set (opts.setBool `pp.all false |>.setBool `pp.explicit false
+-- Text travels separately from the exact identity graph. Export source must
+-- retain proof terms and universes that an advisory display may hide.
+def present (type : Expr) (source : Bool := false) : MetaM String := do
+  withOptions (fun opts =>
+    let opts := opts.setBool `pp.all false |>.setBool `pp.explicit false
       |>.setBool `pp.universes false |>.setBool `pp.fullNames false
       |>.setBool `pp.funBinderTypes true |>.setBool `pp.piBinderTypes true
       |>.setBool `pp.letVarTypes true
-      |>.setBool `pp.deepTerms true) 1000000) do
+      |>.setBool `pp.deepTerms true
+    let opts := if source then opts.setBool `pp.proofs true |>.setBool `pp.instances true
+      |>.setBool `pp.analyze true |>.setBool `pp.analyze.knowsType false
+      |>.setBool `pp.analyze.checkInstances true |>.setBool `pp.analyze.typeAscriptions true
+      |>.setBool `pp.analyze.trustSubtypeMk false |>.setBool `pp.analyze.trustOfNat false
+      |>.setBool `pp.analyze.trustOfScientific false |>.setBool `pp.analyze.trustId false
+      |>.setBool `pp.analyze.trustKnownFOType2TypeHOFuns false else opts
+    pp.maxSteps.set opts 1000000) do
     let text := (← Meta.ppExpr type).pretty
     if text.utf8ByteSize > 1048576 then
       throwError "type presentation exceeds byte limit"

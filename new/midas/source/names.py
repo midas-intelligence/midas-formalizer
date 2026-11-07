@@ -86,10 +86,85 @@ _COMPONENT = rf'(?:«[^»\n]+»|{_IDENTIFIER})'
 NAME = rf'{_COMPONENT}(?:\.{_COMPONENT})*'
 LEXEME = re.compile(r'/-|--[^\n]*|"(?:\\.|[^"\\])*"|«[^»]*»')
 COMMENT = re.compile(r'/-|-/')
+_TOKENS = re.compile(r'/-|--[^\n]*|r(?P<raw>\#*)"|"|\'(?:\\.|[^\\\'\n])\'|' + NAME)
 SCOPE = re.compile(r'^(?:(?:noncomputable|public)\s+)?(namespace|section|end)(?:\s+(' + NAME + r'))?\s*$')
 DECL = re.compile(r'^(?P<mod>(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*)'
                   r'(?:theorem|lemma|def|abbrev|instance|class|structure|inductive|opaque|axiom)\s+'
                   r'(?P<name>' + NAME + r')(?=\s|:|\(|\{|\[|\.\{|$)')
+
+
+def identifiers(source):
+    """Yield identifier spans outside comments, ordinary/raw strings and chars."""
+    cursor = 0
+    while match := _TOKENS.search(source, cursor):
+        token, cursor = match.group(), match.end()
+        if token == '/-':
+            depth = 1
+            for boundary in COMMENT.finditer(source, cursor):
+                depth += 1 if boundary.group() == '/-' else -1
+                if not depth:
+                    cursor = boundary.end()
+                    break
+            else:
+                return
+        elif token.startswith('--') or token.startswith("'"):
+            continue
+        elif token == '"' or match.group('raw') is not None:
+            if match.group('raw') is not None:
+                ending = '"' + match.group('raw')
+                end = source.find(ending, cursor)
+                cursor = len(source) if end < 0 else end + len(ending)
+            else:
+                while cursor < len(source):
+                    char = source[cursor]
+                    cursor += 1
+                    if char == '"':
+                        break
+                    if char == '\\':
+                        cursor += 1
+        else:
+            yield match.start(), match.end(), token
+
+
+def rewrite_identifiers(source, rename, *, maximum=64*1024**2):
+    """Rename exact tokens in one pass; untouched bytes retain source mappings."""
+    from ..domain import ByteSpan
+    from .text import Builder, SourceMapEntry
+    text = source.data.decode()
+    writer, cursor, character, mapping = Builder(maximum), 0, 0, 0
+    view = memoryview(source.data)
+
+    def copy(end):
+        nonlocal mapping
+        start = writer.size
+        writer.append(view[cursor:end])
+        while mapping < len(source.mappings):
+            row = source.mappings[mapping]
+            if row.generated.start >= end:
+                break
+            left, right = max(cursor, row.generated.start), min(end, row.generated.end)
+            if left < right:
+                origin = row.authored.start + left - row.generated.start
+                writer.mappings.append(SourceMapEntry(
+                    ByteSpan(start + left - cursor, start + right - cursor), row.original,
+                    ByteSpan(origin, origin + right - left)))
+            if row.generated.end > end:
+                break
+            mapping += 1
+
+    for start, end, token in identifiers(text):
+        replacement = rename(token)
+        if replacement is None or replacement == token:
+            continue
+        left = cursor + len(text[character:start].encode())
+        right = left + len(token.encode())
+        copy(left)
+        writer.append(replacement.encode())
+        cursor, character = right, end
+    if not cursor:
+        return source
+    copy(len(source.data))
+    return writer.finish()
 
 
 def code_only(source):

@@ -151,7 +151,35 @@ def render_context(context: bytes, *, maximum=MAX_BYTES):
     return _CONTEXT_SOURCES.get((context, maximum), build)
 
 
-def _render_context(context, writer, emitted):
+class _ContextScope:
+    """Reuse open namespace prefixes within one flat, temporary section."""
+
+    def __init__(self, writer, *, sections=None):
+        self.writer, self.namespaces = writer, ()
+        self.sections, self.start = sections, 0
+
+    def open(self, namespaces):
+        namespaces = tuple(namespaces)
+        if namespaces == self.namespaces:
+            return
+        if namespaces[:len(self.namespaces)] != self.namespaces:
+            self.close()
+        if namespaces and not self.namespaces:
+            self.start = self.writer.size
+            self.writer.append(b'section\n')
+        self.writer.append(''.join('open ' + ns + '\n'
+                                   for ns in namespaces[len(self.namespaces):]).encode())
+        self.namespaces = namespaces
+
+    def close(self):
+        if self.namespaces:
+            self.writer.append(b'end\n\n')
+            if self.sections is not None:
+                self.sections.append(ByteSpan(self.start, self.writer.size))
+            self.namespaces = ()
+
+
+def _render_context(context, writer, emitted, *, scope=None, spans=None):
     validate_context(context)
     if context == CLOSED:
         return
@@ -163,22 +191,33 @@ def _render_context(context, writer, emitted):
             raise ValueError('Conflicting context declaration')
         if previous is None:
             emitted[key] = row
-            writer.append(''.join('open ' + ns + ' in\n' for ns in namespaces).encode())
+            if scope is None:
+                writer.append(''.join('open ' + ns + ' in\n' for ns in namespaces).encode())
+            else:
+                scope.open(namespaces)
+            start = writer.size
             writer.append(('noncomputable ' + row['kind'] + ' _root_.' + row['namespace'] + '.'
                            + lean_name(['str', ['anonymous'], row['name']]) + ' : (\n').encode())
             writer.authored(SourceFile(row['namespace'] + '/type', row['type'].encode()))
             writer.append(b'\n) := (\n')
             writer.authored(SourceFile(row['namespace'] + '/value', row['value'].encode()))
             writer.append(b'\n)\n\n')
+            if spans is not None:
+                name = ['str', ['str', ['anonymous'], row['namespace']], row['name']]
+                spans.append((name, ByteSpan(start, writer.size)))
         namespaces.append(row['namespace'])
 
 
-def context_opens(context):
+def _context_namespaces(context):
     if context == CLOSED:
-        return b''
+        return ()
     if context[0] != 'declaration-context-v2':
         raise ValueError('Source declarations require a closed or named definition context')
-    return ''.join('open ' + row['namespace'] + ' in\n' for row in context[2]).encode()
+    return tuple(row['namespace'] for row in context[2])
+
+
+def context_opens(context):
+    return ''.join('open ' + ns + ' in\n' for ns in _context_namespaces(context)).encode()
 
 
 def merge_imports(*groups):

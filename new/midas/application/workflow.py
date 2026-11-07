@@ -389,7 +389,7 @@ class Workflow:
                 request = self.export.prepare_integration(self.selection, graph, reader, buffer, profile=profile,
                     library=self.library, maximum=self.policy.config.export.max_bytes, allow_sorry=self.allow_sorry)
             else:
-                request = self.export.prepare_verification(integration, self.selection, graph, reader)
+                request = self.export.prepare_verification(integration, self.selection, graph, reader, buffer)
         except ValueError as error:
             return r.record(reader, 'application.export', name, ['failed', str(error)[:2048], epoch, graph.revision])
         key = 'export:'+request.sha256

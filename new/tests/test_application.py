@@ -56,6 +56,16 @@ class Compiler(Checker):
                 contains_sorry=False, unresolved_metavariables=False, inspection={}), messages=[]))))
                 for case in packet['cases']]
             evidence = save(pack([ref.to_dict() for ref in cases]))
+        elif value['operation'] in ('integrate', 'audit'):
+            from midas.application.records import pack
+            record = dict(format='midas-source-audit-sorry-v1' if packet.get('allow_sorry') else 'midas-source-audit-v1',
+                          request=request.sha256, targets=packet['targets'])
+            if 'share' in packet:
+                from tests.test_export_projection import fake_layout
+                record['aliases'] = []
+                record['layout'] = fake_layout(packet)
+            audit = save(codec.encode(record))
+            evidence = save(pack(dict(phases=[], evidence=audit.to_dict())))
         else:
             from midas.application.records import pack
             evidence = save(pack(dict(phases=[])))
@@ -76,6 +86,9 @@ class Compiler(Checker):
         if value['operation'] == 'proof':
             return AdmittedCheck(candidate, CheckKind.CONDITIONAL if candidate.logical_dependencies else CheckKind.DIRECT,
                                  receipt, result.output)
+        if value['operation'] in ('integrate', 'audit'):
+            report = codec.load_record(reader.read_artifact(result.output, max_bytes=65536), limit=65536)
+            return Advisory(value['operation'], ArtifactRef.from_dict(report['evidence']), receipt)
         return Advisory(value['operation'], result.output, receipt)
 
 

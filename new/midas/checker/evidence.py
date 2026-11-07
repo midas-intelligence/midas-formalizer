@@ -1,5 +1,6 @@
 """Binary evidence validation. Syntax alone never authorizes a proof."""
 from hashlib import sha256
+from heapq import merge
 
 from ..domain import Signature, validate_signature
 from ..domain import encoding as codec
@@ -9,6 +10,101 @@ ROOT = ['str', ['anonymous'], 'MidasCandidateResult']
 PROOF = 'midas-source-proof-v1'
 INTERFACE = 'midas-elaborated-interface-v1'
 NATIVE = b'MIDAS_NATIVE_V2\n'
+
+
+def source_aliases(value, generated):
+    """Validate the bounded, ordered names in an admitted kernel comparison."""
+    if type(generated) is not list or len(generated) > 100000:
+        raise ValueError('Invalid generated declaration list')
+    for name in generated:
+        codec.name(name)
+    if type(value) is not list or len(value) > len(generated):
+        raise ValueError('Invalid source alias table')
+    positions = {codec.encode(n): i for i, n in enumerate(generated)}
+    if len(positions) != len(generated):
+        raise ValueError('Duplicate generated source name')
+    removed, targets = set(), set()
+    for row in value:
+        if type(row) is not list or len(row) != 2:
+            raise ValueError('Invalid source alias')
+        for n in row:
+            codec.name(n)
+        old, new = map(codec.encode, row)
+        if (old not in positions or new not in positions or positions[new] >= positions[old]
+                or old in removed):
+            raise ValueError('Source alias is not an earlier generated declaration')
+        removed.add(old)
+        targets.add(new)
+    if removed & targets:
+        raise ValueError('Source aliases must refer directly to retained declarations')
+    return value
+
+
+def source_regions(regions, source, calls):
+    size = len(source.encode())
+    for spans in (regions, calls):
+        if type(spans) is not list or len(spans) > 10000:
+            raise ValueError('Invalid generated source regions')
+        end = 0
+        for span in spans:
+            if (type(span) is not list or len(span) != 2 or any(type(n) is not int for n in span)
+                    or not end <= span[0] < span[1] <= size):
+                raise ValueError('Invalid generated source region')
+            end = span[1]
+    end = 0
+    for span in merge(regions, calls):
+        if span[0] < end:
+            raise ValueError('Overlapping generated source regions')
+        end = span[1]
+
+
+def source_layout(layout, packet):
+    source_regions(packet['regions'], packet['source'], packet['calls'])
+    if type(layout) is not list or len(layout) != len(packet['share']):
+        raise ValueError('Invalid generated source layout')
+    region, end, count = 0, 0, 0
+    def span(value, left, right):
+        if (type(value) is not list or len(value) != 2 or any(type(n) is not int for n in value)
+                or not left <= value[0] < value[1] <= right):
+            raise ValueError('Invalid checked source span')
+    def pairs(value):
+        if type(value) is not list or len(value) > 100000:
+            raise ValueError('Invalid checked open names')
+        for pair in value:
+            if type(pair) is not list or len(pair) != 2:
+                raise ValueError('Invalid checked open alias')
+            for name in pair:
+                codec.name(name)
+    for row, name in zip(layout, packet['share']):
+        codec.fields(row, ('name', 'namespace', 'span', 'declaration_start', 'name_span', 'references', 'opens', 'inline'))
+        codec.name(row['namespace'])
+        if codec.encode(row['name']) != codec.encode(name):
+            raise ValueError('Checked source declaration differs')
+        span(row['span'], end, packet['regions'][-1][1] if packet['regions'] else 0)
+        left, right = row['span']
+        while region < len(packet['regions']) and packet['regions'][region][1] <= left:
+            region += 1
+        if region == len(packet['regions']):
+            raise ValueError('Checked declaration is outside generated source')
+        span(row['span'], *packet['regions'][region])
+        span(row['name_span'], left, right)
+        if type(row['declaration_start']) is not int or not left <= row['declaration_start'] < row['name_span'][0]:
+            raise ValueError('Invalid checked declaration start')
+        pairs(row['opens'])
+        for key in ('references', 'inline'):
+            if type(row[key]) is not list:
+                raise ValueError('Invalid checked source bindings')
+            count += len(row[key])
+            if count > 1000000:
+                raise ValueError('Checked source binding limit exceeded')
+            previous = left
+            for item in row[key]:
+                if type(item) is not list or len(item) != 3:
+                    raise ValueError('Invalid checked source binding')
+                span(item[:2], previous, right)
+                (codec.name if key == 'references' else pairs)(item[2])
+                previous = item[1]
+        end = right
 
 
 def _closed(value):
@@ -84,6 +180,9 @@ def certificate(value, digest):
         return value
     if 'assumptions' in value:
         extra += ('assumptions',)
+    if 'type_source' in value:
+        extra += ('type_source',)
+        bounded_text(value['type_source'], 'proof type source', 1024**2)
     codec.fields(value, ('format', 'request', 'purpose', 'signature', 'declarations', *extra))
     if value['format'] != PROOF or value['request'] != digest or value['purpose'] != 'proof':
         raise ValueError('Proof certificate binding differs')
@@ -105,13 +204,16 @@ def certificate(value, digest):
         raise ValueError('Invalid certificate declarations')
     seen = set()
     for row in rows:
-        codec.fields(row, ('name', 'signature', 'source', 'requires'))
+        codec.fields(row, ('name', 'signature', 'source', 'requires',
+                           *(('type_source',) if 'type_source' in row else ())))
         codec.name(row['name'])
         key = codec.encode(row['name'])
         if row['name'] == ['anonymous'] or key in seen:
             raise ValueError('Duplicate or anonymous proof declaration')
         check_signature(row['signature'])
         bounded_text(row['source'], 'proof source', 1024**2)
+        if 'type_source' in row:
+            bounded_text(row['type_source'], 'declaration type source', 1024**2)
         if type(row['requires']) is not list or len(row['requires']) > 4096:
             raise ValueError('Invalid declaration dependencies')
         for dependency in row['requires']:
@@ -139,6 +241,14 @@ def proof_for(value, packet, digest):
     code = packet['candidate']
     if len(value['declarations']) != 1 or value['declarations'][0]['source'] != code:
         raise ValueError('Produced source differs from submitted candidate')
+    if ('type_source' in value and packet.get('statement') is not None
+            and value['type_source'] != packet['statement']):
+        raise ValueError('Produced type source differs from submitted statement')
+    row = value['declarations'][0]
+    if ('type_source' in row and 'type_source' in value
+            and (not packet['dependencies'] or assumptions)
+            and row['type_source'] != value['type_source']):
+        raise ValueError('Produced declaration type differs from subject type source')
     return value
 
 

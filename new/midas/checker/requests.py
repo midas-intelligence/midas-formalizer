@@ -65,6 +65,12 @@ class CompilerRequest:
         if 'allow_sorry' in value['packet'] and (value['operation'] not in ('audit', 'integrate')
                 or type(value['packet']['allow_sorry']) is not bool):
             raise ValueError('Sorry is an explicit source-audit option only')
+        if 'share' in value['packet']:
+            from .evidence import source_aliases, source_regions
+            if value['operation'] not in ('audit', 'integrate'):
+                raise ValueError('Declaration sharing requires a source audit')
+            source_aliases([], value['packet']['share'])
+            source_regions(value['packet']['regions'], value['packet']['source'], value['packet']['calls'])
         refs = tuple(ArtifactRef.from_dict(v) for v in value['inputs'])
         maximum = 40016 if 'export' in value else 20000 if value['operation'] == 'audit' else 256
         if len(refs) > maximum or len(set(refs)) != len(refs):

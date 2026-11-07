@@ -48,13 +48,35 @@ def main():
     child = CheckedDeclaration(child_name, signature(), SourceFile('child', b'by trivial'))
     parent = CheckedDeclaration(parent_name, signature(), SourceFile('parent', b'by exact child'), (child_name,))
     snippets.append(declarations((parent, child)).data)
+    # Shared prefixes, sibling contexts with the same short names, and later
+    # batches must resolve exactly their own definitions without leaking opens.
+    definitions = [{'name': 'x', 'type': 'Nat', 'value': '1'},
+                   {'name': 'y', 'type': 'Nat', 'value': 'x + 1'}]
+    prefix = make_context('export-scope', definitions[:1])
+    extended = make_context('export-scope', definitions)
+    sibling = make_context('export-scope', [{'name': 'x', 'type': 'Nat', 'value': '7'},
+                                          {'name': 'y', 'type': 'Nat', 'value': 'x + 2'}])
+    isolated = b'by\n  fail_if_success have : Nat := x\n  fail_if_success have : Nat := y\n  exact 9'
+    contexts = {}
+    rows = tuple(CheckedDeclaration(graph.encode(name(label)), signature(nat, context=ctx),
+                                   SourceFile(label, body)) for label, ctx, body in (
+        ('contextA', prefix, b'by exact x'), ('contextB', extended, b'by exact y'),
+        ('contextC', sibling, b'by exact y'), ('contextD', ['closed-telescope'], isolated)))
+    snippets.append(b'namespace Authored\n' + declarations(rows, emitted=contexts).data)
+    later = CheckedDeclaration(graph.encode(name('contextE')), signature(nat, context=extended),
+                               SourceFile('later', b'by exact y'))
+    snippets.append(declarations((later,), emitted=contexts).data)
+    for label, expected in (('contextA', 1), ('contextB', 2), ('contextC', 9), ('contextD', 9), ('contextE', 2)):
+        snippets.append(f'example : {label} = {expected} := rfl\n'.encode())
+    snippets.append(b'example : Nat := ' + isolated + b'\nend Authored\n')
     # Closed signatures include both authored header locals and any binders
     # still inside the target. Exercise each boundary and renamed-local lookup.
     wrapper_sig = signature(['forall', name('n'), 'explicit', nat,
         ['forall', name('h'), 'explicit', ['const', name('True'), []], ['const', name('True'), []]]])
     wrapper_name = graph.encode(name('wrapperResult'))
     snippets.append(declarations((CheckedDeclaration(wrapper_name, wrapper_sig,
-        SourceFile('wrapper', b'by intro n h; exact h')),)).data)
+        SourceFile('wrapper', b'by intro n h; exact h'),
+        type_source=SourceFile('wrapper-type', b'Nat -> True -> True -- preserve authored notation')),)).data)
     wrapper = proof_application(wrapper_name, wrapper_sig).data
     for header in (b'example (n : Nat) (h : True) : True := ',
                    b'example (n : Nat) : True -> True := ',
