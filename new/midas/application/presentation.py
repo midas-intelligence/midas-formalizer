@@ -12,7 +12,8 @@ def exact(text):
     return fence + b'\n' + raw + b'\n' + fence
 
 
-def candidate(draft, context, *, selected=None, checked=None, compiled=(), failures=None, blocked=()):
+def candidate(draft, context, *, selected=None, checked=None, compiled=(), failures=None, blocked=(),
+              displayed_definitions=()):
     value, guidance, editable = candidate_material(draft, context, compiled=compiled)
     compiled, blocked = set(compiled), set(blocked)
     failures = failures or {}
@@ -20,6 +21,7 @@ def candidate(draft, context, *, selected=None, checked=None, compiled=(), failu
     references.update(((p.reference.submission_id, p.reference.key), p.reference.label)
                       for p in context.prerequisites)
     definitions = value.get('definitions', [])
+    shown_definitions = {d['name']: d for d in displayed_definitions}
     paths = dict(editable)
     reviewing = selected is not None
     rows = [b'Candidate for independent review.' if reviewing else
@@ -34,13 +36,18 @@ def candidate(draft, context, *, selected=None, checked=None, compiled=(), failu
             raise ValueError('Reviewed entry differs from checked proof')
         rows.append(('Selected review entry: ' + selected).encode())
         if checked is not None:
-            rows.append(b'The selected entry has a checked conditional composition; its children remain obligations.')
+            compiled.add(selected)
+            rows.append(b'The selected entry has a checked conditional composition; unproved dependencies remain obligations.')
     if value.get('imports'):
         rows.append(('Candidate imports: ' + ', '.join(value['imports'])).encode())
     for definition in definitions:
+        if shown_definitions.get(definition['name']) == definition:
+            continue
         rows.append(f"Definition: {definition['kind']} {definition['name']}".encode())
         if reviewing:
             rows.extend((b'Type:\n' + exact(definition['type']), b'Value:\n' + exact(definition['value'])))
+    if definitions:
+        rows.append(b'All listed definitions are available in statements and proofs unless an entry specifies a narrower scope.')
     for entry in value['entries']:
         goal = entry['subject']
         prefix = '/entries/' + entry['key'].replace('~', '~0').replace('/', '~1')
@@ -51,7 +58,7 @@ def candidate(draft, context, *, selected=None, checked=None, compiled=(), failu
             path = prefix + '/' + field
             if not reviewing and path in paths:
                 lines.append(field.capitalize() + ' fragment: ' + path)
-        if not reviewing and entry['key'] in compiled:
+        if entry['key'] in compiled:
             lines.append('Proof: compiled successfully.')
         elif not reviewing and entry['key'] in failures:
             lines.append('Check: ' + failures[entry['key']]['stage'] + ' failed; see node feedback.')
@@ -70,18 +77,21 @@ def candidate(draft, context, *, selected=None, checked=None, compiled=(), failu
             dependencies.append(f"{dep['parameter']} <- {origin}")
         lines.append('Dependencies: ' + ('; '.join(dependencies) or 'none'))
         for scope in ('statement', 'proof'):
-            names = [d['name'] for d in definitions[:entry['definition_scope'][scope]]]
-            lines.append('Definitions in ' + scope + ': ' + (', '.join(names) or 'none'))
+            count = entry['definition_scope'][scope]
+            if count < len(definitions):
+                names = [d['name'] for d in definitions[:count]]
+                lines.append('Definitions in ' + scope + ': ' + (', '.join(names) or 'none'))
         rows.append('\n'.join(lines).encode())
         # Fixed local statements are not editable but still part of the review.
         if goal['kind'] == 'lemma' and (reviewing or prefix + '/statement' not in paths):
             rows.append((b'Statement:\n' if reviewing else b'Fixed statement:\n') + exact(goal['statement']))
         if reviewing:
-            if entry['key'] not in draft.unproved:
+            if entry['key'] not in draft.unproved and entry['key'] not in compiled:
                 rows.append(b'Proof:\n' + exact(entry['proof']))
             child = guidance['children'].get(entry['key'])
             if child:
-                rows.append(b'English proof plan:\n' + exact(child['proof']))
+                if child['proof']:
+                    rows.append(b'English proof plan:\n' + exact(child['proof']))
                 if child['usefulness']:
                     rows.append(b'Usefulness:\n' + exact(child['usefulness']))
     if reviewing:

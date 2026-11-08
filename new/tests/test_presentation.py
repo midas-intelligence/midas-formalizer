@@ -31,7 +31,12 @@ class PresentationTests(unittest.TestCase):
         self.assertIn(b'Retain this English plan.', text)
         self.assertIn(action['children'][1]['statement'].encode(), text)
         reviewed = presentation.candidate(draft, ctx, selected='parent', compiled=('first',)).text
-        self.assertIn(b'unique_successful_term', reviewed)
+        self.assertNotIn(b'unique_successful_term', reviewed)
+        self.assertEqual(reviewed.count(b'Proof: compiled successfully.'), 1)
+        self.assertIn(action['proof_body'].encode(), reviewed)
+        self.assertIn(b'Proof: pending obligation', reviewed)
+        self.assertIn(b'first <- local entry first', reviewed)
+        self.assertIn(b'Retain this English plan.', reviewed)
 
     def test_candidate_contains_dependency_map_guidance_and_exact_fragments_once(self):
         action = decomposition()
@@ -47,7 +52,12 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(draft.payload, before)
         self.assertIn(b'first <- local entry first', text)
         self.assertIn(b'Definition: abbrev Shared', text)
-        self.assertIn(b'Definitions in statement: Shared', text)
+        # The parent's fixed statement cannot use the new definition; its proof
+        # and the child statements can. Only the narrower scope needs a label.
+        self.assertEqual(text.count(b'Definitions in statement:'), 1)
+        self.assertIn(b'Definitions in statement: none', text)
+        self.assertNotIn(b'Definitions in proof:', text)
+        self.assertIn(b'All listed definitions are available in statements and proofs', text)
         self.assertIn(b'Proof: pending obligation', text)
         self.assertNotIn(b'by sorry', text)
         self.assertNotIn(uid('display-candidate').encode(), text)
@@ -59,14 +69,21 @@ class PresentationTests(unittest.TestCase):
             presentation.candidate(draft, ctx, selected='absent')
         with self.assertRaisesRegex(ValueError, 'differs'):
             presentation.candidate(draft, ctx, selected='parent', checked=b'by trivial')
-        reviewed = presentation.candidate(draft, ctx, selected='parent', checked=action['proof_body'].encode())
-        self.assertEqual(reviewed.text.count(action['proof_body'].encode()), 1)
+        with patch('json.dumps', side_effect=AssertionError('JSON encode')), \
+             patch('json.loads', side_effect=AssertionError('JSON decode')):
+            reviewed = presentation.candidate(draft, ctx, selected='parent', checked=action['proof_body'].encode())
+        self.assertNotIn(action['proof_body'].encode(), reviewed.text)
+        self.assertIn(b'Proof: compiled successfully.', reviewed.text)
+        self.assertIn(b'unproved dependencies remain obligations.', reviewed.text)
         self.assertIn(b'Selected review entry: parent', reviewed.text)
         self.assertIn(b'first <- local entry first', reviewed.text)
         self.assertIn(b'Type:\n' + presentation.exact('Prop'), reviewed.text)
         self.assertIn(b'Value:\n' + presentation.exact('True'), reviewed.text)
-        for _, raw in fragments(draft, ctx):
-            if raw:
+        self.assertEqual(reviewed.text.count(b'Definitions in statement:'), 1)
+        self.assertIn(b'Definitions in statement: none', reviewed.text)
+        self.assertNotIn(b'Definitions in proof:', reviewed.text)
+        for path, raw in fragments(draft, ctx):
+            if raw and path != '/entries/parent/proof':
                 self.assertIn(presentation.exact(raw), reviewed.text)
         for clutter in (b'Editable', b' fragment:', b'/entries/', b'new candidate action', b'by sorry'):
             self.assertNotIn(clutter, reviewed.text)

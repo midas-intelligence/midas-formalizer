@@ -7,7 +7,10 @@ INSTRUCTIONS = b"""Review the exact displayed candidate and selected review entr
 Check required outputs, conditional composition, ordered child statements, English
 proof plans, named definitions, and each child's checked dependency interfaces.
 Children may instead supply Lean terms, which are checked directly without model
-review. Assess the proposed work for English-guided children; do not require an
+review. Entries marked "Proof: compiled successfully." omit their Lean proof
+bodies. Use their statements and explicit dependency maps; a successful conditional
+check does not discharge unproved dependencies.
+Assess the proposed work for English-guided children; do not require an
 English plan for a supplied Lean term. Acceptance permits pursuing the English
 obligations; it does not certify them or discharge a Lean term's dependencies.
 Child guidance may be empty. Assess such children from their statements and

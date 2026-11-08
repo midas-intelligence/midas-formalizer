@@ -189,13 +189,15 @@ class Workflow:
             context = (snapshot.context if coordinator.context == state.context else
                        Context.load(r.read(reader, coordinator.context, 8*1024**2)))
             checked = r.read(reader, snapshot.attempt.candidate.source, 1024**2)
-            sections.append(presentation.candidate(draft, context, selected=entry_key, checked=checked))
+            sections.append(presentation.candidate(draft, context, selected=entry_key, checked=checked,
+                compiled=tuple(name for name, row in saved['rows'].items() if row.get('checked')),
+                displayed_definitions=definitions))
             refs.extend((draft_ref, coordinator.context))
             owners.append(OwnerVersion(*saved['owner']))
         elif snapshot.base:
             sections.append(presentation.candidate(snapshot.base, snapshot.context, compiled=snapshot.compiled,
                 failures=base_saved.get('failures') if base_saved else None,
-                blocked=base_saved.get('blocked', ()) if base_saved else ()))
+                blocked=base_saved.get('blocked', ()) if base_saved else (), displayed_definitions=definitions))
             refs.append(state.base)
             if base_saved:
                 for ordinal, (name, stage, observation, reference) in enumerate(
