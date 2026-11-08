@@ -365,11 +365,53 @@ def main():
                 assert outcome['status'] == 'interrupted', outcome
                 assert '12345' in outcome['diagnostic'] and 'heartbeat' in outcome['diagnostic'], outcome
 
+            def diagnostic_checks(label):
+                for code, message, axiom_failure in (
+                    (b'by exact (0 : Nat)', 'Type mismatch', False),
+                    (b'by skip', 'unsolved goals', False),
+                    (b'by exact (', 'candidate fragment failed to parse', False),
+                    (b'by sorry', 'unapproved axiom: sorryAx', True),
+                ):
+                    proof = replace(candidate, id=str(uuid4()), source=artifacts.save(code))
+                    result, _ = check(label + ' proof diagnostic ' + code.decode(),
+                        checker.prepare('proof', selected, 0, proof, artifacts), candidate=proof,
+                        valid=False, expected_outcome='invalid_candidate')
+                    diagnostic = artifacts.data[result.diagnostics.id].decode()
+                    assert message in diagnostic, diagnostic
+                    assert ('unapproved axiom: sorryAx' in diagnostic) == axiom_failure, diagnostic
+                    assert 'unexpected internal error' not in diagnostic, diagnostic
+                    if code in (b'by skip', b'by exact (0 : Nat)'):
+                        assert diagnostic.count('candidate-proof.lean:1:') == 1, diagnostic
+                        assert 'candidate elaboration reported errors' in diagnostic, diagnostic
+                check(label + ' healthy proof after rejections',
+                      checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
+
+            if '--diagnostics-only' in sys.argv:
+                for label, retained in (('retained', True), ('fresh', False)):
+                    checker.retained = retained
+                    diagnostic_checks(label)
+                    recursion_checks(label)
+                env = checker.environment
+                configured = Environment(env.directory, replace(env.manifest,
+                    settings=replace(env.manifest.settings, options=(('maxRecDepth', '2048'),))),
+                    env.toolchain, env.launcher)
+                checker = Checker(configured, '/tmp/midas-new-checker-runtime')
+                selected = replace(selected, environment_id=configured.id,
+                    identities=tuple(replace(i, environment_id=configured.id) for i in selected.identities))
+                candidate = replace(candidate, environment_id=configured.id,
+                    owner=OwnerVersion(selected.identities[0].id, 0))
+                diagnostic_checks('interpreted')
+                recursion_checks('interpreted')
+                print('checker diagnostic checks passed', flush=True)
+                return
+
+            diagnostic_checks('retained')
             heartbeat_checks('retained')
             recursion_checks('retained')
             probe_quotation_checks('retained')
             check('direct proof with native replay', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             checker.retained = False
+            diagnostic_checks('fresh')
             heartbeat_checks('fresh')
             recursion_checks('fresh')
             probe_quotation_checks('fresh')
@@ -461,6 +503,7 @@ def main():
                 identities=tuple(replace(i, environment_id=configured.id) for i in selected.identities))
             candidate = replace(candidate, environment_id=configured.id, owner=OwnerVersion(selected.identities[0].id, 0))
             check('configured interpreted checker', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
+            diagnostic_checks('interpreted')
             heartbeat_checks('interpreted')
             recursion_checks('interpreted')
             probe_quotation_checks('interpreted')

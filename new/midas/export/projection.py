@@ -81,6 +81,10 @@ def project(data, regions, layout, aliases, *, calls=(), maximum=64*1024**2):
                 prefixes.append((a, match.end()))
                 edits.append((a, match.end(), opens(pairs)))
             prefixes.sort()
+            for a, op, b in row['sequences']:
+                if data[op:op+3] != b'<;>':
+                    raise ValueError('Checked tactic operator differs from source')
+                edits.extend(((a, a, b'('), (op, op+3, b';'), (b, b, b')')))
             prefix = 0
             for a, b, reference in row['references']:
                 while prefix < len(prefixes) and prefixes[prefix][1] <= a:

@@ -507,9 +507,9 @@ class Workflow:
             return Effect(disposition='STALE')
         if accepted.failure:
             result = reader.result(invocation.original_execution_id)
-            from ..prompt.protocol import clean_diagnostics
-            text = (clean_diagnostics(r.read(reader, result.diagnostics, 8*1024**2))
-                    .decode(errors='replace')[-2000:] if result.diagnostics else '')
+            from ..prompt.diagnostics import compiler_feedback
+            text = (compiler_feedback(r.read(reader, result.diagnostics, 8*1024**2))
+                    if result.diagnostics else '')
             diagnostics = (text,) if text.strip() else ()
             return self.fail_candidate(reader, key, saved, accepted.failure,
                 reader.receipt(invocation.original_execution_id).result_ref, diagnostics=diagnostics)

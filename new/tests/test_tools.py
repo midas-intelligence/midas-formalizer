@@ -551,6 +551,26 @@ class ToolsTests(unittest.TestCase):
                         'Expression contains sorry: false', 'Expression unresolved metavariables: false'):
             self.assertIn(content, text)
 
+    def test_probe_warnings_are_silent_and_correctness_flags_remain(self):
+        case = dict(id='check', operation='tactic', code='sorry', setup='', expected=None)
+        messages = [dict(severity=severity, file='check.code', line=1, column=0, text=text)
+                    for severity, text in (('warning', 'declaration uses sorry'),
+                                           ('information', 'useful trace'), ('error', 'failed'))]
+        outcome = dict(result=dict(status='contains_sorry', goals=[], contains_sorry=True,
+                                   unresolved_metavariables=False, inspection={}), messages=messages)
+        outcome['sources'] = [dict(file='check.code', code='error source'),
+                              dict(file='check.code.input1', code='warning-only source')]
+        messages.append(dict(messages[0], file='check.code.input1'))
+        text = probe_summary(case, outcome)
+        self.assertNotIn('warning', text)
+        self.assertNotIn('declaration uses sorry', text)
+        self.assertIn('Contains sorry: true', text)
+        self.assertIn('useful trace', text)
+        self.assertIn('error at check.code:1:0:\nfailed', text)
+        self.assertIn('error source', text)
+        self.assertNotIn('warning-only source', text)
+        self.assertEqual(outcome['messages'], messages)
+
     def test_probe_excerpts_keep_boundary_lines_and_count_omissions(self):
         from midas.tools.evidence import _probe_excerpt
         for count in (0, 1, 5, 9, 10, 11, 12, 20):

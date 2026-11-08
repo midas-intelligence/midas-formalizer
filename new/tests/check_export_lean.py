@@ -404,7 +404,7 @@ end Authored
             assert 'let count := (1 : Nat); have : count = 1 := rfl' in source, source
             assert 'fun n =>' in source and 'Nat → Nat' in source, source
 
-            def check_projection(body, checks, *, prefix=b'import Lean\n'):
+            def check_projection(body, checks, *, prefix=b'import Lean\n', deduplicate=True):
                 from midas.export.projection import project as project_source
                 from midas.source import parse_identifier
                 selected = selections['Main.lean']
@@ -421,7 +421,8 @@ end Authored
                 result, receipt = execute(inv, checker.execute)
                 admitted = checker.admit_receipt(request, inv, result, receipt, values, authority)
                 evidence = codec.decode(values.data[admitted.evidence.id])
-                reduced = project_source(source, value['packet']['regions'], evidence['layout'], evidence['aliases'],
+                reduced = project_source(source, value['packet']['regions'], evidence['layout'],
+                                         evidence['aliases'] if deduplicate else [],
                                          calls=value['packet']['calls']).data
                 request = checker.prepare('audit', selected, owner, values.save(reduced), values)
                 inv = issue_check(request, values)
@@ -481,6 +482,50 @@ example : _root_.Midas.branches 2 = 2 := rfl
             assert b'| zero =>' in reduced and b'| succ n ih =>' in reduced, reduced
             assert b'| _root_.Nat.' not in reduced, reduced
             print('namespace projection: deduplication, distinct siblings, inline opens and generated root shadowing passed', flush=True)
+
+            reduced = check_projection(b'''def _root_.Midas.conditional : (if True then 1 else 0) = 1 := by
+  exact if_pos True.intro
+def _root_.Midas.sequence : True := by
+  apply id <;> (skip <;> exact True.intro)
+def _root_.Midas.branches : And True True := by
+  constructor <;> trivial
+def _root_.Midas.singleSyntax : True := by
+  cases () with apply id <;> apply id
+  | unit => trivial
+def _root_.Midas.shadow : True := by
+  have if_pos : True := True.intro
+  exact if_pos
+def _root_.Midas.implicit : True := oldImplicit True.intro
+def _root_.Midas.changed : True := oldType
+def _root_.Midas.named : True := oldName (p := True) True.intro
+def _root_.Midas.data : Nat := oldData
+def _root_.Midas.literal : String := "if_pos <;>"
+-- if_pos <;> authored comment
+''', b'''example : _root_.Midas.data = 4 := rfl
+example : _root_.Midas.literal = "if_pos <;>" := rfl
+''', prefix=b'''import Lean
+theorem newImplicit (p : Prop) (h : p) : p := h
+@[deprecated newImplicit (since := "2026-01-01")]
+theorem oldImplicit {p : Prop} (h : p) : p := h
+theorem newType : And True True := And.intro True.intro True.intro
+@[deprecated newType (since := "2026-01-01")]
+theorem oldType : True := True.intro
+theorem newName (q : Prop) (h : q) : q := h
+@[deprecated newName (since := "2026-01-01")]
+theorem oldName (p : Prop) (h : p) : p := h
+def newData : Nat := 9
+@[deprecated newData (since := "2026-01-01")]
+def oldData : Nat := 4
+''', deduplicate=False)
+            assert b'exact _root_.ite_eq_left True.intro' in reduced, reduced
+            assert b'(apply id ; ((skip ; exact True.intro)))' in reduced, reduced
+            assert b'constructor <;> trivial' in reduced, reduced
+            assert b'with (apply id ; apply id)' in reduced, reduced
+            assert b'exact if_pos' in reduced, reduced
+            assert b':= oldImplicit True.intro' in reduced, reduced
+            assert b':= oldType' in reduced and b':= oldName (p := True) True.intro' in reduced, reduced
+            assert b':= oldData' in reduced and b'"if_pos <;>"' in reduced, reduced
+            print('export cleanup: aliases, shadowing, binder changes, nested and multigoal sequences passed', flush=True)
 
             if '--namespace-only' in sys.argv:
                 return

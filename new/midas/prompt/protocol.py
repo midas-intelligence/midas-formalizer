@@ -136,11 +136,25 @@ class Renderer(Protocol):
 
 
 _RUNTIME_NOISE = re.compile(rb'(?m)^MIDAS_(?:THREAD_GUARD count=|RUNTIME_OPEN /|TRACE tasks=)[^\r\n]*(?:\r?\n|$)')
+_COMPILER_ERROR = re.compile(
+    rb'(?m)^(?:[^\r\n]+:\d+:\d+: )?error(?:\([^\r\n()]+\))?:')
+_SORRY_AXIOM = re.compile(
+    rb'(?m)^(?:unexpected internal error: )?unapproved axiom: sorryAx'
+    rb'(?: \(from [^\r\n()]+\))?[ \t]*(?:\r?\n|$)')
 
 
 def clean_diagnostics(data):
-    """Remove executor trace lines, preserving compiler errors and their layout."""
-    return _RUNTIME_NOISE.sub(b'', data) if b'MIDAS_' in data else data
+    """Remove traces and secondary sorry-axiom failures from prompt material."""
+    if b'MIDAS_' in data:
+        data = _RUNTIME_NOISE.sub(b'', data)
+    if b'unapproved axiom: sorryAx' in data:
+        error = _COMPILER_ERROR.search(data)
+        if error is not None:
+            # Failed elaboration inserts synthetic sorry terms. Only suppress
+            # the checker footer after a compiler error in this same section;
+            # standalone axiom rejections and ordinary sorryAx mentions matter.
+            data = _SORRY_AXIOM.sub(lambda match: b'' if match.start() >= error.end() else match[0], data)
+    return data
 
 
 def display(snapshot, order):

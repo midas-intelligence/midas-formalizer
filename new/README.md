@@ -532,6 +532,15 @@ unselected unfinished work. Its compiler stage audits the integrated source but 
 export. `prepare_verification` binds the exact admitted integration and file set.
 `Request.inputs`, `expected_versions`, `kind` and `payload` supply the frozen job.
 
+During export projection, compiler-resolved deprecated theorem names are updated
+when the replacement has exactly the same type, binder names and binder kinds
+(after matching universe parameters). Data definitions and changed APIs are left
+alone. Lean's executed-goal analysis identifies unnecessary `tac1 <;> tac2` uses;
+only these become `(tac1; tac2)`, with parentheses preserving tactic grouping.
+This cleanup is limited to generated declarations. The existing independent
+verification checks the rewritten source, so cleanup adds no compilation round
+or model call and leaves submitted proof artifacts intact.
+
 Independent verification uses a fresh compiler workspace. It rebuilds source-bearing
 library modules in dependency order, checks their compiled hashes against the admitted
 interfaces, and rechecks every source/output after the final writable compiler
@@ -970,7 +979,7 @@ source/proof strings at **1 MiB**. Drafts use length-prefixed raw binary fields;
 there is no large JSON serialization, hex encoding or recursively embedded parent
 context. Memory has a **16 KiB** soft target and **64 KiB** hard limit. Retention
 evicts whole older records and counts omissions. Model lessons remain separate
-from complete selected diagnostics and their admitted evidence references.
+from bounded diagnostic excerpts and their admitted evidence references.
 
 Validation: **33 strategy tests and 133 adjacent domain, policy, tools and prompt
 tests passed**. These are offline Python tests; no Lean or live model was run.
@@ -1006,7 +1015,7 @@ adaptation keeps these responsibilities without importing the old implementation
 | --- | --- |
 | Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v10`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
-| Retained history dictionary | Flat retained observations; superseded candidate-check and edit failures are excluded from prompts. Current feedback keeps complete selected messages. No prior-session access. |
+| Retained history dictionary | Flat retained observations; superseded candidate-check and edit failures are excluded from prompts. Compiler feedback reserves error headers and adds bounded first/last-five-line excerpts. No prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
 | Current turn: memory, feedback and evidence | Strategy, named lessons, pins, evidence pages and latest feedback, followed by changing capabilities and the action request. Omitted diagnostics and evicted memory are counted. |
 | Research context and question | Readable source, exact task, proof guidance, checked interfaces, available candidate/evidence and the question. |
@@ -1093,7 +1102,24 @@ exact review entry and candidate. General search/probe history is omitted.
 Evidence matching is lexical, not a transitive dependency analysis.
 Executor trace lines (`MIDAS_THREAD_GUARD`, `MIDAS_RUNTIME_OPEN`, `MIDAS_TRACE`)
 are removed from displayed diagnostics for both roles and before new compiler
-failures are truncated into prover memory. Compiler errors remain intact.
+failures enter prover memory. Compiler feedback reserves error headers within
+the existing 8,000-byte allowance, then adds the first five and last five lines
+of selected error blocks (the header counts as a line). Selection cycles across
+error kinds and, within each kind, distinct file/line locations before revisiting
+a location. Diagnostic codes identify kinds when available; otherwise the error
+heading is used, ignoring quoted identifiers and numerals while distinguishing
+failed tactics. Short blocks remain complete. Excerpts that cannot fit retain
+only their headers, and other excerpts can still use the remaining space.
+Errors are displayed in their original order regardless of selection order.
+Omitted middle lines, details, and any headers that exceed the allowance are
+counted explicitly. Compiler and probe feedback silently omit warnings, including
+warning counts and probe source excerpts needed only for warnings. Full diagnostics
+remain in the original evidence artifact. Prompt diagnostics (including saved
+history and feedback) omit a trailing `unapproved axiom: sorryAx` checker error
+when a preceding compiler error explains the synthetic sorry. Standalone axiom
+rejections remain visible. Failures without error headers retain a
+bounded first/last-five-line excerpt after warning removal. Probe errors, information
+messages, goals and explicit sorry/metavariable flags remain visible.
 
 The default prover contract returns `{action, memory_update}`; the action covers
 proofs, decomposition, joint candidates, revisions, stop requests and helpers. The
@@ -2682,6 +2708,12 @@ parameter names and an `AdmittedBinding`; it never reports a proof. Proof produc
 retains submitted source and independently audits every new declaration, including
 generated helpers. Replay restores the original environment, checks the exact
 subject and assumptions, and kernel-checks native declarations when available.
+Elaboration errors stop checking before the axiom audit, so recovered synthetic
+sorry terms do not produce a second, misleading `sorryAx` failure. Explicit
+sorry and other unapproved axioms still fail the audit. Expected checker
+rejections retain their own messages instead of the frontend's generic
+`unexpected internal error` prefix; recursion-depth failures keep their typed
+classification.
 Only `propext`, `Classical.choice` and `Quot.sound` are permitted global axioms.
 Conditional assumptions remain explicit and cannot become a direct proof.
 Closed definition dependencies require matching admitted proofs from the same

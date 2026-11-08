@@ -31,11 +31,40 @@ def fake_layout(packet):
                       for m in re.finditer(rb'_root_\.Midas\.[A-Za-z_][A-Za-z_0-9]*', data[name_end:end])]
         rows.append(dict(name=name, namespace=['anonymous'], span=[start, end], declaration_start=declaration_start,
                          name_span=[name_start, name_end],
-                         references=references, opens=[], inline=inlines))
+                         references=references, opens=[], inline=inlines, sequences=[]))
     return rows
 
 
 class ProjectionTests(unittest.TestCase):
+    def test_nested_sequences_use_compiler_spans_and_preserve_other_operators(self):
+        data = ('def _root_.Midas.proof : True := (\n'
+                'by\n  -- α <;> comment\n'
+                '  apply id <;> (skip <;> exact True.intro)\n'
+                '  -- constructor <;> trivial\n)\n\n').encode()
+        packet = dict(source=data.decode(), share=[parse_identifier('Midas.proof')],
+                      regions=[[0, len(data)]], calls=[])
+        layout = fake_layout(packet)
+        first, second = data.index(b'apply id'), data.index(b'skip')
+        op1, op2 = data.index(b'<;>', first), data.index(b'<;>', second)
+        stop = data.index(b')', op2)
+        layout[0]['sequences'] = [[first, op1, stop + 1], [second, op2, stop]]
+        name_start = data.index(b'True.intro')
+        layout[0]['references'] = [[name_start, name_start + len(b'True.intro'), parse_identifier('True.intro')]]
+        source_layout(layout, packet)
+        result = project(data, packet['regions'], layout, []).data
+        self.assertIn(b'(apply id ; ((skip ; exact _root_.True.intro)))', result)
+        self.assertIn('-- α <;> comment'.encode(), result)
+        self.assertIn(b'-- constructor <;> trivial', result)
+        for sequences in ([[first, op1, len(data) + 1]], [[first, True, stop]],
+                          [[first, op1, stop], [first, op1, stop]], [[first, op1, op1+3]]):
+            changed = deepcopy(layout)
+            changed[0]['sequences'] = sequences
+            with self.subTest(sequences=sequences), self.assertRaises(ValueError):
+                source_layout(changed, packet)
+        changed = data[:op1] + b' ; ' + data[op1+3:]
+        with self.assertRaisesRegex(ValueError, 'operator differs'):
+            project(changed, packet['regions'], layout, [])
+
     def test_root_enclosing_and_opened_constants_are_qualified_but_binders_are_not(self):
         prefix = b'namespace Authored\n'
         body = (b'section\nopen _root_.Midas (helper)\n'

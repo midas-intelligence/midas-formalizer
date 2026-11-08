@@ -313,11 +313,17 @@ def probe_summary(case, outcome):
         text = outcome.get('code', case.get(field)) if field == 'code' else case.get(field)
         if text:
             rows.append(f"{case['id']}.{field} (line 1 below):\n"+text)
+    visible_files = {m['file'] for m in outcome['messages'] if m['severity'] != 'warning'}
+    diagnostic = result.get('diagnostic', '')
     for source in outcome.get('sources', ()):
+        if source['file'] not in visible_files and not diagnostic.startswith(source['file'] + ':'):
+            continue
         rows.append(f"{source['file']} (line 1 below):\n"+source['code'])
     if 'diagnostic' in result:
         rows.append('Diagnostic:\n'+_probe_excerpt(result['diagnostic']))
     for message in outcome['messages']:
+        if message['severity'] == 'warning':
+            continue
         rows.append(f"{message['severity']} at {message['file']}:{message['line']}:{message['column']}:\n"
                     +_probe_excerpt(message['text']))
     if 'goals' in result:

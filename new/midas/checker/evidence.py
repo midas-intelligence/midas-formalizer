@@ -76,7 +76,8 @@ def source_layout(layout, packet):
             for name in pair:
                 codec.name(name)
     for row, name in zip(layout, packet['share']):
-        codec.fields(row, ('name', 'namespace', 'span', 'declaration_start', 'name_span', 'references', 'opens', 'inline'))
+        codec.fields(row, ('name', 'namespace', 'span', 'declaration_start', 'name_span',
+                           'references', 'opens', 'inline', 'sequences'))
         codec.name(row['namespace'])
         if codec.encode(row['name']) != codec.encode(name):
             raise ValueError('Checked source declaration differs')
@@ -91,6 +92,16 @@ def source_layout(layout, packet):
         if type(row['declaration_start']) is not int or not left <= row['declaration_start'] < row['name_span'][0]:
             raise ValueError('Invalid checked declaration start')
         pairs(row['opens'])
+        if type(row['sequences']) is not list:
+            raise ValueError('Invalid checked tactic sequences')
+        count += len(row['sequences'])
+        previous = left - 1
+        for item in row['sequences']:
+            if (type(item) is not list or len(item) != 3 or any(type(n) is not int for n in item)
+                    or not left <= item[0] < item[1] < item[1] + 3 < item[2] <= right
+                    or item[1] <= previous):
+                raise ValueError('Invalid checked tactic sequence')
+            previous = item[1]
         for key in ('references', 'inline'):
             if type(row[key]) is not list:
                 raise ValueError('Invalid checked source bindings')

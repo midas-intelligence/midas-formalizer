@@ -53,6 +53,27 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(sections['proof'], noise)
             self.assertEqual(sections['raw-source'], noise)
 
+    def test_saved_diagnostics_omit_secondary_sorry_axioms_only_within_the_same_section(self):
+        error = b'candidate.lean:3:9: error: unsolved goals\n  original goal\n'
+        footer = b'unexpected internal error: unapproved axiom: sorryAx (from MidasCandidateResult)\n'
+        saved = error + footer
+        turn = Snapshot((subject('goal', signature()), Section('candidate', 'proof', saved),
+                         Section('source', 'raw-source', saved),
+                         *(Section(kind, kind, saved) for kind in ('history', 'feedback', 'evidence')),
+                         Section('feedback', 'standalone-rejection', footer)))
+        for role in (prover, reviewer):
+            with self.subTest(role=role.__name__):
+                sections = {s.name: s.text for s in role.render(turn).sections}
+                for kind in ('history', 'feedback', 'evidence'):
+                    self.assertEqual(sections[kind], error)
+                self.assertEqual(sections['standalone-rejection'], footer)
+                self.assertEqual(sections['proof'], saved)
+                self.assertEqual(sections['raw-source'], saved)
+        # Rendering does not rewrite stored diagnostic material.
+        for section in turn.sections:
+            if section.name in ('history', 'feedback', 'evidence'):
+                self.assertEqual(section.text, saved)
+
     def test_stable_blocks_precede_changing_turn_material_for_each_role(self):
         turn = replace(snapshot(), sections=(*snapshot().sections,
             Section('history', 'older-check', b'old diagnostic'),

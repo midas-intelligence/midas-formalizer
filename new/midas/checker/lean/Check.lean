@@ -22,6 +22,18 @@ def withRecursionFailure (action : CommandElabM α) : CommandElabM α := do
       IO.eprintln s!"Lean maximum recursion depth reached (maxRecDepth={(← get).maxRecDepth})."
     throw error
 
+-- Frontend.runCommandElabM calls any escaping elaborator exception an
+-- "unexpected internal error". Checker rejections are expected failures;
+-- return the exception across that boundary before reporting its real message.
+def runCheckerCommand (action : CommandElabM α) : FrontendM α := do
+  let result : Except Exception α ← runCommandElabM do
+    let _ := MonadAlwaysExcept.except (m := CommandElabM)
+    try return .ok (← action)
+    catch error => return .error error
+  match result with
+  | .ok value => return value
+  | .error error => throw (IO.userError (← error.toMessageData.toString))
+
 def allowedAxiom (n : Name) : Bool :=
   n == `propext || n == `Classical.choice || n == `Quot.sound
 
@@ -302,12 +314,12 @@ def importDeclarationContext (context : Json) : CommandElabM Unit := do
           else throwError "unsupported context declaration kind"
         modifyEnv fun env => auxLemmasExt.setState env cache
         elabCommand command
+      if (← get).messages.hasErrors then throwError "context declaration elaboration failed"
       auditNew before n
       for (fresh, ci) in (← getEnv).constants.map₂.toList do
         unless before.contains fresh do
           auditContextReferences ci.type (previous ++ [ns])
           auditContextReferences (ci.value! true) (previous ++ [ns])
-      if (← get).messages.hasErrors then throwError "context declaration elaboration failed"
       contextRows.modify (·.insert n row)
       cache := auxLemmasExt.getState (← getEnv)
       contextAuxLemmas.modify (·.insert n cache)
@@ -686,12 +698,12 @@ def replayNativeDeclarations (spec : Json) (assumptions : List Name := []) : Com
       replayNative file n helperBase
     else
       withDeclarationContext context <| elaborateProofSource n us ty (← checked (str d "source"))
+    if (← get).messages.hasErrors then throwError "native declaration elaboration failed"
     let ci ← getConstInfo n
     unless ci.levelParams == us do throwError "native declaration universes changed"
     liftTermElabM do
       unless ← isDefEq ci.type ty do throwError "native declaration type mismatch"
     auditNew base n assumptions
-    if (← get).messages.hasErrors then throwError "native declaration elaboration failed"
     if file.isNone then saveNative id base n
   let root ← checked (readName (← checked (field spec "root")))
   let ci ← getConstInfo root
@@ -926,6 +938,10 @@ def check (packet : Json) (original : Environment) : CommandElabM Json := do
           withDeclarationContext (← checked (field sig "context")) <|
             elaborateProofSource declName us ty (← checked (str j "source"))
   else throwError "unsupported checker mode"
+  -- Recovered elaboration errors can leave synthetic sorry terms. Report the
+  -- original errors before auditing those placeholders or looking up a root
+  -- that elaboration may not have produced. Explicit sorry still reaches audit.
+  if (← get).messages.hasErrors then throwError "candidate elaboration reported errors"
   let result ← getConstInfo root
   unless result.levelParams == levels do throwError "candidate universes changed"
   liftTermElabM do
@@ -934,7 +950,6 @@ def check (packet : Json) (original : Environment) : CommandElabM Json := do
     liftTermElabM do
       unless ← isDefEq (result.value! true) abstracted do throwError "interface value mismatch"
   auditNew proofBefore root assumptionNames
-  if (← get).messages.hasErrors then throwError "candidate elaboration reported errors"
   if elaborated then
     return attachImports <| Json.mkObj [("format", toJson "midas-elaborated-interface-v1"),
       ("request", ← checked (field packet "request")), ("purpose", toJson "interface"),
@@ -1053,6 +1068,37 @@ private partial def exportDeclaration (stx : Syntax) : Option Syntax :=
   if stx.getKind == ``Parser.Command.declaration then some stx
   else stx.getArgs.findSome? exportDeclaration
 
+-- Only theorem aliases with identical types are automatic renames. Definitions,
+-- changed implicit binders and type-changing deprecations need deliberate edits.
+private def exportTheoremName (env : Environment) (n : Name) : Name := Id.run do
+  let some entry := Linter.deprecatedAttr.getParam? env n | return n
+  let some target := entry.newName? | return n
+  let some (.thmInfo old) := env.find? n | return n
+  let some (.thmInfo new) := env.find? target | return n
+  if old.levelParams.length != new.levelParams.length then return n
+  let type := new.type.instantiateLevelParams new.levelParams (old.levelParams.map Level.param)
+  return if old.type.equal type then target else n
+
+-- Reuse Lean's executed-goal analysis, including its multigoal exclusions. Keep
+-- source ranges so projection can parenthesize the whole sequence, even where
+-- the surrounding grammar requires a single tactic. No speculative execution.
+private def exportSequences (stx : Syntax) (trees : PersistentArray InfoTree) :
+    CommandElabM (Array Json) := do
+  let multigoals ← Linter.Extra.UnnecessarySeqFocus.multigoalKindsRef.get
+  let go {ω} : Linter.Extra.UnnecessarySeqFocus.M ω Unit := do
+    Linter.Extra.UnnecessarySeqFocus.getTactics stx
+    if !(← get).isEmpty then
+      Linter.Extra.UnnecessarySeqFocus.markUsedTacticsList multigoals trees
+  let (_, entries) := runST fun _ => go.run {}
+  let ranges := entries.fold (init := #[]) fun ranges _ entry => Id.run do
+    if !entry.used then return ranges
+    let some range := entry.stx.getRange? (canonicalOnly := true) | return ranges
+    let .atom (.original _ op _ stop) "<;>" := entry.stx[1] | return ranges
+    if stop.byteIdx != op.byteIdx + 3 then return ranges
+    return ranges.push (range.start.byteIdx, op.byteIdx, range.stop.byteIdx)
+  return ranges.qsort (fun a b => a.2.1 < b.2.1) |>.map fun (start, op, stop) =>
+    toJson #[start, op, stop]
+
 private def exportReferences (trees : PersistentArray InfoTree) (generated : NameSet)
     (labels : Std.HashSet (Nat × Nat)) : Array Json := Id.run do
   let refs := trees.foldl (init := ({} : Std.HashMap (Nat × Nat) Name)) fun refs tree =>
@@ -1074,14 +1120,15 @@ private def exportReferences (trees : PersistentArray InfoTree) (generated : Nam
           choices.find? (fun (target, fields) => target == n && fields.isEmpty)
         else if choices.length == 1 && choices[0]!.2.isEmpty then some choices[0]! else none
       let some (n, _) := target | return refs
-      if !generated.contains n then
+      let replacement := exportTheoremName ctx.env n
+      if replacement == n && !generated.contains n then
         let opens := ctx.openDecls.filter fun decl => match decl with
           | .explicit _ target => !generated.contains target
           | _ => true
         let moved := Lean.ResolveName.resolveGlobalName ctx.env ctx.options `Midas opens id
         if moved == choices && choices.contains (n, []) &&
             !generated.contains (`Midas ++ id.getRoot) then return refs
-      return refs.insert (start.byteIdx, stop.byteIdx) (privateToUserName n)
+      return refs.insert (start.byteIdx, stop.byteIdx) (privateToUserName replacement)
   return refs.toArray.qsort (fun a b => a.1.1 < b.1.1) |>.map fun ((start, stop), n) =>
     toJson #[toJson start, toJson stop, Midas.Identity.name n]
 
@@ -1103,6 +1150,7 @@ partial def finishSource (generated : NameSet := {}) (layout : Array Json := #[]
     let name := exportName id.getId
     if generated.contains name then
       let (inlines, labels) := exportSyntax command
+      let sequences ← runCommandElabM <| exportSequences command (← getCommandState).infoState.trees
       let mut opens := #[]
       let mut seen : NameSet := {}
       for decl in before.scopes.head!.openDecls do
@@ -1117,7 +1165,7 @@ partial def finishSource (generated : NameSet := {}) (layout : Array Json := #[]
         ("span", toJson #[(command.getPos?.getD 0).byteIdx, (command.getTailPos?.getD 0).byteIdx]),
         ("name_span", toJson #[(id.getPos?.getD 0).byteIdx, (id.getTailPos?.getD 0).byteIdx]),
         ("references", toJson (exportReferences (← getCommandState).infoState.trees generated labels)),
-        ("opens", toJson opens), ("inline", toJson inlines)]
+        ("opens", toJson opens), ("inline", toJson inlines), ("sequences", toJson sequences)]
   if done then return layout
   finishSource generated layout
 
@@ -1315,12 +1363,12 @@ def main (args : List String) : IO UInt32 := do
       let generated ← names.foldlM (init := ({} : NameSet)) fun set n => do
         return set.insert (← IO.ofExcept (Midas.Check.readName n))
       let layout ← Midas.Check.finishSource generated
-      let result ← runCommandElabM <| Midas.Check.withRecursionFailure (Midas.Check.auditSource packet env)
+      let result ← Midas.Check.runCheckerCommand <| Midas.Check.withRecursionFailure (Midas.Check.auditSource packet env)
       return if (packet.getObjVal? "share").isOk then result.setObjVal! "layout" (toJson layout) else result
     let before ← Midas.Check.seek offset
     let original := (← getCommandState).env
     setCommandState before
-    runCommandElabM <| Midas.Check.withRecursionFailure do
+    Midas.Check.runCheckerCommand <| Midas.Check.withRecursionFailure do
       -- Source options cannot replace the invocation's candidate limit.
       modify fun state => { state with maxRecDepth := maxRecDepth }
       modifyScope fun scope => { scope with opts := Lean.maxRecDepth.set scope.opts maxRecDepth }
