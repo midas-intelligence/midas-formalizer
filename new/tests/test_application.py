@@ -732,6 +732,165 @@ class Contracts(unittest.TestCase):
                     last_caller = [raw for role, raw in calls if role == caller][-1]
                     self.assertIn(b'Apply True.intro to the exact goal.', last_caller)
 
+    def test_codex_role_efforts_are_independent_and_preserved_on_resume(self):
+        from midas.application import records as r
+        from midas.provider import ModelOutput, ModelRequest, Route
+        route = ModelRoute(provider='openai', model='fixture', transport='codex')
+        efforts = dict(prover='low', reviewer='medium', research='high', web_search='xhigh')
+        config = replace(Config(), run=replace(Config().run, turns=4),
+                         **{role: replace(route, reasoning_effort=effort) for role, effort in efforts.items()})
+        prover_replies = iter((response(dict(mode='research', rationale='Find a proof.', question='How to prove True?')),
+            response(dict(mode='stop', rationale='Ask for independent review.', objection=None)), response(proof())))
+        reviewer_replies = iter((model_json(dict(child_declarations=[], verdict='web_search',
+            rationale='Find a reference.', findings=[], question='Which constructor proves True?', urls=[])),
+            model_json(dict(child_declarations=[], verdict='reject', rationale='The constructor suffices.', question='', urls=[],
+                findings=[dict(category='progress', location='goal', issue='True has a constructor.',
+                               suggested_revision='Apply True.intro.')]))))
+        calls = []
+        def transport(request, raw, *args):
+            calls.append(request.role)
+            self.assertIn(('"effort":"'+efforts[request.role]+'"').encode(), raw)
+            if request.role == 'research':
+                reply = model_json(dict(answer='Apply True.intro.', unresolved=[]))
+            elif request.role == 'web_search':
+                reply = model_json(dict(answer='True.intro is the constructor.', sources=[], unresolved=[]))
+            else:
+                reply = next(prover_replies if request.role == 'prover' else reviewer_replies)
+            return ModelOutput(raw=reply, usage=Usage(1, 0, 1, 0))
+        self.app.transports = {Route.from_config(route).scope: transport}
+        with self.start(workflow='live', config=config) as run:
+            self.assertEqual(run.run(poll_interval=.001).exit_code, 1)
+            self.assertEqual(calls, ['prover', 'research', 'prover', 'reviewer'])
+            requests = [ModelRequest.load(r.read(run.writer, run.writer.intent(job.key).request.operation_payload, 16384))
+                        for job in run.writer.records('application.jobs', limit=100)
+                        if job.key.startswith('helper:')]
+            pending, = [request for request in requests if request.role == 'web_search']
+            saved_wire = r.read(run.writer, pending.wire)
+            self.assertIn(b'"effort":"xhigh"', saved_wire)
+        with self.app.resume(self.root/'run', increases={'run': {'turns': 7}}) as run:
+            self.assertEqual(r.read(run.writer, pending.wire), saved_wire)
+            for role, effort in efforts.items():
+                self.assertEqual(getattr(run.workflow.policy.config, role).reasoning_effort, effort)
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(calls, ['prover', 'research', 'prover', 'reviewer', 'web_search', 'reviewer', 'prover'])
+
+    def test_model_helper_timeout_returns_original_question_and_reason_to_prover(self):
+        from midas.application import helpers, records as r
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        question = 'Prove the full preservation theorem, including all boundary cases.'
+        url = 'https://example.test/preservation'
+        for helper, label in (('research', 'Research'), ('web_search', 'Web search')):
+            with self.subTest(helper=helper):
+                helper_route = ModelRoute(provider='openai', model='fixture') if helper == 'web_search' else route
+                action = dict(mode=helper, rationale='Find a proof.', question=question)
+                if helper == 'web_search':
+                    action['urls'] = [url]
+                replies = iter((response(action), response(proof())))
+                prompts = []
+                def transport(request, raw, *args):
+                    if request.role == helper:
+                        return ModelOutput(error='timeout', phase='reading', usage=Usage(1, 0, 0, 0))
+                    prompts.append(raw)
+                    return ModelOutput(raw=next(replies), usage=Usage(1, 0, 1, 0))
+                self.app.transports = {Route.from_config(setting).scope: transport for setting in (route, helper_route)}
+                config = replace(Config(), prover=route, **{helper: helper_route})
+                with self.start(name=helper, workflow='live', config=config) as run:
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    self.assertEqual(len(prompts), 2)
+                    feedback = prompts[1]
+                    for text in (f'{label} failed: timeout', 'Call time limit: 900000 ms.',
+                                 'Original question:', question):
+                        self.assertIn(text.encode(), feedback)
+                    if helper == 'web_search':
+                        self.assertIn(url.encode(), feedback)
+                    self.assertNotIn(b'0/artifacts/', feedback)
+                    self.assertNotIn(b'Partial output', feedback)
+                    owner = run.workflow.graph(run.writer).nodes[0].owner
+                    archive, = helpers.advertised(run.writer, owner)
+                    saved = helpers.page_text(r.read(run.writer, archive.pages[0], 16000))
+                    self.assertIn(question.encode(), saved)
+                    self.assertIn(b'failed: timeout', saved)
+
+    def test_model_helper_timeout_partial_output_reaches_prover_after_resume(self):
+        from midas.application import helpers, records as r
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        partial = '{"answer":"Partial coefficient: α + β.\nUnfinished formula: c_2 ='.encode()
+        for helper in ('research', 'web_search'):
+            with self.subTest(helper=helper):
+                helper_route = ModelRoute(provider='openai', model='fixture') if helper == 'web_search' else route
+                action = dict(mode=helper, rationale='Find a proof.', question='Derive the numerator coefficients.')
+                if helper == 'web_search':
+                    action['urls'] = []
+                prompts, calls = [], []
+                replies = iter((response(action), response(proof())))
+                def transport(request, raw, *args):
+                    calls.append(request.role)
+                    if request.role == helper:
+                        return ModelOutput(raw=partial, error='timeout', phase='reading', usage=Usage(1, 0, 1, 0))
+                    prompts.append(raw)
+                    return ModelOutput(raw=next(replies), usage=Usage(1, 0, 1, 0))
+                self.app.transports = {Route.from_config(setting).scope: transport for setting in (route, helper_route)}
+                config = replace(Config(), prover=route, run=replace(Config().run, turns=2), **{helper: helper_route})
+                with self.start(name=helper, workflow='live', config=config) as run:
+                    self.assertEqual(run.run(poll_interval=.001).exit_code, 1)
+                    owner = run.workflow.graph(run.writer).nodes[0].owner
+                    archive, = helpers.advertised(run.writer, owner)
+                    raw_ref, = [ref for ref in archive.provenance if ref.sha256 == sha256(partial).hexdigest()]
+                    self.assertEqual(r.read(run.writer, raw_ref), partial)
+                    saved = helpers.page_text(r.read(run.writer, archive.pages[0], 16000))
+                    self.assertIn(b'Partial output (incomplete; unverified):', saved)
+                    self.assertIn(partial, saved)
+                    self.assertIn(b'failed: timeout', saved)
+                with self.app.resume(self.root/helper, increases={'run': {'turns': 3}}) as run:
+                    self.assertEqual(self.finish(run).exit_code, 0)
+                    self.assertEqual(calls, ['prover', helper, 'prover'])
+                    self.assertEqual(helpers.advertised(run.writer, owner), (archive,))
+                    self.assertEqual(r.read(run.writer, raw_ref), partial)
+                    for text in (b'Partial output (incomplete; unverified):', b'Partial coefficient:',
+                                 b'Unfinished formula: c_2 =', b'failed: timeout'):
+                        self.assertIn(text, prompts[-1])
+
+    def test_large_partial_output_is_paged_and_raw_output_retained(self):
+        from midas.application import helpers, records as r
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        partial = ('Draft beginning\n'+'αβγ\n'*6000+'Draft last received fragment').encode()
+        replies = iter((response(dict(mode='research', rationale='Find a proof.', question='What is known?')),
+                        response(proof())))
+        def transport(request, *args):
+            return (ModelOutput(raw=partial, error='timeout', phase='reading', usage=Usage(1, 0, 1, 0))
+                    if request.role == 'research' else ModelOutput(raw=next(replies), usage=Usage(1, 0, 1, 0)))
+        self.app.transports = {Route.from_config(route).scope: transport}
+        with self.start(workflow='live', config=replace(Config(), prover=route, research=route)) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            archive, = helpers.advertised(run.writer, owner)
+            self.assertGreater(len(archive.pages), 1)
+            fragments = [row for ref in archive.pages
+                         for row in codec.load_record(r.read(run.writer, ref, 16000), limit=16000)[4]
+                         if row[0] == 'text' and row[1] == ['1']]
+            self.assertEqual(''.join(row[4] for row in fragments).encode(),
+                             b'Partial output (incomplete; unverified):\n'+partial)
+            raw_ref, = [ref for ref in archive.provenance if ref.sha256 == sha256(partial).hexdigest()]
+            self.assertEqual(r.read(run.writer, raw_ref), partial)
+
+    def test_partial_output_display_bound_keeps_utf8_and_full_artifact(self):
+        from midas.application import helpers, records as r
+        from midas.application.service import commit
+        partial = ('∑'*(4*1024**2//3+1)+'END').encode()
+        with self.start() as run:
+            commit(run.writer, 'partial', r.save(run.writer, 'fixture', 'partial', partial))
+            reference = run.writer.record('fixture', 'partial').artifact
+            summary = helpers._partial_output(run.writer, reference)
+            self.assertIn('Partial output (incomplete; unverified):', summary)
+            self.assertIn(f'Display limited to {4*1024**2-1} of {len(partial)} received bytes.', summary)
+            self.assertNotIn('\ufffd', summary)
+            self.assertNotIn('END', summary)
+            self.assertIn(reference.id, summary)
+            self.assertEqual(r.read(run.writer, reference, r.DATA), partial)
+
     def test_web_search_handoff_preserves_answer_without_access_checks_and_hides_actions(self):
         from midas.application import helpers, records as r
         from midas.provider import ModelOutput, Route
@@ -862,6 +1021,43 @@ class Contracts(unittest.TestCase):
             self.assertEqual(self.finish(run).exit_code, 0)
             self.assertEqual(run.writer.status_snapshot().accounting.actual.cost_microusd, 262)
         self.assertEqual(len(calls), 2)
+
+    def test_codex_timeout_late_usage_is_priced_saved_and_not_recharged_on_resume(self):
+        import sys
+        from midas.application import records as r
+        from midas.provider import CodexTransport, ModelOutput, ModelRequest, Route
+        prover = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        research = ModelRoute(provider='openai', model='fixture', prices=Prices(2_000_000, 500_000, 6_000_000))
+        replies = iter((response(dict(mode='research', rationale='Find a proof.', question='What is known?')),
+                        response(proof())))
+        executable = Path(sys.executable).resolve()
+        log = self.root/'codex-calls'
+        transport = CodexTransport((str(executable), str(Path(__file__).parent/'fixtures/provider_server.py')),
+            executable_sha256=sha256(executable.read_bytes()).hexdigest(), cwd=self.root,
+            environment={'FIXTURE_MODE': 'interrupt', 'FIXTURE_LOG': str(log)})
+        self.app.transports = {
+            Route.from_config(prover).scope: lambda *args: ModelOutput(raw=next(replies), usage=Usage(0, 0, 0, 0)),
+            Route.from_config(research).scope: transport,
+        }
+        config = replace(Config(), prover=prover, research=research,
+                         research_model=replace(Config().research_model, invocation_ms=300, shutdown_ms=200))
+        with self.start(workflow='live', config=config) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            original = next(invocation for key in run.writer.receipt_ids(limit=20)
+                if (invocation := run.writer.invocation(key)).request.job.kind.value == 'MODEL'
+                and ModelRequest.load(r.read(run.writer, invocation.request.operation_payload, 16384)).role == 'research')
+            result = run.writer.result(original.original_execution_id)
+            self.assertEqual(result.status, ResultStatus.FAILED)
+            self.assertEqual(result.usage, Usage(12, 3, 9, 74))
+            report = codec.load_record(r.read(run.writer, result.output), limit=16384)
+            self.assertEqual(report['outcome']['error'], 'timeout')
+            self.assertEqual(report['outcome']['reasoning_tokens'], 7)
+            self.assertEqual(run.writer.status_snapshot().accounting.actual, result.usage)
+        with self.app.resume(self.root/'run') as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(run.writer.result(original.original_execution_id), result)
+            self.assertEqual(run.writer.status_snapshot().accounting.actual, Usage(12, 3, 9, 74))
+        self.assertEqual(log.read_text().splitlines().count('turn/interrupt'), 1)
 
     def test_fork_has_lineage_and_reuses_evidence_without_compiler_or_model_calls(self):
         with self.start() as run:

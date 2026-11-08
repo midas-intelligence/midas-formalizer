@@ -1255,7 +1255,8 @@ Reviewer schemas omit unavailable research/web search and cache their four varia
 Strategy admission still checks every response and returns bounded rejection
 details in the next prompt so invalid replies can be corrected.
 Disabled caching emits no breakpoint annotations.
-Codex controls remain in its pinned provider configuration.
+Codex effort overrides are frozen per turn; output/cache controls remain in its
+pinned provider configuration.
 
 Run offline checks and the local performance comparison with:
 
@@ -1446,6 +1447,13 @@ admitted without browsing. Source entries contain URL, title, location, excerpt,
 summary and hypotheses, with no access flag or access checks. The cumulative 25-word
 quote bound per URL still applies. Quotations remain provider-reported.
 None of these tools creates proof authority.
+
+Failed research and web-search calls retain any received raw output in their
+archive provenance. Feedback includes the original question, failure reason,
+saved timeout, requested URLs, and available output marked incomplete and
+unverified. Truncated JSON is presented as text without parsing. The output is
+paged; displays above 4 MiB are explicitly clipped while the full raw artifact
+remains available. Empty outputs add no partial-output section.
 
 Requests, results and archives use shallow binary records. The bounded external
 wire decoder is shared in `domain/wire.py`; provider imports that same decoder.
@@ -1925,12 +1933,14 @@ example); there are no separate top-level price sections. `prompt_cache` may be
 and cannot be applied through
 `increase`, which only permits the existing prospective limit changes.
 
-For Responses routes, set `prover.reasoning_effort` and
-`reviewer.reasoning_effort` to select the effort sent in each request (for example,
-`"high"`). An omitted or null value uses the deployment's default. The model must
-support the selected level. Codex routes use their pinned Codex configuration
-instead and reject this field. Effort is saved in the run configuration and wire
-request and participates in the prompt cache key.
+Set `reasoning_effort` on any configured role (`prover`, `reviewer`, `research`,
+or `web_search`) to select its effort independently (for example, `"high"`).
+Responses routes send `reasoning.effort`; Codex routes send the explicit `effort`
+override in [the app-server turn request](https://learn.chatgpt.com/docs/app-server#start-a-turn).
+An omitted or null value uses the provider's default, including the Codex
+configuration default for Codex routes. The model must support the selected level.
+Explicit effort is saved in the run configuration and wire request, preserved on
+retry/resume, and participates in the prompt identity and Responses prompt cache key.
 
 Omitted settings use defaults. Omitted backlog stop thresholds scale with model
 concurrency; explicit thresholds remain exact. Prices are integer **micro-USD per
@@ -2909,8 +2919,8 @@ retry a rejected configuration. Schema adherence is checked by strategy after
 generation. Refusals have a distinct outcome, and incomplete streams retain their
 partial text and available usage.
 
-For Codex, `wire` contains the frozen `turn/start` `input` text blocks without
-`outputSchema`; `setup` contains the complete frozen `baseInstructions`, including
+For Codex, `wire` contains the frozen `turn/start` `input` text blocks and optional
+`effort` override without `outputSchema`; `setup` contains the complete frozen `baseInstructions`, including
 the response schema. Provider adds only thread/model/protocol controls, preserving
 the saved prompt bytes.
 See the [official app-server turn contract](https://learn.chatgpt.com/docs/app-server#start-a-turn).
@@ -2924,6 +2934,16 @@ effective request/stream retry settings match the saved limits before inference,
 disables local tools, and admits bounded web operations only for the OpenAI web-searcher.
 Usage notifications before the
 turn acknowledgement and before the final thread-read acknowledgement are kept.
+On timeout or cancellation after a turn acknowledgement, the adapter sends
+`turn/interrupt` and drains bounded text/usage events for up to `shutdown_ms`
+(3 seconds by default), before normal process termination. It accepts the interrupt
+acknowledgement and matching `turn/completed` in either order, then drains through
+a metadata-only `thread/read` acknowledgement. Cleanup uses the same output/event
+limits and never changes the original timeout/cancellation to success. Rejected,
+malformed or silent interruption falls back to process termination, retaining
+already received output and usage. No interrupt is sent without an acknowledged
+turn ID. Recovered usage is included in the sealed receipt and normal role-price
+calculation; unavailable usage/cost remains unknown.
 The subprocess is terminated and reaped before reporting termination.
 
 Protocol-required JSON stays at the transport boundary. The parser scans incoming

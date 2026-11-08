@@ -171,6 +171,20 @@ Each helper is disabled when its route is omitted or unconfigured. The researche
 supports the same transports as the prover; the web-searcher requires OpenAI Codex.
 `helpers.research` and `helpers.web_search` set independent request allowances;
 `helpers.web_calls` bounds web operations per web-search request.
+Set `reasoning_effort` independently in any configured model role, including
+Codex roles (for example, `"reasoning_effort": "high"` inside `research`). The value
+is saved with each request; omitting it or setting it to null uses the provider's
+default, including the Codex configuration default for Codex routes.
+Failed helper calls return the original question and failure reason so the caller
+can revise its request. Timeout feedback also includes the failed call's saved
+time limit; web-search feedback preserves the requested URLs. Any received output
+is retained and included in paged feedback as incomplete, unverified text, even
+when it ends inside JSON. Displays above 4 MiB are explicitly clipped; the complete
+received output remains saved in the archive's referenced raw artifact.
+On timeout or cancellation, an acknowledged Codex turn receives `turn/interrupt`.
+The adapter collects remaining text and usage for up to the role's `shutdown_ms`
+(3 seconds by default) before terminating the process. The call retains its failure
+status; recovered token usage is priced normally, and missing usage stays unknown.
 
 A prover can return `stop` with a rationale and a nullable statement objection.
 The node stays active while the reviewer decides. Acceptance stops the node;

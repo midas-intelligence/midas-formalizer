@@ -28,8 +28,9 @@ class CodexTransport:
                                 shutdown_ms=c.limits.shutdown_ms)
         stderr_task = None
         startup_error = False
+        interrupt = None
         async def invoke():
-            nonlocal stderr_task, startup_error
+            nonlocal stderr_task, startup_error, interrupt
             provider = 'midas-openai' if request.route.provider == 'openai' else request.route.provider
             args = ['app-server', '-c', 'approval_policy="never"', '-c', 'model_provider=' + small_json(provider).decode()]
             if request.route.provider == 'openai':
@@ -152,13 +153,12 @@ class CodexTransport:
             c.identifier('turn_id', turn['turn']['id'])
             c.value.update(phase='reading', delivery=DeliveryCertainty.DELIVERED)
             web_ids = set()
-            while True:
-                msg = pending.popleft() if pending else await receive()
+            def consume(msg):
                 method, params = msg.get('method'), msg.get('params') or {}
                 if params.get('threadId', c.value['thread_id']) != c.value['thread_id']:
-                    continue
+                    return None
                 if params.get('turnId', c.value['turn_id']) != c.value['turn_id']:
-                    continue
+                    return None
                 item = params.get('item') or {}
                 if method == 'item/agentMessage/delta':
                     c.text(params.get('delta', ''), append=True)
@@ -178,7 +178,33 @@ class CodexTransport:
                     if method == 'item/completed' and kind == 'agentMessage':
                         c.text(item.get('text', ''))
                 if method == 'turn/completed' and params.get('turn', {}).get('id') == c.value['turn_id']:
-                    final = params['turn']
+                    return params['turn']
+                return None
+
+            async def interrupt_turn():
+                nonlocal seq
+                seq += 1
+                ident = seq
+                await send('turn/interrupt', small_json({'threadId': c.value['thread_id'],
+                                                        'turnId': c.value['turn_id']}), ident)
+                acknowledged = completed = False
+                while not (acknowledged and completed):
+                    msg = pending.popleft() if pending else await receive()
+                    if msg.get('id') == ident and 'method' not in msg:
+                        if 'error' in msg or type(msg.get('result')) is not dict:
+                            raise TransportError('configuration')
+                        acknowledged = True
+                    if consume(msg) is not None:
+                        completed = True
+                # As on normal completion, drain usage queued after turn/completed
+                # through a metadata-only read acknowledgement.
+                await rpc('thread/read', small_json({'threadId': c.value['thread_id'], 'includeTurns': False}))
+
+            interrupt = interrupt_turn
+            while True:
+                msg = pending.popleft() if pending else await receive()
+                final = consume(msg)
+                if final is not None:
                     if final.get('status') != 'completed':
                         kind, delay = provider_error(final.get('error'))
                         c.value['retry_after_ms'] = delay
@@ -188,6 +214,16 @@ class CodexTransport:
                     return
         try:
             result = await c.run(invoke, cancel, deadline)
+            if result.error in ('timeout', 'cancelled') and interrupt is not None:
+                # Collector has cancelled and joined the original reader. Only
+                # this cleanup now owns stdout; keep the original failure even
+                # if the turn completes during the bounded telemetry drain.
+                try:
+                    async with asyncio.timeout(c.limits.shutdown_ms / 1000):
+                        await interrupt()
+                except (Exception, asyncio.CancelledError):
+                    pass  # Best effort: retain any text/usage already received.
+                result = c.finish()
         finally:
             await owner.close()
             if stderr_task is not None:

@@ -271,6 +271,25 @@ class PromptTests(unittest.TestCase):
             with self.subTest(suffix=suffix), self.assertRaises(ValueError):
                 validate_wire(request, base + suffix, output.setup)
 
+    def test_codex_reasoning_effort_is_frozen_and_validated(self):
+        artifacts, outputs = Artifacts(), []
+        for effort in (None, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            with self.subTest(effort=effort):
+                output = build(snapshot(), Options('codex', 'model', reasoning=effort), renderer=prover.render)
+                request = ModelRequest(Route('openai', 'model', 'codex'), 'prover', LIMITS,
+                                       artifacts.save(output.wire), artifacts.save(output.setup))
+                validate_wire(request, output.wire, output.setup)
+                wire = decode(output.wire, limit=MAX_BYTES)
+                self.assertEqual(wire.get('effort'), effort)
+                self.assertEqual('effort' in wire, effort is not None)
+                outputs.append(output)
+        self.assertEqual(len({output.id for output in outputs}), len(outputs))
+        self.assertEqual(len({output.setup for output in outputs}), 1)
+        base = outputs[0].wire[:-1]
+        for value in (b'null', b'true', b'1', b'{}', b'[]', b'""', b'"invalid"'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_wire(request, base + b',"effort":' + value + b'}', output.setup)
+
     def test_replacing_schema_changes_instructions_and_cache_identity(self):
         turn = snapshot()
         def alternative(turn):
@@ -474,7 +493,7 @@ class PromptTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 role.render(Snapshot(()))
         for options in (dict(transport='unknown', model='x'),
-                        dict(transport='codex', model='x', reasoning='high'),
+                        dict(transport='codex', model='x', max_output_tokens=10),
                         dict(transport='azure_responses', model='x', prompt_cache='explicit'),
                         dict(transport='azure_responses', model=None)):
             with self.assertRaises(ValueError):

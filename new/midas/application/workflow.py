@@ -268,8 +268,8 @@ class Workflow:
         role = 'reviewer' if work.operation in ('review', 'review_stop') else 'prover'
         setting = getattr(self.policy.config, role)
         route = Route.from_config(setting)
-        options = Options(route.transport, route.model, **({} if route.transport == 'codex' else
-            dict(reasoning=setting.reasoning_effort, prompt_cache=route.prompt_cache,
+        options = Options(route.transport, route.model, reasoning=setting.reasoning_effort,
+            **({} if route.transport == 'codex' else dict(prompt_cache=route.prompt_cache,
                  cache_scope=route.scope if route.prompt_cache == 'explicit' else None)))
         instruction_role = 'stop-reviewer' if work.operation == 'review_stop' else role
         prepared = self.strategy.prepare_model(snapshot, self.policy, work,

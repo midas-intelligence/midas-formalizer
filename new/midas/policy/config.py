@@ -246,9 +246,6 @@ class ModelRoute:
             raise DomainError('prompt_cache must be explicit or disabled')
         if self.reasoning_effort not in (None, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
             raise DomainError('Invalid reasoning_effort')
-        if self.reasoning_effort is not None and (self.transport == 'codex' or
-                self.transport is None and self.provider == 'openai'):
-            raise DomainError('Codex reasoning effort belongs to its pinned configuration')
         if not self.configured and any(getattr(self, name) is not None for name in (
                 'transport', 'account', 'endpoint', 'credential_env', 'prompt_cache', 'prices', 'input_token_budget',
                 'reasoning_effort')):

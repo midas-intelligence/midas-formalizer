@@ -44,7 +44,7 @@ class Options:
     """Explicit saved wire controls. Model selection stays with the caller.
 
     cache_scope is a provider/account/route hash, never an Environment object.
-    Codex model/reasoning settings belong to its pinned provider configuration.
+    Explicit reasoning settings are frozen in the wire for every transport.
     """
     transport: str
     model: str
@@ -74,8 +74,8 @@ class Options:
         if self.prompt_cache == 'explicit' and self.cache_scope is None:
             raise DomainError('Explicit prompt caching requires a route scope')
         if self.transport == 'codex' and any(v is not None for v in (
-                self.reasoning, self.max_output_tokens, self.prompt_cache, self.cache_scope)):
-            raise DomainError('Codex controls belong to its pinned provider configuration')
+                self.max_output_tokens, self.prompt_cache, self.cache_scope)):
+            raise DomainError('Codex output/cache controls belong to its pinned provider configuration')
         if type(self.max_bytes) is not int or not 1 <= self.max_bytes <= MAX_BYTES:
             raise DomainError('Invalid prompt wire byte limit')
 
@@ -203,7 +203,10 @@ def build(snapshot: Snapshot, options: Options, *, renderer: Renderer,
             writer.add(b'{"type":"text","text":')
             writer.string(_section(section))
             writer.add(b'}')
-        writer.add(b']}')
+        writer.add(b']')
+        if options.reasoning is not None:
+            writer.add(b',"effort":'+canonical(options.reasoning))
+        writer.add(b'}')
     else:
         writer.add(prefix)
         points = _breakpoints(prompt) if options.prompt_cache == 'explicit' else set()

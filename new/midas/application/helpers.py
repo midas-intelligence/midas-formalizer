@@ -67,8 +67,8 @@ def lower(flow, reader, stage, inputs=None, *, parent=None):
         setting = getattr(flow.policy.config, role)
         route = Route.from_config(setting)
         limits = Limits.from_config(getattr(flow.policy.config, role+'_model'), web_calls=action.web_calls if web else 0)
-        options = Options(route.transport, route.model, **({} if route.transport == 'codex' else
-            dict(reasoning=setting.reasoning_effort, prompt_cache=route.prompt_cache,
+        options = Options(route.transport, route.model, reasoning=setting.reasoning_effort,
+            **({} if route.transport == 'codex' else dict(prompt_cache=route.prompt_cache,
                  cache_scope=route.scope if route.prompt_cache == 'explicit' else None)))
         attempt = None
         if parent and not web:
@@ -132,6 +132,23 @@ def _load_evidence(value, stage):
         tuple(r.unref(a) for a in value[4]), tuple(value[5]), tuple(value[6]), value[7])
 
 
+def _partial_output(reader, reference):
+    """Bound the display while retaining the complete authenticated raw artifact."""
+    limit = 4*1024**2  # Leave room for the question and binary archive envelopes.
+    prefix = bytearray()
+    for chunk in reader.stream_artifact(reference, max_bytes=r.DATA):
+        prefix.extend(chunk[:max(0, limit-len(prefix))])
+    # Provider admission already checked UTF-8; only a clipped final codepoint
+    # can be incomplete. Do not parse a possibly unfinished JSON response.
+    text = prefix.decode('utf-8', errors='ignore')
+    shown = len(text.encode())
+    summary = 'Partial output (incomplete; unverified):\n'+text
+    if shown < reference.byte_count:
+        summary += (f'\n\n[Display limited to {shown} of {reference.byte_count} received bytes. '
+                    f'Full output is saved in artifact {reference.id}.]')
+    return summary
+
+
 def reduce(flow, reader, invocation, accepted, binding):
     from .workflow import Buffer
     from ..strategy import Turn
@@ -149,8 +166,11 @@ def reduce(flow, reader, invocation, accepted, binding):
         evidence = StageEvidence(stage, invocation.request.request_hash, receipt,
             ResultStatus.FAILED if report.error else ResultStatus.SUCCEEDED, (item.reference,), error=report.error)
     elif accepted.failure:
+        refs = (receipt.result_ref,)
+        if isinstance(stage.action, (Research, WebSearch)) and accepted.value is not None:
+            refs += (accepted.value.raw,)
         evidence = StageEvidence(stage, invocation.request.request_hash, receipt, ResultStatus.FAILED,
-                                 (receipt.result_ref,), error=accepted.failure.value)
+                                 refs, error=accepted.failure.value)
     elif isinstance(stage.action, (Research, WebSearch)):
         try:
             admit = admit_web_search if isinstance(stage.action, WebSearch) else admit_research
@@ -197,6 +217,22 @@ def reduce(flow, reader, invocation, accepted, binding):
     lookup_records = []
     for item in evidence:
         provenance.extend(item.artifacts)
+        action = item.stage.action
+        if isinstance(action, (Research, WebSearch)) and item.status != ResultStatus.SUCCEEDED:
+            label = 'Web search' if isinstance(action, WebSearch) else 'Research'
+            reason = item.error or item.status.value
+            summary = f'{label} failed: {reason}\n'
+            if reason == 'timeout':
+                executed = reader.invocation(item.receipt.original_execution_id)
+                summary += f'Call time limit: {executed.request.job.limits.wall_ms} ms.\n'
+            summary += '\nOriginal question:\n'+action.question
+            if isinstance(action, WebSearch) and action.urls:
+                summary += '\n\nRequested URLs:\n'+'\n'.join(action.urls)
+            rows.append(summary)
+            for reference in item.artifacts:
+                if reference != item.receipt.result_ref and reference.byte_count:
+                    rows.append(_partial_output(reader, reference))
+            continue
         for reference in item.artifacts:
             data = r.read(overlay, reference, 4*1024**2)
             if isinstance(item.stage.action, (Research, WebSearch)) and item.status == ResultStatus.SUCCEEDED:

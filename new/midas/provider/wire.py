@@ -32,8 +32,10 @@ def validate_wire(request, raw, setup=None):
         raise DomainError('Expected wire object')
     route = request.route
     if route.transport == 'codex':
-        if set(w) != {'input'} or type(w['input']) is not list or not w['input']:
+        if set(w) - {'input', 'effort'} or type(w.get('input')) is not list or not w['input']:
             raise DomainError('Expected frozen text turn input')
+        if 'effort' in w and w['effort'] not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            raise DomainError('Invalid Codex reasoning effort')
         for block in w['input']:
             if type(block) is not dict or set(block) != {'type', 'text'} or block['type'] != 'text' or type(block['text']) is not str:
                 raise DomainError('Only text turn inputs are supported')

@@ -400,6 +400,8 @@ class ProviderTests(unittest.TestCase):
         admitted = p.admit_receipt(self.request,inv,result,receipt,self.a,auth)
         self.assertEqual((admitted.outcome.cache_write_tokens,admitted.outcome.delivery),(3,Delivery.UNKNOWN))
         self.assertIsNone(admitted.outcome.reasoning_tokens)
+        self.assertEqual(self.a.data[admitted.raw.id], b'partial')
+        self.assertEqual(admitted.status, ResultStatus.FAILED)
 
     def test_empty_failure_survives_content_addressed_staging(self):
         from midas.storage import Staging
@@ -458,7 +460,7 @@ class ProviderTests(unittest.TestCase):
 
 class CodexTests(unittest.TestCase):
     def invoke(self, mode='success', *, web_calls=0, deadline=2, digest=None,
-               provider='openai', limits=LIMITS, prepared=None):
+               provider='openai', limits=LIMITS, prepared=None, cancel=None):
         a = Artifacts()
         route = Route(provider,'model','codex')
         raw = prepared.wire if prepared else b'{"input":[{"type":"text","text":"JSON proof"}]}'
@@ -473,7 +475,7 @@ class CodexTests(unittest.TestCase):
             transport = CodexTransport((executable,str(Path(__file__).parent/'fixtures/provider_server.py')),
                 executable_sha256=digest,cwd=directory,environment={
                     'FIXTURE_LOG':str(log),'FIXTURE_MODE':mode})
-            out = transport(req,a.data[req.wire.id],a.data[req.setup.id],threading.Event(),time.monotonic()+deadline)
+            out = transport(req,a.data[req.wire.id],a.data[req.setup.id],cancel or threading.Event(),time.monotonic()+deadline)
             turn_log = log.with_suffix('.turn')
             if turn_log.exists():
                 # Preserve the exact turn bytes, with only threadId appended.
@@ -493,6 +495,7 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(out.reasoning_tokens,3)
         self.assertEqual(calls.count('turn/start'),1)
         self.assertEqual(out.termination,Termination.TERMINATED)
+        self.assertNotIn('turn/interrupt', calls)
 
     def test_role_schemas_in_instructions_allow_native_text_turn(self):
         from midas.prompt import Options, Section, Snapshot, build, prover, reviewer, researcher, web_searcher
@@ -501,11 +504,12 @@ class CodexTests(unittest.TestCase):
                              Section('question', 'question', b'Find a reference.'),
                              Section('capabilities', 'allowance', b'web_calls=1')))
         for renderer in (prover.render, reviewer.render, researcher.render, web_searcher.render):
-            prepared = build(snapshot, Options('codex', 'model'), renderer=renderer)
-            with self.subTest(role=prepared.role):
-                out, calls = self.invoke(prepared=prepared, web_calls=int(prepared.role == 'web-searcher'))
-                self.assertIsNone(out.error)
-                self.assertEqual(calls.count('turn/start'), 1)
+            for effort in (None, 'high'):
+                prepared = build(snapshot, Options('codex', 'model', reasoning=effort), renderer=renderer)
+                with self.subTest(role=prepared.role, effort=effort):
+                    out, calls = self.invoke(prepared=prepared, web_calls=int(prepared.role == 'web-searcher'))
+                    self.assertIsNone(out.error)
+                    self.assertEqual(calls.count('turn/start'), 1)
 
     def test_native_request_rejection_is_reported_without_retry(self):
         out, calls = self.invoke('request-rejected')
@@ -554,6 +558,68 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(out.delivery,Delivery.UNKNOWN)
         self.assertEqual(out.termination,Termination.TERMINATED)
         self.assertEqual(calls.count('turn/start'),1)
+        self.assertNotIn('turn/interrupt', calls)
+
+    def test_timeout_keeps_partial_output_and_usage(self):
+        started = time.monotonic()
+        out, calls = self.invoke('partial', deadline=.3)
+        self.assertLess(time.monotonic()-started, 1.5)
+        self.assertEqual((out.error, out.phase, out.delivery), ('timeout', 'reading', Delivery.DELIVERED))
+        self.assertEqual(out.raw, '{"answer":"Partial coefficient: α'.encode())
+        self.assertEqual(out.usage, Usage(12, 3, 4, None))
+        self.assertEqual(out.termination, Termination.TERMINATED)
+        self.assertEqual(calls.count('turn/start'), 1)
+
+    def test_timeout_interrupt_collects_late_usage_without_becoming_success(self):
+        for mode in ('interrupt', 'interrupt-before-ack', 'interrupt-completed'):
+            with self.subTest(mode=mode):
+                out, calls = self.invoke(mode, deadline=.15)
+                self.assertEqual((out.error, out.phase, out.delivery), ('timeout', 'reading', Delivery.DELIVERED))
+                self.assertEqual(out.diagnostics, ('TimeoutError',))
+                self.assertEqual(out.raw, '{"answer":"Partial coefficient: α + β'.encode())
+                self.assertEqual(out.usage, Usage(12, 3, 9, None))
+                self.assertEqual(out.reasoning_tokens, 7)
+                self.assertEqual(out.termination, Termination.TERMINATED)
+                self.assertEqual(calls.count('turn/start'), 1)
+                self.assertEqual(calls[-2:], ['turn/interrupt', 'thread/read'])
+
+    def test_interrupt_failures_keep_timeout_partial_text_and_unknown_usage(self):
+        for mode in ('interrupt-silent', 'interrupt-rejected', 'interrupt-malformed', 'interrupt-overflow',
+                     'interrupt-no-usage'):
+            with self.subTest(mode=mode):
+                started = time.monotonic()
+                out, calls = self.invoke(mode, deadline=.15)
+                self.assertLess(time.monotonic()-started, 1.5)
+                self.assertEqual(out.error, 'timeout')
+                self.assertEqual(out.diagnostics, ('TimeoutError',))
+                self.assertTrue(out.raw.startswith('{"answer":"Partial coefficient: α'.encode()))
+                self.assertEqual(out.usage, Usage())
+                self.assertEqual(out.termination, Termination.TERMINATED)
+                self.assertEqual(calls.count('turn/interrupt'), 1)
+
+    def test_interrupt_drain_read_timeout_preserves_usage_already_received(self):
+        started = time.monotonic()
+        out, calls = self.invoke('interrupt-read-hang', deadline=.15)
+        self.assertLess(time.monotonic()-started, 1.5)
+        self.assertEqual(out.error, 'timeout')
+        self.assertEqual(out.usage, Usage(12, 3, 8, None))
+        self.assertEqual(out.reasoning_tokens, 6)
+        self.assertEqual(out.termination, Termination.TERMINATED)
+        self.assertEqual(calls[-2:], ['turn/interrupt', 'thread/read'])
+
+    def test_cancellation_interrupt_collects_late_usage(self):
+        cancel = threading.Event()
+        original = Collector.text
+        def text(collector, value, *, append=False):
+            original(collector, value, append=append)
+            if append:
+                cancel.set()
+        with patch.object(Collector, 'text', text):
+            out, calls = self.invoke('interrupt', cancel=cancel)
+        self.assertEqual(out.error, 'cancelled')
+        self.assertEqual(out.usage, Usage(12, 3, 9, None))
+        self.assertEqual(out.termination, Termination.TERMINATED)
+        self.assertEqual(calls[-2:], ['turn/interrupt', 'thread/read'])
 
     def test_tools_rejected_and_web_search_evidence_retained(self):
         out,_ = self.invoke('tool')

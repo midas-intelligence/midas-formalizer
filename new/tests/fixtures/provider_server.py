@@ -68,10 +68,17 @@ for line in sys.stdin:
             time.sleep(.08)
         if mode == 'hang':
             time.sleep(10)
-        send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1',
-              'tokenUsage':{'total':{'inputTokens':12,'outputTokens':4,'cachedInputTokens':3,
-                                     'reasoningOutputTokens':2}}}})
+        if not mode.startswith('interrupt'):
+            send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1',
+                  'tokenUsage':{'total':{'inputTokens':12,'outputTokens':4,'cachedInputTokens':3,
+                                         'reasoningOutputTokens':2}}}})
         send({'id':message['id'],'result':{'turn':{'id':'turn-1'}}})
+        if mode == 'partial' or mode.startswith('interrupt'):
+            send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn-1',
+                  'delta':'{"answer":"Partial coefficient: α'}})
+            if mode.startswith('interrupt'):
+                continue
+            time.sleep(10)
         if mode == 'tool':
             send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn-1',
                   'item':{'type':'commandExecution','id':'shell-1'}}})
@@ -84,8 +91,41 @@ for line in sys.stdin:
               'item':{'type':'agentMessage','text':'{"proof":"by trivial"}'}}})
         send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn-1','status':'completed'}}})
         continue
+    elif method == 'turn/interrupt':
+        assert params == {'threadId': 'thread-1', 'turnId': 'turn-1'}
+        if mode == 'interrupt-silent':
+            continue
+        if mode == 'interrupt-rejected':
+            send({'id':message['id'],'error':{'code':-32600,'message':'Cannot interrupt'}})
+            continue
+        if mode == 'interrupt-malformed':
+            print('{invalid', flush=True)
+            continue
+        if mode == 'interrupt-overflow':
+            print('x' * (1048576 + 2), flush=True)
+            continue
+        if mode != 'interrupt-before-ack':
+            send({'id':message['id'],'result':{}})
+        # Foreign completion/text/usage must not stop the drain or alter totals.
+        send({'method':'turn/completed','params':{'threadId':'foreign','turn':{'id':'turn-1','status':'completed'}}})
+        send({'method':'thread/tokenUsage/updated','params':{'threadId':'foreign',
+              'tokenUsage':{'total':{'inputTokens':999,'outputTokens':999,'cachedInputTokens':0}}}})
+        send({'method':'item/agentMessage/delta','params':{'threadId':'foreign','turnId':'turn-1','delta':'wrong'}})
+        send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn-1','delta':' + β'}})
+        if mode != 'interrupt-no-usage':
+            send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1',
+                  'tokenUsage':{'total':{'inputTokens':12,'outputTokens':8,'cachedInputTokens':3,
+                                         'reasoningOutputTokens':6}}}})
+        status = 'completed' if mode == 'interrupt-completed' else 'interrupted'
+        send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn-1','status':status}}})
+        if mode == 'interrupt-before-ack':
+            send({'id':message['id'],'result':{}})
+        continue
     elif method == 'thread/read':
-        send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1',
-              'tokenUsage':{'total':{'inputTokens':12,'outputTokens':5,'cachedInputTokens':3,
-                                     'reasoningOutputTokens':3}}}})
+        if mode == 'interrupt-read-hang':
+            continue
+        if mode != 'interrupt-no-usage':
+            send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1',
+                  'tokenUsage':{'total':{'inputTokens':12,'outputTokens':9 if mode.startswith('interrupt') else 5,
+                                         'cachedInputTokens':3,'reasoningOutputTokens':7 if mode.startswith('interrupt') else 3}}}})
     send({'id':message['id'],'result':result})
