@@ -154,8 +154,9 @@ class Application:
         instructions = tuple(instructions)
         if len({role for role, _ in instructions}) != len(instructions):
             raise ValueError('Duplicate instruction role')
-        from ..prompt import prover, reviewer, researcher, web_searcher
-        defaults = {'prover': prover, 'reviewer': reviewer, 'researcher': researcher, 'web-searcher': web_searcher}
+        from ..prompt import prover, reviewer, stop_reviewer, researcher, web_searcher
+        defaults = {'prover': prover, 'reviewer': reviewer, 'stop-reviewer': stop_reviewer,
+                    'researcher': researcher, 'web-searcher': web_searcher}
         explicit = dict(instructions)
         if explicit.keys() - defaults.keys():
             raise ValueError('Unknown instruction role')

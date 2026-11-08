@@ -138,6 +138,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(instructions((f'researcher={research}', f'web-searcher={web}')),
                          (('researcher', b'Answer questions.'), ('web-searcher', b'Find references.')))
 
+    def test_review_instruction_roles_are_distinct(self):
+        from midas.cli.service import instructions
+        review, stop = self.root/'review', self.root/'stop'
+        review.write_text('Review the decomposition.')
+        stop.write_text('Review the stop request.')
+        values = (f'reviewer={review}', f'stop-reviewer={stop}')
+        self.assertEqual(instructions(values),
+                         (('reviewer', b'Review the decomposition.'), ('stop-reviewer', b'Review the stop request.')))
+        with self.assertRaisesRegex(ValueError, 'distinct'):
+            instructions((*values, values[1]))
+
     def test_invalid_candidates_and_conflicting_modes_do_not_create_runs(self):
         candidate = self.root/'invalid'
         candidate.write_bytes(b'not a submission')

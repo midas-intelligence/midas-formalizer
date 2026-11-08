@@ -13,7 +13,7 @@ from midas.domain import (AdmittedBinding, AdmittedReview, ArtifactRef, FrozenRe
 from midas.domain.encoding import load_record
 from midas.domain.wire import decode
 from midas.policy import Config, OwnerUsage, Policy, Services
-from midas.prompt import Options, Section, Snapshot as Display, prover
+from midas.prompt import Options, Section, Snapshot as Display, prover, reviewer, stop_reviewer
 from midas.prompt.protocol import SCHEMA_INSTRUCTIONS
 from midas.prompt.wire import _Writer
 from midas.strategy import (Attempt, Context, Dispatch, Draft, Lesson, Memory, Observation, Objection,
@@ -863,6 +863,19 @@ class StateTests(unittest.TestCase):
                 self.assertNotIn('_remaining:', capabilities)
                 self.assertNotIn('web_calls:', capabilities)
 
+    def test_review_operation_selects_instructions(self):
+        artifacts, snapshot = fixture(conditional=True)
+        _, decomposition, _ = dispatch(snapshot, artifacts)
+        request = StopRequest(snapshot.version.owner, 'A hypothesis is missing.', artifact('stop'))
+        _, stop, _ = dispatch(replace(snapshot, attempt=None, stop_request=request), artifacts)
+        for prepared, module, operation in ((decomposition, reviewer, 'review'),
+                                            (stop, stop_reviewer, 'review_stop')):
+            with self.subTest(operation=operation):
+                self.assertEqual(prepared.turn.operation, operation)
+                self.assertEqual(prepared.turn.role, 'reviewer')
+                instructions = decode(prepared.wire.setup, limit=65536)['baseInstructions'].encode()
+                self.assertEqual(instructions.split(SCHEMA_INSTRUCTIONS)[0], module.INSTRUCTIONS)
+
     def test_named_retrieval_can_progress_and_unavailable_actions_still_fail_admission(self):
         artifacts, snapshot = fixture()
         snapshot = replace(snapshot, services=Services())
@@ -1007,6 +1020,9 @@ class StateTests(unittest.TestCase):
                                      ResultStatus.SUCCEEDED, (artifact('research'),))
             resumed = self.strategy.on_helper(snapshot, dispatched.turn, result.helper, (evidence,))
             self.assertEqual(resumed.work[0].operation, 'review_stop')
+            _, prepared, _ = dispatch(snapshot, artifacts)
+            instructions = decode(prepared.wire.setup, limit=65536)['baseInstructions'].encode()
+            self.assertEqual(instructions.split(SCHEMA_INSTRUCTIONS)[0], stop_reviewer.INSTRUCTIONS)
             self.assertIsNone(result.stopped)
             self.assertIsNone(result.objection)
             exhausted = replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct,

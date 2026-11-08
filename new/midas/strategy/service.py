@@ -6,7 +6,7 @@ from ..domain import (AdmittedBinding, AdmittedCheck, AdmittedReview, CheckKind,
                       ReceiptBinding, ResultStatus, accept_binding, accept_checked_proof, accept_joint)
 from ..domain.records import instance
 from ..policy import Policy
-from ..prompt import Section, Snapshot as Display, build, prover, reviewer
+from ..prompt import Section, Snapshot as Display, build, prover, reviewer, stop_reviewer
 from ..tools import (Backend, HelperRequest, Probe, Research, Retrieve, Scope, WebSearch,
                      expand_probe_bodies, finish_helper, plan_helper, read_page)
 from .candidates import RevisionError, expand, revise, supplied
@@ -76,7 +76,8 @@ class Strategy:
             return result('mathematical_allowance_exhausted')
         return result(work=(_work(snapshot, 'revise' if snapshot.base else 'generate'),))
 
-    def prepare_model(self, snapshot, policy, work, display, options, *, renderer=None, token_sample=None):
+    def prepare_model(self, snapshot, policy, work, display, options, *, renderer=None,
+                      instructions=None, token_sample=None):
         """Render once and bind its exact schema/wire to the dispatched snapshot."""
         if work not in self.plan(snapshot, policy).work or work.operation not in ('generate', 'revise', 'review', 'review_stop'):
             raise ValueError('Model work is not ready in this snapshot')
@@ -130,8 +131,11 @@ class Strategy:
             name += '-current'
         display = replace(display, sections=sections + (Section('capabilities', name, details.encode()),))
         role = 'reviewer' if work.operation in ('review', 'review_stop') else 'prover'
-        default = reviewer if role == 'reviewer' else prover
+        default = (stop_reviewer if work.operation == 'review_stop' else
+                   reviewer if work.operation == 'review' else prover)
         prompt = (renderer or default.render)(display)
+        if instructions is not None:
+            prompt = replace(prompt, instructions=instructions)
         if prompt.role != role:
             raise ValueError('Renderer role differs from planned work')
         if self.interpreter is interpret:

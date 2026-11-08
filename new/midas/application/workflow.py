@@ -271,15 +271,11 @@ class Workflow:
         options = Options(route.transport, route.model, **({} if route.transport == 'codex' else
             dict(reasoning=setting.reasoning_effort, prompt_cache=route.prompt_cache,
                  cache_scope=route.scope if route.prompt_cache == 'explicit' else None)))
-        renderer = None
-        if role in self.instructions:
-            from ..prompt import prover, reviewer
-            base = reviewer.render if role == 'reviewer' else prover.render
-            renderer = lambda display: replace(base(display), instructions=self.instructions[role])
+        instruction_role = 'stop-reviewer' if work.operation == 'review_stop' else role
         prepared = self.strategy.prepare_model(snapshot, self.policy, work,
                                                 self.display(reader, snapshot, review=binding if role == 'reviewer' else None,
                                                     bounded_evidence=getattr(self.policy.config, role).input_token_budget is not None),
-                                                options, renderer=renderer,
+                                                options, instructions=self.instructions.get(instruction_role),
                                                 token_sample=token_usage.sample(reader, snapshot.version.owner, role, route))
         wire = r.wire_artifact(prepared.wire.wire, prepared.turn.id)
         setup = artifact(prepared.wire.setup) if prepared.wire.setup is not None else None

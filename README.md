@@ -159,7 +159,10 @@ A smaller `live.json` can omit settings that should use defaults:
 }
 ```
 
-Configure a reviewer for independent review of decompositions and node stop requests. The prover and reviewer can call either helper directly:
+Configure a reviewer for independent review of decompositions and node stop requests.
+Each operation launches a model call with its own instructions, selected by the
+operation before dispatch. Both use the configured reviewer model.
+The prover and reviewer can call either helper directly:
 
 - `research`: mathematical guidance, proof strategies and answers to questions, without browsing.
 - `web_search`: resources and references, with bounded optional web search.
@@ -214,8 +217,10 @@ per line. Successful runs independently verify their export even without
 `--output`; supplying `--output` also publishes the bundle to that directory.
 
 Custom role instructions use repeatable `--instructions ROLE=FILE`, with roles
-`prover`, `reviewer`, `researcher`, and `web-searcher`. Each file must be UTF-8 and at most 16 KiB.
-Instructions and configuration are saved with the run.
+`prover`, `reviewer`, `stop-reviewer`, `researcher`, and `web-searcher`.
+`reviewer` overrides decomposition review; `stop-reviewer` overrides stop review.
+Each file must be UTF-8 and at most 16 KiB. Instructions and configuration are
+saved with the run and preserved on resume and fork.
 
 Live retrieval can query the public LeanExplore service. It sends search queries;
 returned names are checked in the run's Lean environment before use.

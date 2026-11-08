@@ -33,7 +33,7 @@ checked lookup; queries run searches and automatically check the selected result
 Search and lookup remain internal stages, with one helper charge for the whole
 retrieval request.
 
-`midas/prompt` implements independent, replaceable prover, reviewer, researcher and web-searcher
+`midas/prompt` implements independent, replaceable prover, decomposition-reviewer, stop-reviewer, researcher and web-searcher
 renderers, bounded readable context, and exact frozen wire construction. It imports
 only domain and source.
 
@@ -255,7 +255,10 @@ configured environment variable. App-server routes require `--codex /path/to/cod
 the executable is resolved and hashed before dispatch. PATH, HOME and CODEX_HOME
 are passed to it; additional required variable names use repeatable `--codex-env`.
 Credential values are not written to run artifacts. `--instructions ROLE=FILE`
-accepts prover, reviewer, researcher and web-searcher instruction files, each at most 16 KiB.
+accepts prover, reviewer, stop-reviewer, researcher and web-searcher instruction
+files, each at most 16 KiB. `reviewer` applies only to decomposition reviews;
+`stop-reviewer` applies only to stop reviews. Both instruction sets are frozen
+separately and preserved on resume and fork.
 
 A script is a **16 KiB maximum** ordinary JSON manifest pointing to raw reply files:
 
@@ -1041,9 +1044,13 @@ python3 -B -m tests.check_decomposition_lean /absolute/path/to/toolchain/bin/lea
 
 ## Prompt
 
-Each default role owns its wording, response schema, contract version and context
-layout in one file: `prompt/prover.py`, `prompt/reviewer.py`, and
-`prompt/researcher.py` and `prompt/web_searcher.py`. Shared `protocol.py` defines immutable display inputs;
+Each default renderer owns its wording and context layout in one file:
+`prompt/prover.py`, `prompt/reviewer.py`, `prompt/stop_reviewer.py`,
+`prompt/researcher.py` and `prompt/web_searcher.py`. Decomposition and stop reviews
+share the reviewer verdict contract and configured model route. Strategy dispatch
+selects the renderer by the planned operation (`review` or `review_stop`), including
+helper continuations; each call receives only that operation's instructions.
+Their renderer identities also separate prompt cache keys. Shared `protocol.py` defines immutable display inputs;
 `wire.py` builds provider wire bytes. There is no import of the old implementation,
 database lookup, provider call, or environment inventory in this layer.
 
@@ -1056,7 +1063,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v13`, `reviewer-v7`, `researcher-v3`, and `web-searcher-v2`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v13`, `decomposition-reviewer-v1`, `stop-reviewer-v1`, `researcher-v3`, and `web-searcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat retained observations; superseded candidate-check and edit failures are excluded from prompts. Compiler feedback reserves error headers and adds bounded first/last-five-line excerpts. No prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |

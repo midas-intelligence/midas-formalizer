@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from midas.domain import OwnerVersion
 from midas.domain.wire import decode
-from midas.prompt import Options, Prompt, Section, Snapshot, build, prover, researcher, reviewer, web_searcher, subject
+from midas.prompt import Options, Prompt, Section, Snapshot, build, prover, researcher, reviewer, stop_reviewer, web_searcher, subject
 from midas.prompt.protocol import MAX_BYTES, SCHEMA_INSTRUCTIONS, obj, schema_bytes
 from midas.prompt.wire import _prefix
 from midas.provider import ModelRequest, Route
@@ -27,6 +27,12 @@ def snapshot():
                      Section('question', 'research-question', b'Find a precise reference.')))
 
 
+def stop_snapshot():
+    turn = snapshot()
+    return replace(turn, sections=tuple(s for s in turn.sections if s.kind != 'candidate') +
+                   (Section('candidate', 'stop-request', b'The statement lacks a necessary hypothesis.'),))
+
+
 def cache_prefixes(request):
     """Exact wire prefixes at provider lookup boundaries; no large JSON operations."""
     wire = decode(request.wire, limit=MAX_BYTES)
@@ -37,6 +43,26 @@ def cache_prefixes(request):
 
 
 class PromptTests(unittest.TestCase):
+    def test_review_instructions_and_cache_prefixes_are_separate(self):
+        decomposition = reviewer.render(snapshot())
+        stop = stop_reviewer.render(stop_snapshot())
+        self.assertEqual(decomposition.instructions, reviewer.INSTRUCTIONS)
+        self.assertEqual(stop.instructions, stop_reviewer.INSTRUCTIONS)
+        self.assertNotIn(stop.instructions.splitlines()[0], decomposition.instructions)
+        self.assertNotIn(decomposition.instructions.splitlines()[0], stop.instructions)
+        self.assertNotEqual(decomposition.renderer, stop.renderer)
+        for transport in ('azure_responses', 'bedrock_responses'):
+            options = Options(transport, 'model', prompt_cache='explicit', cache_scope='a'*64)
+            before = build(snapshot(), options, renderer=reviewer.render)
+            after = build(stop_snapshot(), options, renderer=stop_reviewer.render)
+            self.assertNotEqual(cache_prefixes(before), cache_prefixes(after))
+            self.assertNotEqual(decode(before.wire, limit=MAX_BYTES)['prompt_cache_key'],
+                                decode(after.wire, limit=MAX_BYTES)['prompt_cache_key'])
+        with self.assertRaisesRegex(ValueError, 'cannot review a stop request'):
+            reviewer.render(stop_snapshot())
+        with self.assertRaisesRegex(ValueError, 'requires an exact subject and stop request'):
+            stop_reviewer.render(snapshot())
+
     def test_runtime_traces_are_removed_from_prover_and_reviewer_diagnostics(self):
         noise = (b'MIDAS_THREAD_GUARD count=1\r\nMIDAS_RUNTIME_OPEN /proc/stat\n'
                  b'MIDAS_TRACE tasks=2 syscalls=105 remaining=0 ready=1\n')
@@ -209,14 +235,15 @@ class PromptTests(unittest.TestCase):
                   Route('amazon-bedrock-runtime', 'model', 'bedrock_responses',
                         endpoint='https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses'))
         artifacts = Artifacts()
-        for role in (prover, reviewer, researcher, web_searcher):
+        for role in (prover, reviewer, stop_reviewer, researcher, web_searcher):
             for route in routes:
                 with self.subTest(role=role.__name__, transport=route.transport):
                     if role is web_searcher and route.transport != 'codex':
                         with self.assertRaises(ValueError):
                             build(snapshot(), Options(route.transport, route.model), renderer=role.render)
                         continue
-                    output = build(snapshot(), Options(route.transport, route.model), renderer=role.render)
+                    turn = stop_snapshot() if role is stop_reviewer else snapshot()
+                    output = build(turn, Options(route.transport, route.model), renderer=role.render)
                     request = ModelRequest(route, output.provider_role, LIMITS,
                         artifacts.save(output.wire), artifacts.save(output.setup) if output.setup else None)
                     validate_wire(request, output.wire, output.setup)

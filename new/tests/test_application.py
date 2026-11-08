@@ -217,7 +217,7 @@ class Contracts(unittest.TestCase):
 
     def test_stop_approval_and_rejection_use_review_and_feedback(self):
         from midas.application import records as r
-        from midas.prompt import prover, reviewer
+        from midas.prompt import prover, reviewer, stop_reviewer
         from midas.strategy import Memory
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         action = dict(mode='stop', rationale='No proof route is available.', objection=None)
@@ -251,8 +251,8 @@ class Contracts(unittest.TestCase):
                     else:
                         self.assertEqual(len(captured), 1)
                         self.assertFalse(Compiler.calls)
-                    # Saved role instructions must include stop review guidance.
-                    self.assertIn(reviewer.STOP_INSTRUCTIONS, run.workflow.instructions['reviewer'])
+                    self.assertEqual(run.workflow.instructions['reviewer'], reviewer.INSTRUCTIONS)
+                    self.assertEqual(run.workflow.instructions['stop-reviewer'], stop_reviewer.INSTRUCTIONS)
                 with self.app.resume(self.root/verdict) as resumed:
                     self.assertEqual(self.finish(resumed).exit_code, 1 if verdict == 'accept' else 0)
 
@@ -375,7 +375,7 @@ class Contracts(unittest.TestCase):
 
     def test_stop_review_research_and_invalid_verdict_keep_request_pending(self):
         from midas.application import records as r
-        from midas.prompt import reviewer
+        from midas.prompt import stop_reviewer
         from midas.strategy import Memory
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         research_route = ModelRoute(provider='openai', model='fixture')
@@ -385,11 +385,12 @@ class Contracts(unittest.TestCase):
         finding = dict(category='progress', location='goal', issue='There is a constructor.', suggested_revision='')
         malformed = dict(child_declarations=[], verdict='reject', rationale='Use the constructor.', findings=[finding], question='', urls=[])
         rejected = dict(malformed, findings=[dict(finding, suggested_revision='Apply True.intro.')])
-        captured, original = [], reviewer.render
+        captured, original = [], stop_reviewer.render
         def capture(snapshot):
             captured.append(snapshot)
             return original(snapshot)
-        with patch('midas.prompt.reviewer.render', side_effect=capture), self.start(workflow='scripted',
+        with patch('midas.prompt.reviewer.render', side_effect=AssertionError('Decomposition review dispatched')), \
+                patch('midas.prompt.stop_reviewer.render', side_effect=capture), self.start(workflow='scripted',
                 config=replace(Config(), prover=route, reviewer=route, research=research_route),
                 script=(('prover', response(action)), ('reviewer', research), ('research', answer),
                         ('reviewer', model_json(malformed)), ('reviewer', model_json(rejected)),
@@ -409,6 +410,37 @@ class Contracts(unittest.TestCase):
             self.assertEqual(run.writer.status_snapshot().accounting.turns, 6)
             self.assertEqual(run.writer.counter('owner:'+self.selected.identities[0].id, 'stop_requests'), 1)
             self.assertIn('Apply True.intro.', Memory.load(r.read(run.writer, state.memory)).observations[-1].messages)
+
+    def test_stop_instruction_override_is_independent_after_resume_and_fork(self):
+        from midas.domain.wire import decode
+        from midas.prompt.protocol import SCHEMA_INSTRUCTIONS
+        from midas.provider import ModelOutput, Route
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        overrides = {'reviewer': b'Custom decomposition instructions.',
+                     'stop-reviewer': b'Custom stop instructions.'}
+        calls = []
+        def transport(request, raw, *args):
+            if request.role == 'reviewer':
+                instructions = decode(raw, limit=8*1024**2)['input'][0]['content'].encode()
+                calls.append(instructions.split(SCHEMA_INSTRUCTIONS)[0])
+                reply = model_json(dict(child_declarations=[], verdict='accept', rationale='Stop is justified.',
+                                        findings=[], question='', urls=[]))
+            else:
+                reply = response(dict(mode='stop', rationale='A hypothesis is missing.', objection=None))
+            return ModelOutput(raw=reply, usage=Usage(0, 0, 0, 0))
+        self.app.transports = {Route.from_config(route).scope: transport}
+        with self.start(workflow='live', config=replace(Config(), prover=route, reviewer=route),
+                        instructions=tuple(overrides.items())):
+            pass
+        with self.app.fork(self.root/'run', self.root/'fork') as forked:
+            for role, instructions in overrides.items():
+                self.assertEqual(forked.workflow.instructions[role], instructions)
+            self.assertEqual(self.finish(forked).exit_code, 1)
+        with self.app.resume(self.root/'run') as resumed:
+            for role, instructions in overrides.items():
+                self.assertEqual(resumed.workflow.instructions[role], instructions)
+            self.assertEqual(self.finish(resumed).exit_code, 1)
+        self.assertEqual(calls, [overrides['stop-reviewer']] * 2)
 
     def test_failed_edits_reach_next_prompt_and_recover_without_protocol_allowance(self):
         from midas.application import records as r
@@ -1439,7 +1471,9 @@ class Contracts(unittest.TestCase):
             self.assertNotIn(self.environment.id.encode(), b'\n'.join(s.text for s in display.sections))
 
     def test_review_uses_read_only_candidate_relevant_lookups_and_its_own_research(self):
+        from midas.domain.wire import decode
         from midas.prompt import reviewer
+        from midas.prompt.protocol import SCHEMA_INSTRUCTIONS
         from tests.test_strategy import decomposition
         from midas.tools import Match, SearchService
         self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
@@ -1480,22 +1514,33 @@ class Contracts(unittest.TestCase):
                     return replace(value, presentation=text.encode())
                 return value
         self.app.checker_factory = ReviewCompiler
-        captured = []
+        captured, instructions = [], []
+        overrides = (('reviewer', b'Custom decomposition review.'), ('stop-reviewer', b'Custom stop review.'))
         original = reviewer.render
         def capture(snapshot):
             captured.append(snapshot)
             return original(snapshot)
         with patch('midas.prompt.reviewer.render', side_effect=capture), self.start(
                 workflow='scripted', config=replace(Config(), prover=route, reviewer=route, research=research_route),
+                instructions=overrides,
                 script=(('prover', response(invalid)), ('prover', response(retrieve)), ('prover', response(probe)),
                         ('prover', response(action)), ('reviewer', research), ('research', answer),
                         ('reviewer', accept), ('prover', response(child)))) as run:
+            prepare = run.workflow.strategy.prepare_model
+            def capture_prepared(*args, **kwargs):
+                prepared = prepare(*args, **kwargs)
+                if prepared.turn.role == 'reviewer':
+                    wire = decode(prepared.wire.wire, limit=8*1024**2)
+                    instructions.append(wire['input'][0]['content'].encode().split(SCHEMA_INSTRUCTIONS)[0])
+                return prepared
+            run.workflow.strategy.prepare_model = capture_prepared
             for _ in range(1000):
                 run.step()
                 if len(captured) == 2:
                     break
                 time.sleep(.001)
         self.assertEqual(len(captured), 2)
+        self.assertEqual(instructions, [dict(overrides)['reviewer']] * 2)
         for display in captured:
             sections = {s.name: s.text for s in display.sections}
             self.assertEqual(sections['goal'], b'True')
