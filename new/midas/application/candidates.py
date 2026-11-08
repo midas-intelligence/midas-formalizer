@@ -4,12 +4,12 @@ from uuid import UUID, uuid5
 
 from ..controller import Effect, artifact, reserve_candidate, settle_candidate
 from ..domain import (AdmittedReview, Candidate, CheckKind, Dependency, DependencyOrigin, OwnerVersion,
-    ProofNode, accept_checked_proof, accept_joint,
+    ProofNode, ProofState, accept_checked_proof, accept_joint,
     joint_targets, load_identity, load_submission, resolve_entry)
 from ..domain.identity import entry_context, CLOSED
 from ..domain import encoding as codec
 from ..storage import Changes, CounterChange, NodeChange
-from ..strategy import AttemptDecision, Context, Draft, child_context
+from ..strategy import AttemptDecision, Context, Draft, Memory, Observation, child_context
 from . import records as r
 
 
@@ -30,6 +30,17 @@ def prerequisites(reader, context, environment_id):
 
 def submission(reader, key):
     return r.value(reader, 'application.submissions', key)
+
+
+def base_submission(reader, draft):
+    return submission(reader, load_submission(draft.submission)['submission_id']) if draft else None
+
+
+def failure_feedback(reader, saved):
+    for entry_key, failure in saved.get('failures', {}).items():
+        reference = r.unref(failure['feedback'])
+        observation, = Memory.load(r.read(reader, reference)).observations
+        yield entry_key, failure['stage'], observation, reference
 
 
 def pending_graph(flow, reader):
@@ -131,10 +142,11 @@ def plan(flow, reader, key, saved):
     if saved['current']:
         return None
     draft, value, by_key = entries(reader, saved)
+    failures = saved.get('failures', {})
     coordinator = OwnerVersion(*saved['owner'])
     definitions = {i.id for t, i in zip(flow.selection.selected.targets, flow.selection.identities) if t.kind == 'def'}
     for entry_key in saved['order']:
-        if entry_key in saved['rows']:
+        if entry_key in saved['rows'] or entry_key in failures:
             continue
         entry = resolve_entry(value, by_key[entry_key])
         closed = definition_bindings(flow, reader, key, saved, entry, draft)
@@ -154,29 +166,33 @@ def plan(flow, reader, key, saved):
                 dict(saved, current=job_key)))
     # Only already-bound entries and dependencies may enter proof checking.
     for entry_key in saved['order']:
-        if entry_key not in saved['rows']:
+        if entry_key not in saved['rows'] or entry_key in failures:
             continue
         row = saved['rows'][entry_key]
         if row.get('done'):
             continue
+        node = reader.node(row['owner']).node
+        if (by_key[entry_key]['subject']['kind'] == 'lemma' and node.state == ProofState.VERIFIED
+                and node.owner == OwnerVersion(*row['version'])
+                and node.selected.candidate.joint_submission_id is None):
+            # Binding has established the same obligation. Revisions and shared
+            # lemmas keep its accepted proof instead of selecting a replacement.
+            return _row(reader, key, saved, entry_key,
+                        dict(row, checked=r.check(node.assembly or node.selected), done=True))
         if entry_key in draft.unproved:
             return _row(reader, key, saved, entry_key, dict(row, done=True))
         checked = r.uncheck(row.get('checked'))
         if checked:
             if checked.kind == CheckKind.CONDITIONAL:
-                if saved['supplied'] or entry_key not in draft.review_entries:
-                    # No new English obligation is proposed by this entry.
-                    # Reuse the checker receipt for the local acceptance decision;
-                    # dependencies still require verified proofs and assembly.
-                    review = AdmittedReview(checked.candidate, checked.receipt, True)
-                    return activate(flow, reader, key, saved, entry_key, checked, review)
-                return flow.review_job(reader, key, saved, entry_key, checked)
+                # Finish all available compiler checks before review or activation
+                # can schedule child work or end the submission on rejection.
+                continue
             return activate(flow, reader, key, saved, entry_key, checked)
         entry = resolve_entry(value, by_key[entry_key])
-        node = reader.node(row['owner']).node
         _, state = r.owner_state(reader, node.owner.obligation_id)
         ident = identity(reader, state, flow.selection.environment_id)
         deps, identities, closed, joint_id = [], [], [], None
+        ready = True
         prior_drafts = {key: draft}
         for dep in entry['dependencies']:
             origin = dep['entry']
@@ -195,7 +211,8 @@ def plan(flow, reader, key, saved):
             if child.owner.obligation_id in definitions and origin['key'] in prior_drafts[origin['submission_id']].closed_definitions:
                 prior = r.uncheck(child_row.get('assembly') or child_row.get('checked'))
                 if prior is None or prior.kind == CheckKind.CONDITIONAL:
-                    return None
+                    ready = False
+                    break
                 kind, certificate, joint = DependencyOrigin.CLOSED_DEFINITION, prior.evidence, origin['submission_id']
                 if joint_id is not None and joint_id != joint:
                     raise ValueError('Definition dependencies belong to different joint submissions')
@@ -204,6 +221,8 @@ def plan(flow, reader, key, saved):
             elif child.owner.obligation_id in {i.id for i in flow.selection.identities}:
                 kind = DependencyOrigin.FROZEN_PEER
             deps.append(Dependency(child.owner, dep['parameter'], child.interface, kind, certificate, joint))
+        if not ready:
+            continue
         source = artifact(entry['proof'].encode())
         candidate = Candidate(str(uuid5(UUID(key), entry_key)), node.owner, flow.selection.environment_id,
             source.reference, tuple(deps), entry['revision_of'],
@@ -217,7 +236,22 @@ def plan(flow, reader, key, saved):
         updated = dict(saved, current=job_key, phase='proof', rows=dict(saved['rows'], **{entry_key: next_row}))
         return r.merge(flow.compiler_job(reader, job_key, request, (coordinator,), ['proof', key, entry_key]),
             r.record(reader, 'application.submissions', key, updated), Effect(artifacts=(source,)))
-    if len(saved['rows']) != len(saved['order']):
+    if failures:
+        return finish_failures(flow, reader, key, saved, draft)
+    for entry_key in saved['order']:
+        row = saved['rows'].get(entry_key)
+        if row is None or row.get('done'):
+            continue
+        checked = r.uncheck(row.get('checked'))
+        if checked is None:
+            continue
+        if saved['supplied'] or entry_key not in draft.review_entries:
+            # No new English obligation is proposed. Dependencies still need
+            # verified proofs and assembly before this composition can close.
+            review = AdmittedReview(checked.candidate, checked.receipt, True)
+            return activate(flow, reader, key, saved, entry_key, checked, review)
+        return flow.review_job(reader, key, saved, entry_key, checked)
+    if len(saved['rows']) != len(saved['order']) or any(not row.get('done') for row in saved['rows'].values()):
         return None
     # Required roots remain private until the whole group has checked terms.
     graph_effect = Effect()
@@ -240,6 +274,38 @@ def plan(flow, reader, key, saved):
 def _row(reader, key, saved, entry_key, row):
     return r.record(reader, 'application.submissions', key,
         dict(saved, current=None, rows=dict(saved['rows'], **{entry_key: row})))
+
+
+def fail_entry(reader, key, saved, entry_key, stage, outcome, *, exception=None,
+               reason=None, evidence, diagnostics=()):
+    observation = Observation.select('checker', reason or outcome, evidence, diagnostics)
+    data = artifact(Memory(observations=(observation,)).payload)
+    failure = dict(stage=stage, outcome=outcome, exception=exception, reason=reason,
+                   feedback=r.ref(data.reference))
+    return r.merge(Effect(artifacts=(data,)), r.record(reader, 'application.submissions', key,
+        dict(saved, current=None, failures=dict(saved.get('failures', {}), **{entry_key: failure}))))
+
+
+def finish_failures(flow, reader, key, saved, draft):
+    failures = saved['failures']
+    # Settle the submission once. A mathematical rejection keeps its attempt
+    # charge even when another entry also encountered a resource exception.
+    values = tuple(failures.values())
+    failure = next((f for f in values if f['outcome'] == 'rejection'),
+                   next((f for f in values if f['exception']), values[0]))
+    observations = tuple(failure_feedback(reader, saved))
+    if len(observations) == 1:
+        observation = observations[0][2]
+    else:
+        messages = (message for name, stage, obs, _ in observations
+                    for message in (f'Entry {name}: {stage} {obs.status}', *obs.messages))
+        observation = Observation.select('checker', 'entries_failed',
+            reader.record('application.submissions', key).artifact, messages)
+    blocked = [name for name in saved['order'] if name not in failures
+               and not saved['rows'].get(name, {}).get('checked')
+               and not (name in draft.unproved and name in saved['rows'])]
+    return finish(flow, reader, key, dict(saved, blocked=blocked), failure['outcome'],
+                  exception=failure['exception'], reason=failure['reason'], observation=observation)
 
 
 def on_binding(flow, reader, key, saved, entry_key, bound):
@@ -333,7 +399,7 @@ def activate(flow, reader, key, saved, entry_key, checked, review=None):
         dict(saved['rows'][entry_key], done=True, review=r.receipt(review.receipt) if review else None)))
 
 
-def finish(flow, reader, key, saved, outcome, *, exception=None, reason=None, evidence=None, diagnostics=()):
+def finish(flow, reader, key, saved, outcome, *, exception=None, reason=None, evidence=None, diagnostics=(), observation=None):
     owner = OwnerVersion(*saved['owner'])
     _, state = r.owner_state(reader, owner.obligation_id)
     decision = AttemptDecision(saved['attempt'], outcome, flow.policy.mathematical_charge(outcome), exception)
@@ -342,10 +408,11 @@ def finish(flow, reader, key, saved, outcome, *, exception=None, reason=None, ev
         scope = 'owner:'+owner.obligation_id
         effects.append(Effect(Changes(counters=tuple(CounterChange(scope, name, reader.counter(scope, name), 0)
             for name in ('repair_open', 'repair_remaining', 'repair_suspended')))))
-    if evidence:
+    if evidence or observation:
         from ..strategy import Memory, Observation, update_memory
         memory = Memory.load(r.read(reader, state.memory)) if state.memory else Memory()
-        memory = update_memory(memory, observation=Observation.select('checker', reason or outcome, evidence, diagnostics))
+        observation = observation or Observation.select('checker', reason or outcome, evidence, diagnostics)
+        memory = update_memory(memory, observation=observation)
         data = artifact(memory.payload)
         effects.append(Effect(artifacts=(data,)))
         state = replace(state, memory=data.reference)

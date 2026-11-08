@@ -435,12 +435,13 @@ def _escape(value):
     return value.replace('~', '~0').replace('/', '~1')
 
 
-def _fragments(value, guidance, context, unproved):
+def _fragments(value, guidance, context, unproved, compiled=()):
     paths = {}
+    hidden = set(unproved) | set(compiled)
     fixed = [subject.value() for subject in context.subjects]
     for entry in value['entries']:
         prefix = '/entries/' + _escape(entry['key'])
-        if entry['key'] not in unproved:
+        if entry['key'] not in hidden:
             paths[prefix + '/proof'] = (entry, 'proof')
         if entry['subject']['kind'] == 'lemma' and entry['subject'] not in fixed:
             paths[prefix + '/statement'] = (entry['subject'], 'statement')
@@ -456,20 +457,20 @@ def _fragments(value, guidance, context, unproved):
     return paths
 
 
-def candidate_material(draft, context):
+def candidate_material(draft, context, *, compiled=()):
     """Decode a display once: structure, guidance and exact editable strings."""
     value = load_submission(draft.submission)
     guidance = load_record(draft.guidance, limit=MAX_BYTES)
     editable = tuple((path, owner[key]) for path, (owner, key) in _fragments(
-        value, guidance, context, draft.unproved).items())
+        value, guidance, context, draft.unproved, compiled).items())
     return value, guidance, editable
 
 
-def fragments(draft, context):
-    return candidate_material(draft, context)[2]
+def fragments(draft, context, *, compiled=()):
+    return candidate_material(draft, context, compiled=compiled)[2]
 
 
-def revise(action, base, context, submission_id):
+def revise(action, base, context, submission_id, *, compiled=()):
     """Resolve exact edits against the base, then apply disjoint spans atomically."""
     uuid(submission_id)
     value = load_submission(base.submission)
@@ -477,14 +478,14 @@ def revise(action, base, context, submission_id):
     if submission_id == original_id:
         raise ValueError('Revision requires a fresh submission identity')
     guidance = load_record(base.guidance, limit=MAX_BYTES)
-    paths = _fragments(value, guidance, context, base.unproved)
+    paths = _fragments(value, guidance, context, base.unproved, compiled)
     edits = action['edits']
     if not edits:
         raise RevisionError('Revision requires edits')
     pending, removed = {}, set()
     for index, edit in enumerate(edits, 1):
         if edit['path'] not in paths:
-            raise RevisionError('Unadvertised fragment path: ' + edit['path'])
+            continue
         owner, key = paths[edit['path']]
         old, new = edit['old'], edit['new']
         current = owner[key]
@@ -508,6 +509,8 @@ def revise(action, base, context, submission_id):
         if new == (current if old is None else old):
             raise RevisionError('No-op fragment edit: ' + edit['path'])
         pending.setdefault(edit['path'], []).append((first, end, new, index))
+    if not pending:
+        return base
     changed = False
     for path, replacements in pending.items():
         replacements.sort(key=lambda replacement: replacement[0])

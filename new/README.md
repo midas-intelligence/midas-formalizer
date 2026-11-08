@@ -393,13 +393,27 @@ saved binding. Instruction bytes and exact wire/schema bytes are frozen before
 dispatch. Supplied candidates schedule no model turns; conditional submissions
 must contain explicit approval and still pass compiler checks.
 
-Derived obligations are interned by checked identity. Helpers receive their exact
+Derived obligations are interned by checked identity. Revised submissions reuse
+verified supporting lemmas with the same checked identity and generation, preserving
+their accepted proofs without another proof check. Joint definition/property proofs
+remain tied to their original submission. Compiler failures are saved per entry;
+checking continues for every other entry whose required bindings and definition
+certificates are available. Failed proof terms do not prevent conditional checking
+against their successfully bound statements. Missing bindings or definition
+certificates leave dependents explicitly blocked, rather than marked successful.
+Available compiler checks run before conditional activation and review. A failed
+submission settles its attempt once and retains each node's feedback across resume.
+Helpers receive their exact
 inherited aliases; retired generations require new fenced bindings. Probe feedback
 contains the actual checked case results, and inspected lookup ranges resolve to
 hash-checked original source excerpts. Child prompts retain their own proof guidance,
 definitions and prerequisite interfaces. Conditional
 proofs require independent review in model workflows. Joint definition/property
 submissions check closed definitions first and publish the group atomically.
+Rejected decomposition reviews retain their findings, locations, suggested revisions
+and rationale in the prover's bounded feedback, including after resume. Findings
+precede the general rationale when the memory limit requires omissions; the complete
+review remains saved as the observation's evidence.
 Prover `stop` actions save a pending request for the reviewer; they do not stop
 the node or report a statement objection immediately. The reviewer accepts stopping
 or rejects with actionable continuation guidance. Rejection returns its findings
@@ -966,18 +980,24 @@ entries requiring independent review. Its binary format is `MIDASDRAFT` version 
 Exact named fragment edits all resolve against the displayed base before any replacements.
 Disjoint spans apply atomically, independent of edit order; each affected fragment
 is rebuilt once. A whole-fragment replacement cannot share its path with another
-edit. Revisions either produce a complete new draft or fail without effects. They
-reject stale bases, overlapping edits, ambiguous matches, no-ops, changed inherited
-definitions, changed target statements and structural changes. Local references
+edit. Unknown or unadvertised paths are ignored without discarding valid edits in
+the same response. If all paths are ignored, the base is unchanged and no candidate
+attempt or revision allowance is charged. Edits to available paths still reject
+stale bases, overlapping edits, ambiguous matches and no-ops. Inherited definitions,
+target statements and candidate structure have no editable paths. Local references
 bind to the controller-allocated new submission ID. `fragments` exposes the exact
 strings for prompt presentation.
-An edit that cannot apply (including missing or ambiguous old text, an unadvertised
-fragment path, or a no-op) returns revision feedback with the candidate unchanged.
+An edit to an available path that cannot apply (including missing or ambiguous old
+text or a no-op) returns revision feedback with the candidate unchanged.
 The next prover prompt includes the reason and correction guidance. These failures
 consume model turns but no protocol revision allowance or mathematical attempt.
-Consecutive revisions replace the displayed candidate. Prompts include only the
-latest candidate check/review feedback and the latest failed-edit message after
-that check, if any. A failed edit leaves the current check relevant; a new check
+Successful Lean proof bodies and their edit paths are omitted from prover revision
+prompts; names, statements, dependencies and compilation status remain visible.
+The revision validator applies the same filtering. English guidance remains editable
+for reviewer corrections, and independent review still receives the full proofs.
+Consecutive revisions replace the displayed candidate. Prompts include each failed
+node's latest compiler feedback, or the latest review feedback, and the latest
+failed-edit message after that check, if any. A failed edit leaves the current check relevant; a new check
 supersedes both earlier check and edit failures. Older results stay saved, while
 strategy, lessons, objections and helper evidence retain their existing treatment.
 

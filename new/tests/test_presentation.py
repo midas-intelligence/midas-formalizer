@@ -12,6 +12,27 @@ from tests.test_strategy import context, decomposition, proof
 
 
 class PresentationTests(unittest.TestCase):
+    def test_successful_proofs_are_hidden_but_statements_dependencies_and_guidance_remain(self):
+        action = decomposition()
+        action['children'][1].update(proof_body='by exact unique_successful_term',
+                                     proof='Retain this English plan.')
+        ctx = context()
+        draft = expand(action, ctx, uid('mixed-status'))
+        text = presentation.candidate(draft, ctx, compiled=('first',),
+            failures={'parent': {'stage': 'proof'}}, blocked=('second',)).text
+        self.assertIn(b'Proof: compiled successfully.', text)
+        self.assertNotIn(b'unique_successful_term', text)
+        self.assertNotIn(b'/entries/first/proof', text)
+        self.assertIn(b'/entries/parent/proof', text)
+        self.assertIn(action['proof_body'].encode(), text)
+        self.assertIn(b'proof failed; see node feedback', text)
+        self.assertIn(b'blocked by an unavailable dependency; not compiled', text)
+        self.assertIn(b'first <- local entry first', text)
+        self.assertIn(b'Retain this English plan.', text)
+        self.assertIn(action['children'][1]['statement'].encode(), text)
+        reviewed = presentation.candidate(draft, ctx, selected='parent', compiled=('first',)).text
+        self.assertIn(b'unique_successful_term', reviewed)
+
     def test_candidate_contains_dependency_map_guidance_and_exact_fragments_once(self):
         action = decomposition()
         action['proof'] = 'An English plan with ``` fences.\n\n'

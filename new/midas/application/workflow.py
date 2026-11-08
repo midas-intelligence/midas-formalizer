@@ -90,18 +90,22 @@ class Workflow:
         from .helpers import named_archives
         archives = named_archives(reader, owner)
         displayed = set(state.evidence)
+        base = Draft.load(r.read(reader, state.base, 17*1024**2)) if state.base else None
+        base_saved = candidates.base_submission(reader, base)
         return Snapshot(Version(owner, saved.revision, state.context, memory.version, len(state.evidence)),
             context, self.selection.environment_id, self.work_graph(reader)[0], memory,
             owner_usage(reader, owner), RunUsage(turns=a.turns, backtracks=reader.counter(r.SCOPE, 'backtracks'),
                 intents=sum(n for _, n in reader.status_snapshot().intents)), self.services, self.mode,
-            Draft.load(r.read(reader, state.base, 17*1024**2)) if state.base else None,
+            base,
             attempt, busy=pending is not None,
             stopped=state.stopped and not (attempt and attempt.candidate.joint_submission_id),
             forbidden_names=tuple(t.selector for t in self.selection.selected.targets),
             allowed_pins=tuple(name for name, _ in archives),
             cursors=tuple(f'{name}:{i+1}' for name, a in archives for i in range(1, min(len(a.pages), 128))
                           if a.pages[i] not in displayed),
-            stop_request=StopRequest.load(r.read(reader, state.stop_request, 65536)) if state.stop_request else None)
+            stop_request=StopRequest.load(r.read(reader, state.stop_request, 65536)) if state.stop_request else None,
+            compiled=tuple(name for name, row in base_saved['rows'].items() if row.get('checked'))
+                     if base_saved else ())
 
     def displayed_signature(self, reader, identity, refs):
         """Read compiler-produced type text without expanding its identity DAG."""
@@ -172,8 +176,10 @@ class Workflow:
         sections.append(Section('interfaces', 'imports', '\n'.join(import_lines).encode()))
         if formal_only:
             return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)))
+        base_saved = candidates.base_submission(reader, snapshot.base) if review is None else None
         if review is None:
-            sections.extend(presentation.memory(snapshot.memory))
+            sections.extend(presentation.memory(snapshot.memory,
+                include_checks=not (base_saved and base_saved.get('failures'))))
         if review is not None:
             key, entry_key = review
             saved = candidates.submission(reader, key)
@@ -187,8 +193,18 @@ class Workflow:
             refs.extend((draft_ref, coordinator.context))
             owners.append(OwnerVersion(*saved['owner']))
         elif snapshot.base:
-            sections.append(presentation.candidate(snapshot.base, snapshot.context))
+            sections.append(presentation.candidate(snapshot.base, snapshot.context, compiled=snapshot.compiled,
+                failures=base_saved.get('failures') if base_saved else None,
+                blocked=base_saved.get('blocked', ()) if base_saved else ()))
             refs.append(state.base)
+            if base_saved:
+                for ordinal, (name, stage, observation, reference) in enumerate(
+                        candidates.failure_feedback(reader, base_saved)):
+                    rows = [f'Entry: {name}\n{stage}: {observation.status}', *observation.messages]
+                    if observation.omitted:
+                        rows.append(f'{observation.omitted} diagnostic message(s) omitted.')
+                    sections.append(Section('feedback', f'entry-check-{ordinal+1}', '\n\n'.join(rows).encode()))
+                    refs.append(reference)
         if snapshot.stop_request:
             sections.append(presentation.stop_request(snapshot.stop_request))
             refs.extend((state.stop_request, snapshot.stop_request.source))
@@ -508,19 +524,23 @@ class Workflow:
                     if result.diagnostics else '')
             diagnostics = (text,) if text.strip() else ()
             return self.fail_candidate(reader, key, saved, accepted.failure,
-                reader.receipt(invocation.original_execution_id).result_ref, diagnostics=diagnostics)
+                reader.receipt(invocation.original_execution_id).result_ref, diagnostics=diagnostics,
+                entry_key=entry_key, stage=kind)
         try:
             if kind == 'binding':
                 return candidates.on_binding(self, reader, key, saved, entry_key, accepted.value)
             return candidates.on_check(self, reader, key, saved, entry_key, accepted.value)
         except ValueError as error:
-            return candidates.finish(self, reader, key, saved, 'rejection', reason=str(error)[:256],
+            return candidates.fail_entry(reader, key, saved, entry_key, kind, 'rejection', reason=str(error)[:256],
                 evidence=reader.receipt(invocation.original_execution_id).result_ref)
 
-    def fail_candidate(self, reader, key, saved, failure, evidence, *, diagnostics=()):
+    def fail_candidate(self, reader, key, saved, failure, evidence, *, diagnostics=(), entry_key=None, stage=None):
         exception = {Failure.TIMEOUT: 'timeout', Failure.MEMORY: 'memory', Failure.RECURSION_DEPTH: 'elaboration',
                      Failure.PROTOCOL: 'protocol'}.get(failure)
         outcome = 'exception' if exception else 'rejection' if failure == Failure.REJECTION else 'infrastructure'
+        if entry_key is not None:
+            return candidates.fail_entry(reader, key, saved, entry_key, stage, outcome, exception=exception,
+                                         reason=failure.value, evidence=evidence, diagnostics=diagnostics)
         return candidates.finish(self, reader, key, saved, outcome, exception=exception,
                                  reason=failure.value, evidence=evidence, diagnostics=diagnostics)
 
@@ -564,7 +584,7 @@ class Workflow:
         if proposal.objection:
             from .repairs import report
             effects.append(report(self, reader, proposal.objection))
-        if proposal.memory:
+        if proposal.memory and not (binding[2] and proposal.decision):
             data = artifact(proposal.memory.payload)
             effects.append(Effect(artifacts=(data,)))
             state = replace(state, memory=data.reference)
@@ -594,8 +614,11 @@ class Workflow:
                 effects.extend((r.graph_changes(reader, snapshot.graph, proposal.graph),
                     candidates._row(reader, key, saved, entry_key, dict(saved['rows'][entry_key], done=True))))
             elif proposal.decision:
+                # A reviewed entry can have a different owner from the submission
+                # coordinator. Return its feedback without copying that owner's state.
                 effects.append(candidates.finish(self, reader, key, saved, proposal.decision.outcome,
-                    exception=proposal.decision.exception, reason=proposal.reason, evidence=accepted.value.raw))
+                    exception=proposal.decision.exception, reason=proposal.reason,
+                    observation=proposal.memory.observations[-1] if proposal.memory else None))
             else:
                 raise ValueError('Review supplied no decision')
         else:

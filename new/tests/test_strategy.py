@@ -580,9 +580,26 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], 'by exact first second')
         bad = deepcopy(action)
         bad['edits'].append(dict(path='/entries/0/proof', old=None, new='by trivial'))
-        with self.assertRaises(ValueError):
-            revise(bad, draft, context(), uid('bad'))
+        self.assertEqual(revise(bad, draft, context(), uid('revision')).payload, result.payload)
         self.assertEqual(Draft.load(draft.payload), draft)
+
+    def test_revision_ignores_hidden_proofs_and_unknown_paths_before_matching_content(self):
+        action = decomposition()
+        for child in action['children']:
+            child.update(proof_body='by trivial', proof='A useful lemma.')
+        base = expand(action, context(), uid('base'))
+        edits = [dict(path='/entries/first/proof', old='does not match', new=None),
+                 dict(path='/missing', old='', new=None),
+                 dict(path='/entries/parent/proof', old=None, new='by exact first')]
+        revised = revise(dict(mode='revise', rationale='Repair the failed parent.', edits=edits),
+                         base, context(), uid('revision'), compiled=('first',))
+        entries = {e['key']: e for e in load_submission(revised.submission)['entries']}
+        self.assertEqual(entries['first']['proof'], 'by trivial')
+        self.assertEqual(entries['parent']['proof'], 'by exact first')
+        self.assertNotIn('/entries/first/proof', dict(fragments(base, context(), compiled=('first',))))
+        ignored = revise(dict(mode='revise', rationale='Ignored paths.', edits=edits[:2]),
+                         base, context(), uid('ignored'), compiled=('first',))
+        self.assertIs(ignored, base)
 
     def test_revision_cannot_match_text_introduced_by_another_edit(self):
         draft = expand(decomposition(), context(), uid('base'))
@@ -642,9 +659,8 @@ class CandidateTests(unittest.TestCase):
         ctx = Context(context().selection_id, (Subject('lemma', 'child', 'goal', 'True'),))
         base = expand(proof(), ctx, uid('lemma'))
         self.assertNotIn('/entries/parent/statement', dict(fragments(base, ctx)))
-        with self.assertRaises(RevisionError):
-            revise(dict(mode='revise', rationale='Edit.', edits=[dict(path='/entries/parent/statement', old=None, new='False')]),
-                   base, ctx, uid('changed'))
+        self.assertIs(revise(dict(mode='revise', rationale='Edit.', edits=[
+            dict(path='/entries/parent/statement', old=None, new='False')]), base, ctx, uid('changed')), base)
 
     def test_candidate_target_order_imports_and_external_references(self):
         ctx = Context(context().selection_id, (Subject('target', 'a'), Subject('target', 'b')),
@@ -1233,6 +1249,22 @@ class StateTests(unittest.TestCase):
                 self.assertIn(detail, observation.messages[0])
                 self.assertIn('No edits were applied.', observation.messages[1])
 
+    def test_ignored_revision_keeps_base_without_mathematical_or_revision_charge(self):
+        artifacts, snapshot = fixture()
+        base = expand(proof(), snapshot.context, uid('base'))
+        snapshot = replace(snapshot, base=base, compiled=('parent',))
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        action = dict(mode='revise', rationale='An ignored proof edit.', edits=[
+            dict(path='/entries/parent/proof', old='missing text', new='by trivial')])
+        result = self.strategy.on_model(snapshot, self.policy, dispatched,
+            admitted(artifacts, dispatched, response(action)), artifacts, submission_id=uid('ignored'))
+        self.assertEqual(result.reason, 'revision_ignored')
+        self.assertEqual(result.work[0].operation, 'revise')
+        self.assertIsNone(result.draft)
+        self.assertIsNone(result.decision)
+        self.assertIsNone(result.revision_charge)
+        self.assertIsNone(result.memory)
+
     def test_unrelated_graph_commit_preserves_turn_but_owner_state_change_does_not(self):
         artifacts, snapshot = fixture()
         dispatched, _, _ = dispatch(snapshot, artifacts)
@@ -1267,6 +1299,30 @@ class StateTests(unittest.TestCase):
         self.assertEqual(result.decision.charge, 1)
         self.assertIsNone(result.graph)
         self.assertEqual(result.memory.observations[0].messages, ('Missing hypothesis.',))
+
+    def test_model_review_rejection_retains_findings_and_corrections(self):
+        finding = dict(category='mathematical', location='elevation: base case',
+                       issue='The diagonal numerator equals one.',
+                       suggested_revision='Use the identity matrix to start the induction.')
+        for rationale in ('The base case is incorrect.', 'R'*8000):
+            with self.subTest(long_rationale=len(rationale) > 100):
+                artifacts, snapshot = fixture(conditional=True)
+                dispatched, _, _ = dispatch(snapshot, artifacts)
+                raw = model_json(dict(child_declarations=[], verdict='reject', rationale=rationale,
+                                      findings=[finding], question='', urls=[]))
+                output = admitted(artifacts, dispatched, raw)
+                result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts)
+                observation, = result.memory.observations
+                self.assertEqual((observation.source, observation.status), ('review', 'rejection'))
+                self.assertEqual(observation.evidence, output.raw)
+                messages = '\n'.join(observation.messages)
+                for value in finding.values():
+                    self.assertIn(value, messages)
+                if len(rationale) < 100:
+                    self.assertIn(rationale, messages)
+                else:
+                    self.assertEqual(observation.omitted, 1)
+                self.assertEqual(result.decision.charge, 1)
 
     def test_helpers_resume_same_turn_without_new_helper_charge(self):
         artifacts, snapshot = fixture()

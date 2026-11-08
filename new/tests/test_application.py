@@ -92,6 +92,21 @@ class Compiler(Checker):
         return Advisory(value['operation'], result.output, receipt)
 
 
+class LemmaCompiler(Compiler):
+    """Distinct fixture identities for two supporting propositions."""
+    def prepare(self, operation, *args, **kwargs):
+        request = super().prepare(operation, *args, **kwargs)
+        connective = {'True ∧ True': 'And', 'True ∨ True': 'Or'}.get(kwargs.get('statement'))
+        if operation == 'binding' and connective:
+            from midas.checker import CompilerRequest
+            from tests.test_checker import name
+            value = request.decode()
+            truth = ['const', name('True'), []]
+            value['packet']['signature']['target'] = ['app', ['app', ['const', name(connective), []], truth], truth]
+            request = CompilerRequest(codec.encode(value))
+        return request
+
+
 class Contracts(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
@@ -180,6 +195,240 @@ class Contracts(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, result)
             self.assertEqual(run.writer.status_snapshot().accounting.turns, 1)
             self.assertEqual(Compiler.calls, ['binding', 'proof', 'integrate', 'audit'])
+
+    def test_revised_decomposition_reuses_verified_support_after_parent_failure(self):
+        from midas.application import records as r
+        from midas.controller import Accepted
+        from midas.domain import ProofState
+        from midas.policy import Failure
+        from tests.test_strategy import decomposition
+        self.app.checker_factory = LemmaCompiler
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        action = decomposition()
+        action['children'] = [
+            dict(name='support', statement='True ∧ True', proof_body='by exact ⟨True.intro, True.intro⟩',
+                 proof='', usefulness='', depends_on=[]),
+            dict(name='remaining', statement='True ∨ True', proof_body=None,
+                 proof='Use the left constructor.', usefulness='An independent supporting fact.', depends_on=[])]
+        action['proof_body'] = 'by exact support.1'
+        revised = dict(mode='revise', rationale='Repair the parent proof.', edits=[
+            dict(path='/entries/parent/proof', old=None, new='by exact support.2'),
+            dict(path='/entries/support/proof', old='not in the accepted proof', new='by trivial'),
+            dict(path='/entries/missing/proof', old=None, new='by trivial')])
+        accept = model_json(dict(child_declarations=[], verdict='accept', rationale='Valid decomposition.',
+                                 findings=[], question='', urls=[]))
+        with self.start(workflow='scripted', config=replace(Config(), prover=route, reviewer=route),
+                script=(('prover', response(action)), ('prover', response(revised)),
+                        ('reviewer', accept), ('prover', response(proof())))) as run:
+            owner = self.selected.identities[0].id
+            operation = run.controller.operations.proof
+            initial_support, proof_owners, failed = [], [], []
+            def admit(invocation, *args):
+                proof_owners.append(invocation.request.job.owner.obligation_id)
+                if invocation.request.job.owner.obligation_id == owner and not failed:
+                    saved = r.value(run.writer, 'application.submissions',
+                                    r.owner_state(run.writer, owner)[1].submission)
+                    support = run.writer.node(saved['rows']['support']['owner']).node
+                    self.assertEqual(support.state, ProofState.VERIFIED)
+                    initial_support.append(support.selected)
+                    failed.append(invocation.original_execution_id)
+                    return Accepted(failure=Failure.REJECTION)
+                return operation.admit(invocation, *args)
+            run.controller.operations = replace(run.controller.operations,
+                                                 proof=replace(operation, admit=admit))
+            # This fixture checks candidate admission, not conditional-proof
+            # replay. Stop once the repaired decomposition becomes active.
+            for _ in range(1000):
+                run.step()
+                if (run.writer.node(owner).node.selected is not None
+                        and r.owner_state(run.writer, owner)[1].submission is None):
+                    break
+                time.sleep(.001)
+            self.assertEqual(len(failed), 1)
+            selected, = initial_support
+            support = run.writer.node(selected.candidate.owner.obligation_id).node
+            self.assertEqual(support.selected, selected)
+            self.assertEqual(proof_owners.count(support.owner.obligation_id), 1)
+            parent = run.writer.node(owner).node
+            self.assertEqual(parent.state, ProofState.CONDITIONAL)
+            self.assertIn(support.owner, tuple(d.owner for d in parent.selected.candidate.dependencies))
+            submissions = [r.value(run.writer, rec.scope, rec.key)
+                           for rec in run.writer.records('application.submissions', limit=100)]
+            parents = [sub for sub in submissions if sub['owner'][0] == owner]
+            self.assertEqual(sorted(sub['phase'] for sub in parents), ['done', 'failed'])
+            revised_submission = next(sub for sub in parents if sub['phase'] == 'done')
+            from midas.application.candidates import entries
+            self.assertEqual(entries(run.writer, revised_submission)[2]['support']['proof'],
+                             action['children'][0]['proof_body'])
+            revised_row = revised_submission['rows']['support']
+            self.assertEqual(r.uncheck(revised_row['checked']), selected)
+            self.assertTrue(revised_row['done'])
+            run.writer.validate(force_artifacts=True)
+        with self.app.resume(self.root/'run') as run:
+            self.assertEqual(run.writer.node(owner).node.selected, parent.selected)
+            self.assertEqual(run.writer.node(support.owner.obligation_id).node.selected, selected)
+
+    def test_entry_failures_do_not_stop_other_checks_and_all_feedback_survives_resume(self):
+        from midas.application import records as r
+        from midas.controller import Accepted
+        from midas.domain import ProofState
+        from midas.policy import Failure
+        from midas.strategy import expand
+        from tests.test_strategy import decomposition
+
+        class ReportingCompiler(LemmaCompiler):
+            def execute(self, frozen, context):
+                result = super().execute(frozen, context)
+                binding = frozen.job.semantic_key.split(':')
+                if binding[0] == 'candidate' and binding[2] in ('binding', 'proof'):
+                    data = f'{binding[3]} {binding[2]} diagnostic'.encode()
+                    diagnostic = context.staging.write_bounded(data, max_bytes=8000)
+                    result = replace(result, diagnostics=diagnostic,
+                                     staged_artifacts=(*result.staged_artifacts, diagnostic))
+                return result
+
+        self.app.checker_factory = ReportingCompiler
+        action = decomposition()
+        action['children'] = [
+            dict(name='bad', statement='True ∧ True', proof_body='by exact failed_child_term',
+                 proof='', usefulness='', depends_on=[]),
+            dict(name='good', statement='True ∨ True', proof_body='by exact retained_successful_term',
+                 proof='', usefulness='', depends_on=[])]
+        action['proof_body'] = 'by exact parent_term'
+        cases = (('proof', {'bad': Failure.REJECTION, 'parent': Failure.REJECTION}),
+                 ('proof', {'bad': Failure.TIMEOUT}), ('binding', {'bad': Failure.REJECTION}))
+        for index, (stage, failures) in enumerate(cases):
+            with self.subTest(stage=stage, failures=failures):
+                name = f'entry-failures-{index}'
+                checked = []
+                with self.start(name=name) as run:
+                    owner = run.writer.node(self.selected.identities[0].id).node.owner
+                    draft = expand(action, run.workflow.snapshot(run.writer, owner).context, str(uuid4()))
+                    run.submit(draft.submission)
+                    operations = run.controller.operations
+                    def admission(operation, kind):
+                        def admit(invocation, *args):
+                            entry = r.value(run.writer, 'application.jobs', invocation.request.job.semantic_key)[2]
+                            checked.append((kind, entry))
+                            if kind == stage and entry in failures:
+                                return Accepted(failure=failures[entry])
+                            return operation.admit(invocation, *args)
+                        return replace(operation, admit=admit)
+                    run.controller.operations = replace(operations,
+                        binding=admission(operations.binding, 'binding'),
+                        proof=admission(operations.proof, 'proof'))
+                    self.assertNotEqual(self.finish(run).exit_code, 0)
+                    state = r.owner_state(run.writer, owner.obligation_id)[1]
+                    self.assertIsNone(state.submission)
+                    record, = run.writer.records('application.submissions', limit=10)
+                    saved = r.value(run.writer, 'application.submissions', record.key)
+                    self.assertEqual(saved['phase'], 'failed')
+                    self.assertEqual(set(saved['failures']), set(failures))
+                    self.assertIn(('proof', 'good'), checked)
+                    self.assertEqual(('proof', 'parent') in checked, stage == 'proof')
+                    self.assertEqual(saved['blocked'], ['parent'] if stage == 'binding' else [])
+                    self.assertEqual(run.writer.node(owner.obligation_id).node.state, ProofState.UNRESOLVED)
+                    good = run.writer.node(saved['rows']['good']['owner']).node
+                    self.assertEqual(good.state, ProofState.VERIFIED)
+                    snapshot = run.workflow.snapshot(run.writer, owner)
+                    display = run.workflow.display(run.writer, snapshot)
+                    text = b'\n'.join(s.text for s in display.sections)
+                    self.assertIn(b'Proof: compiled successfully.', text)
+                    self.assertNotIn(b'retained_successful_term', text)
+                    self.assertNotIn(b'/entries/good/proof', text)
+                    for entry in failures:
+                        self.assertIn(f'Entry: {entry}\n{stage}:'.encode(), text)
+                        self.assertIn(f'{entry} {stage} diagnostic'.encode(), text)
+                    if stage == 'binding':
+                        self.assertIn(b'blocked by an unavailable dependency; not compiled', text)
+                    elif 'parent' not in failures:
+                        self.assertNotIn(b'/entries/parent/proof', text)
+                        self.assertNotIn(b'by exact parent_term', text)
+                    run.writer.validate(force_artifacts=True)
+                with self.app.resume(self.root/name) as run:
+                    self.assertNotEqual(self.finish(run).exit_code, 0)
+                    restored = run.workflow.display(run.writer, run.workflow.snapshot(run.writer, owner))
+                    self.assertEqual(restored.sections, display.sections)
+
+    def test_checked_composition_can_advance_while_a_later_binding_waits(self):
+        from midas.application import candidates, records as r
+        from midas.domain import ProofState
+        from midas.strategy import expand
+        from tests.test_strategy import decomposition
+        self.app.checker_factory = LemmaCompiler
+        action = decomposition()
+        action['children'] = [
+            dict(name='first', statement='True ∧ True', proof_body='by trivial',
+                 proof='', usefulness='', depends_on=[]),
+            dict(name='second', statement='True ∨ True', proof_body='by trivial',
+                 proof='', usefulness='', depends_on=['first'])]
+        original = candidates.definition_bindings
+        def waiting(flow, reader, key, saved, entry, draft):
+            # A downstream binding may need an assembled definition certificate.
+            if entry['key'] == 'parent':
+                return None
+            return original(flow, reader, key, saved, entry, draft)
+        with self.start() as run, patch.object(candidates, 'definition_bindings', side_effect=waiting):
+            owner = run.writer.node(self.selected.identities[0].id).node.owner
+            draft = expand(action, run.workflow.snapshot(run.writer, owner).context, str(uuid4()))
+            run.submit(draft.submission)
+            for _ in range(1000):
+                run.step()
+                key = r.owner_state(run.writer, owner.obligation_id)[1].submission
+                saved = candidates.submission(run.writer, key)
+                if saved['rows'].get('second', {}).get('done'):
+                    break
+                time.sleep(.001)
+            self.assertNotIn('parent', saved['rows'])
+            row = saved['rows']['second']
+            self.assertTrue(row['done'])
+            self.assertEqual(run.writer.node(row['owner']).node.state, ProofState.CONDITIONAL)
+
+    def test_decomposition_rejection_feedback_reaches_prover_and_survives_resume(self):
+        from midas.application import records as r
+        from midas.prompt import prover
+        from midas.strategy import Memory
+        from tests.test_strategy import decomposition
+        self.app.checker_factory = LemmaCompiler
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        action = decomposition()
+        action['children'] = [dict(name='support', statement='True ∧ True', proof_body=None,
+            proof='An incorrect base-case calculation.', usefulness='Concludes the goal.', depends_on=[])]
+        action['proof_body'] = 'by exact support.1'
+        finding = dict(category='mathematical', location='support: base case',
+                       issue='The diagonal numerator equals one.',
+                       suggested_revision='Initialize the induction with the identity matrix.')
+        rationale = 'Correct the base case before continuing.'
+        rejection = model_json(dict(child_declarations=[], verdict='reject', rationale=rationale,
+                                    findings=[finding], question='', urls=[]))
+        captured = []
+        render = prover.render
+        def capture(display):
+            captured.append(display)
+            return render(display)
+        with patch('midas.prompt.prover.render', side_effect=capture), self.start(workflow='scripted',
+                config=replace(Config(), prover=route, reviewer=route),
+                script=(('prover', response(action)), ('reviewer', rejection),
+                        ('prover', response(proof())))) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            self.assertEqual(len(captured), 2)
+            feedback = b'\n'.join(s.text for s in captured[1].sections if s.kind == 'feedback')
+            self.assertIn(b'review: rejection', feedback)
+            for text in (*finding.values(), rationale):
+                self.assertIn(text.encode(), feedback)
+            candidate = next(s.text for s in captured[1].sections if s.name == 'current-draft')
+            self.assertIn(b'Proof: compiled successfully.', candidate)
+            self.assertNotIn(b'/entries/parent/proof', candidate)
+            self.assertNotIn(action['proof_body'].encode(), candidate)
+            self.assertIn(b'/children/support/proof', candidate)
+            owner = self.selected.identities[0].id
+            _, state = r.owner_state(run.writer, owner)
+            observation, = Memory.load(r.read(run.writer, state.memory)).observations
+            self.assertEqual((observation.source, observation.status), ('review', 'rejection'))
+            self.assertEqual(r.read(run.writer, observation.evidence), rejection)
+        with self.app.resume(self.root/'run') as run:
+            _, state = r.owner_state(run.writer, owner)
+            self.assertEqual(Memory.load(r.read(run.writer, state.memory)).observations, (observation,))
 
     def test_import_display_distinguishes_active_source_and_additional_imports(self):
         from midas.controller import artifact

@@ -182,8 +182,11 @@ class Strategy:
                 return self.on_stop_review(snapshot, response.value, evidence=admitted.raw)
             review = AdmittedReview(snapshot.attempt.candidate, admitted.receipt,
                                     response.value['verdict'] == 'accept')
+            findings = tuple('\n'.join((f"{f['category']} at {f['location']}",
+                f"Suggested revision: {f['suggested_revision']}", f"Issue: {f['issue']}"))
+                for f in response.value['findings'])
             result = self.on_review(snapshot, policy, review, evidence=admitted.raw,
-                                    diagnostics=(response.value['rationale'],))
+                                    diagnostics=(*findings, response.value['rationale']))
             selections = response.value.get('child_declarations', ()) if review.approved else ()
             return replace(result, child_declarations=tuple((row['child'], tuple(row['names'])) for row in selections))
         action, mode = response.value, response.mode
@@ -195,7 +198,8 @@ class Strategy:
                 if snapshot.base is None:
                     raise ValueError('Revision requires an exact dispatched base')
                 try:
-                    draft = revise(action, snapshot.base, snapshot.context, submission_id)
+                    draft = revise(action, snapshot.base, snapshot.context, submission_id,
+                                   compiled=snapshot.compiled)
                 except RevisionError as error:
                     observation = Observation.select('revision', 'revision_failed', admitted.raw,
                         (str(error)[:1800], 'No edits were applied. Use the exact current editable fragment '
@@ -205,10 +209,13 @@ class Strategy:
                                    memory=update_memory(snapshot.memory, observation=observation))
             else:
                 draft = expand(action, snapshot.context, submission_id)
-            decision = policy.candidate(draft.mode, snapshot.usage)
-            if not decision.allowed:
-                raise ValueError(decision.reason)
-            result = Changes(snapshot.version, (_work(snapshot, 'admit_candidate'),), draft=draft)
+            if draft is snapshot.base:
+                result = Changes(snapshot.version, _resume(snapshot, dispatch.turn), reason='revision_ignored')
+            else:
+                decision = policy.candidate(draft.mode, snapshot.usage)
+                if not decision.allowed:
+                    raise ValueError(decision.reason)
+                result = Changes(snapshot.version, (_work(snapshot, 'admit_candidate'),), draft=draft)
         elif mode == 'stop':
             if snapshot.attempt is not None or snapshot.stop_request is not None:
                 raise ValueError('Stop requires an idle node')

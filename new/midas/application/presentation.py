@@ -12,8 +12,10 @@ def exact(text):
     return fence + b'\n' + raw + b'\n' + fence
 
 
-def candidate(draft, context, *, selected=None, checked=None):
-    value, guidance, editable = candidate_material(draft, context)
+def candidate(draft, context, *, selected=None, checked=None, compiled=(), failures=None, blocked=()):
+    value, guidance, editable = candidate_material(draft, context, compiled=compiled)
+    compiled, blocked = set(compiled), set(blocked)
+    failures = failures or {}
     references = {(r.submission_id, r.key): r.label for r in context.references}
     references.update(((p.reference.submission_id, p.reference.key), p.reference.label)
                       for p in context.prerequisites)
@@ -49,7 +51,13 @@ def candidate(draft, context, *, selected=None, checked=None):
             path = prefix + '/' + field
             if not reviewing and path in paths:
                 lines.append(field.capitalize() + ' fragment: ' + path)
-        if entry['key'] in draft.unproved:
+        if not reviewing and entry['key'] in compiled:
+            lines.append('Proof: compiled successfully.')
+        elif not reviewing and entry['key'] in failures:
+            lines.append('Check: ' + failures[entry['key']]['stage'] + ' failed; see node feedback.')
+        elif not reviewing and entry['key'] in blocked:
+            lines.append('Check: blocked by an unavailable dependency; not compiled.')
+        elif entry['key'] in draft.unproved:
             lines.append('Proof: pending obligation; see child English guidance.')
         else:
             lines.append('Proof: supplied Lean term.')
@@ -85,7 +93,7 @@ def candidate(draft, context, *, selected=None, checked=None):
     return Section('candidate', 'current-draft', b'\n\n'.join(rows))
 
 
-def memory(value):
+def memory(value, *, include_checks=True):
     sections = []
     # Saved observations remain intact. A new check supersedes earlier check
     # and edit failures; a failed edit keeps the current check relevant.
@@ -101,6 +109,8 @@ def memory(value):
                 continue
             seen_revision = True
         if observation.status == 'protocol':
+            continue
+        if not include_checks and observation.source in ('checker', 'review'):
             continue
         observations.append(observation)
     observations.reverse()

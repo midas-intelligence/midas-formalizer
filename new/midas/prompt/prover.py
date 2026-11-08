@@ -76,6 +76,8 @@ Use only when enabled, for exact displayed fragment paths. Each edit is {path, o
 Copy the advertised path using the displayed child entry key. For guidance, new
 is replacement English text; "" clears it. Null old replaces the whole fragment;
 otherwise old must match exactly once in the displayed candidate.
+Compiled-successful Lean proofs are retained without editable proof fragments.
+Edits to paths that are not advertised are ignored; other edits still apply.
 All edits match the same candidate before replacement, regardless of edit order.
 Overlapping edits are rejected, including a whole-fragment replacement combined
 with another edit to that fragment. Guidance and Lean terms may be edited separately
