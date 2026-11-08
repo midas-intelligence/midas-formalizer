@@ -116,6 +116,150 @@ def main():
                 return result, admitted
 
             candidate = Candidate(str(uuid4()), owner, selected.environment_id, artifacts.save(b'by trivial'))
+
+            def probe_quotation_checks(label):
+                from midas.tools import expand_probe_bodies
+                from midas.checker.probe import repair_candidates
+                limits = ResourceLimits(120000, 4096, 1024**2, 64*1024**2, max_rec_depth=4096)
+                large = ('run_tac do\n'
+                    '  Lean.Elab.Tactic.evalTactic (← `(tactic|\n'
+                    '    have : True := by\n' +
+                    ''.join(f'      have h{i} : True := True.intro\n' for i in range(96)) +
+                    '      exact True.intro))\ntrivial')
+                hygiene = ('have h : Nat := 0\n'
+                    'run_tac do\n'
+                    '  Lean.Elab.Tactic.evalTactic (← `(tactic| have h : True := True.intro))\n'
+                    'have : Nat := h\ntrivial')
+                antiquotation = ('run_tac do\n'
+                    '  let proof ← `(True.intro)\n'
+                    '  Lean.Elab.Tactic.evalTactic (← `(tactic| exact $proof))')
+                splice = ('run_tac do\n'
+                    '  let steps ← #[`(tactic| fail), `(tactic| exact True.intro)].mapM id\n'
+                    '  Lean.Elab.Tactic.evalTactic (← `(tactic| first $[| $steps:tactic]*))')
+                located = ('run_tac do\n'
+                    '  Lean.Elab.Tactic.evalTactic (← `(tactic|\n'
+                    '    have α : False := True.intro))')
+                column = located.splitlines()[2].index('True.intro')
+                example = ('Lean.Elab.Tactic.evalTactic (← `(tactic| first |\n'
+                    '  have h : True := by\n    exact True.intro\n  clear h\n  skip))\n'
+                    'Lean.logInfo "Tactic block finished"')
+                def body_case(id, body):
+                    return ProbeCase(**dict(expand_probe_bodies([dict(code=body)])[0], id=id))
+                bullet = ('Lean.Elab.Tactic.evalTactic (← `(tactic| ·\n'
+                    '  have h : True := True.intro\n'
+                    '  exact h))')
+                semicolons = ('Lean.Elab.Tactic.evalTactic (← `(tactic| have h := True.intro; exact h))\n'
+                    'Lean.logInfo "After the closed quotation"')
+                bad_sequence = ('Lean.Elab.Tactic.evalTactic (← `(tactic|\n'
+                    '  skip\n'
+                    '  exact True.intro))')
+                missing_close = ('Lean.Elab.Tactic.evalTactic (← `(tactic| skip)\n'
+                    'Lean.logInfo "Missing outer parenthesis"')
+                bad_bullet = ('Lean.Elab.Tactic.evalTactic (← `(tactic| · skip\n'
+                    '  exact True.intro))')
+                repair_location = ('Lean.Elab.Tactic.evalTactic (← `(tactic|\n'
+                    '  skip\n  have α : False := True.intro))')
+                unrepairable = ('Lean.Elab.Tactic.evalTactic (← `(tactic|\n'
+                    '  skip\n  have h : True := ))')
+                combined = bad_sequence[:-1] + '\nLean.logInfo "Both repairs applied"'
+                def parsed_string(expression, prefix=''):
+                    return ('run_tac do\n' + prefix +
+                        '  let code := ' + expression + '\n'
+                        '  let stx ← match Lean.Parser.runParserCategory (← Lean.getEnv) `tactic code with\n'
+                        '    | .ok stx => pure stx\n'
+                        '    | .error error => throwError "{error}"\n'
+                        '  let evaluate := Lean.Elab.Tactic.evalTactic\n'
+                        '  evaluate stx')
+                def string_literal(text):
+                    return '"' + text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n') + '"'
+                failing_input = 'have α : False := True.intro'
+                string_cases = (
+                    ProbeCase('string-escaped', parsed_string(string_literal('first |\n  ' + failing_input))),
+                    ProbeCase('string-raw', parsed_string('r#"first |\n  ' + failing_input + '"#')),
+                    ProbeCase('string-unicode-escape', parsed_string('"have \\u03b1 : False := True.intro"')),
+                    ProbeCase('string-gap', parsed_string('"have α : False := \\\n    True.intro"')),
+                    ProbeCase('string-computed', parsed_string('"have α : " ++ "False := True.intro"')),
+                    ProbeCase('string-duplicate', parsed_string(string_literal(failing_input),
+                        '  let _other := ' + string_literal(failing_input) + '\n')),
+                    ProbeCase('string-messages', parsed_string(string_literal(
+                        'first |\n  run_tac Lean.logWarning "mapped"\n  ' + failing_input))),
+                )
+                batches = (
+                    (ProbeCase('large', large), ProbeCase('hygiene', hygiene),
+                     ProbeCase('antiquotation', antiquotation)),
+                    (ProbeCase('splice', splice), ProbeCase('location', located),
+                     ProbeCase('setup-location', 'trivial', setup=located)),
+                    (body_case('sequence', example), body_case('bullet', bullet),
+                     body_case('semicolons', semicolons)),
+                    (body_case('bad-sequence', bad_sequence), body_case('missing-close', missing_close),
+                     body_case('bad-bullet', bad_bullet)),
+                    (body_case('repair-location', repair_location), body_case('unrepairable', unrepairable),
+                     body_case('combined', combined)),
+                    string_cases[:3], string_cases[3:6], string_cases[6:],
+                )
+                for cases in batches:
+                    result, _ = check(label + ' probe quotations ' + cases[0].id,
+                        checker.prepare('probe', selected, 0, owner, cases), limits=limits)
+                    report = codec.load_record(artifacts.data[result.output.id], limit=65536)
+                    rows = codec.load_record(artifacts.data[report['evidence']['id']], limit=65536)
+                    outcomes = [codec.decode(artifacts.data[row['id']])['row'] for row in rows]
+                    assert len(outcomes) == len(cases), outcomes
+                    for case, row in zip(cases, outcomes):
+                        outcome = row['result']
+                        assert outcome['id'] == case.id, outcome
+                        if case.id in ('bad-sequence', 'missing-close', 'bad-bullet', 'repair-location', 'combined'):
+                            assert row['code'] in repair_candidates(case.code), row
+                        else:
+                            assert 'code' not in row, row
+                        if case.id.startswith('string-'):
+                            assert outcome['status'] == 'error', outcome
+                            if case.id in ('string-computed', 'string-duplicate'):
+                                source, = row['sources']
+                                assert source == dict(file=case.id + '.code.input1', code=failing_input), row
+                                expected = f"{source['file']}:1:{failing_input.index('True.intro')}: "
+                            else:
+                                assert 'sources' not in row, row
+                                line, column = next((i, line.index('True.intro'))
+                                    for i, line in enumerate(case.code.splitlines(), 1) if 'True.intro' in line)
+                                expected = f'{case.id}.code:{line}:{column}: '
+                            assert outcome['diagnostic'].startswith(expected), outcome
+                            if case.id == 'string-messages':
+                                message, = row['messages']
+                                assert message['text'] == 'mapped' and message['file'] == case.id + '.code', row
+                                shown = case.code.splitlines()[message['line'] - 1][message['column']:]
+                                assert shown.startswith('run_tac'), row
+                        elif case.id in ('location', 'setup-location'):
+                            stage = 'setup' if case.setup else 'code'
+                            assert outcome['status'] == 'error', outcome
+                            assert outcome['diagnostic'].startswith(f'{case.id}.{stage}:3:{column}: '), outcome
+                            assert 'True' in outcome['diagnostic'] and 'False' in outcome['diagnostic'], outcome
+                        elif case.id == 'repair-location':
+                            column = row['code'].splitlines()[3].index('True.intro')
+                            assert outcome['status'] == 'error', outcome
+                            assert outcome['diagnostic'].startswith(f'{case.id}.code:4:{column}: '), outcome
+                        elif case.id == 'unrepairable':
+                            assert outcome['status'] == 'error', outcome
+                            assert "expected ')'" in outcome['diagnostic'], outcome
+                        elif case.id in ('sequence', 'missing-close'):
+                            assert outcome['status'] == 'open', outcome
+                        else:
+                            assert outcome['status'] == 'closed_exploratory', outcome
+
+            if '--probe-only' in sys.argv:
+                probe_quotation_checks('retained')
+                checker.retained = False
+                probe_quotation_checks('fresh')
+                env = checker.environment
+                configured = Environment(env.directory, replace(env.manifest,
+                    settings=replace(env.manifest.settings, options=(('maxRecDepth', '4096'),))),
+                    env.toolchain, env.launcher)
+                checker = Checker(configured, '/tmp/midas-new-checker-runtime')
+                selected = replace(selected, environment_id=configured.id,
+                    identities=tuple(replace(i, environment_id=configured.id) for i in selected.identities))
+                probe_quotation_checks('interpreted')
+                print('probe quotation checks passed', flush=True)
+                return
+
             if '--native-only' in sys.argv:
                 from midas.checker import native
                 candidate = replace(candidate, source=artifacts.save(
@@ -223,10 +367,12 @@ def main():
 
             heartbeat_checks('retained')
             recursion_checks('retained')
+            probe_quotation_checks('retained')
             check('direct proof with native replay', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             checker.retained = False
             heartbeat_checks('fresh')
             recursion_checks('fresh')
+            probe_quotation_checks('fresh')
             check('explicit fresh proof with native replay', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             checker.retained = True
             for code in (b'by sorry', b'by exact False.elim (by trivial)',
@@ -317,6 +463,7 @@ def main():
             check('configured interpreted checker', checker.prepare('proof', selected, 0, candidate, artifacts), candidate=candidate)
             heartbeat_checks('interpreted')
             recursion_checks('interpreted')
+            probe_quotation_checks('interpreted')
     print('checker Lean checks passed', flush=True)
 
 

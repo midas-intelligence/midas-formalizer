@@ -310,8 +310,11 @@ def probe_summary(case, outcome):
     result = outcome['result']
     rows = [f"Probe {case['id']} ({case['operation']}): {result['status']} (advisory)"]
     for field in ('setup', 'code', 'expected'):
-        if case.get(field):
-            rows.append(f"{case['id']}.{field} (line 1 below):\n"+case[field])
+        text = outcome.get('code', case.get(field)) if field == 'code' else case.get(field)
+        if text:
+            rows.append(f"{case['id']}.{field} (line 1 below):\n"+text)
+    for source in outcome.get('sources', ()):
+        rows.append(f"{source['file']} (line 1 below):\n"+source['code'])
     if 'diagnostic' in result:
         rows.append('Diagnostic:\n'+_probe_excerpt(result['diagnostic']))
     for message in outcome['messages']:

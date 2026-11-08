@@ -317,7 +317,14 @@ def probe_for(value, case, digest):
     codec.fields(value, ('format', 'request', 'row'))
     if value['format'] != 'midas-probe-case-v1' or value['request'] != digest:
         raise ValueError('Probe result differs from request')
-    codec.fields(value['row'], ('result', 'messages'))
+    codec.fields(value['row'], ('result', 'messages',
+                               *(key for key in ('code', 'sources') if key in value['row'])))
+    if 'code' in value['row']:
+        from .probe import repair_candidates
+        code = value['row']['code']
+        if (case['operation'] != 'tactic' or type(code) is not str
+                or code not in repair_candidates(case['code'])):
+            raise ValueError('Probe code differs from allowed syntax repairs')
     result = value['row']['result']
     if result.get('id') != case['id'] or result.get('operation') != case['operation']:
         raise ValueError('Probe case differs from request')
@@ -347,4 +354,18 @@ def probe_for(value, case, digest):
                 or any(type(message[k]) is not str for k in ('file', 'text'))
                 or any(type(message[k]) is not int or message[k] < 0 for k in ('line', 'column'))):
             raise ValueError('Invalid probe diagnostic message')
+    if 'sources' in value['row']:
+        sources = value['row']['sources']
+        if type(sources) is not list or not sources:
+            raise ValueError('Invalid probe input sources')
+        seen = set()
+        for source in sources:
+            codec.fields(source, ('file', 'code'))
+            label = source['file']
+            parent, _, number = label.rpartition('.input') if type(label) is str else ('', '', '')
+            if (type(label) is not str or type(source['code']) is not str or label in seen
+                    or parent not in (case['id'] + '.' + stage for stage in ('setup', 'code', 'expected'))
+                    or not number.isascii() or not number.isdigit() or number.startswith('0')):
+                raise ValueError('Invalid probe input source')
+            seen.add(label)
     return value

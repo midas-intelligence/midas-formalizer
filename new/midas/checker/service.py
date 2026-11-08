@@ -268,11 +268,14 @@ class Checker:
                 self._audit_result(result, packet, digest)
                 accepted = save(codec.encode(result), limits.evidence_bytes)
             elif operation == 'probe':
+                from .probe import repair_candidates
                 rows = []
                 cases = packet.pop('cases')
                 for case in cases:
                     context.emit('probe_started:' + case['id'])
-                    result, _ = run('probe:' + case['id'], dict(packet, mode='probe', case=case))
+                    prepared = dict(case, repairs=list(repair_candidates(case['code']))
+                                    if case['operation'] == 'tactic' else [])
+                    result, _ = run('probe:' + case['id'], dict(packet, mode='probe', case=prepared))
                     ev.probe_for(result, case, digest)
                     reference = save(codec.encode(result), limits.evidence_bytes)
                     context.emit('probe_completed:' + case['id'], (reference,))
