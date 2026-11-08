@@ -108,7 +108,7 @@ def fuse(request, reports):
     stages = search_stages(request)
     if type(reports) is not tuple or len(reports) != len(stages):
         raise ValueError('Retrieval requires every exact search stage outcome')
-    scores, provenance, excluded, errors = {}, {}, {}, []
+    scores, query_weights, provenance, excluded, errors = {}, {}, {}, {}, []
     allowed = _allowed(request.forbidden)
     for stage, report in zip(stages, reports):
         instance(report, SearchResult)
@@ -116,12 +116,19 @@ def fuse(request, reports):
         if report.error is not None:
             errors.append((stage.ordinal, report.error))
             continue
+        best = query_weights.setdefault(stage.action.query, {})
         names = dict.fromkeys(name for row in report.records for name in row.names)
         for rank, name in enumerate(names):
             if not allowed(name):
                 excluded[name] = None
                 continue
-            scores[name] = scores.get(name, 0) + _RANK_WEIGHT[rank]
+            # Each query contributes its best backend rank, once. Keep every
+            # occurrence below for provenance, including the weaker backend.
+            weight = _RANK_WEIGHT[rank]
+            previous = best.get(name, 0)
+            if weight > previous:
+                best[name] = weight
+                scores[name] = scores.get(name, 0) + weight - previous
             provenance.setdefault(name, []).append((stage.ordinal, rank))
     ranked = tuple(sorted(scores, key=lambda n: (-scores[n], n)))
     action = request.action

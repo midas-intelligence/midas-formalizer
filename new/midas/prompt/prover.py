@@ -114,10 +114,10 @@ retrieve for missing definitions or theorem interfaces; imports do not display t
 - Queries require backends. For names-only retrieval, set queries and backends
   to []. If queries and names are both empty, retrieval is disabled for this node
   and proof work continues without a lookup.
-- frozen-source accepts prefixes within the displayed roots: a root, file,
-  directory or module. [] searches all frozen roots; project searches frozen
-  project sources when offered. Exact file/module prefixes receive ranking preference
-  within the selected scope. leanexplore requires prefixes: [].
+- frozen-source searches all frozen sources. Its prefixes are soft path preferences:
+  roots, files, directories or modules; closer path matches rank higher. Missing
+  paths are valid hints. [] gives no path preference; project favors frozen project
+  sources when offered. leanexplore requires prefixes: [].
 Results:
 - Discovery hits are merged and ranked; the top twelve names are checked. Explicit
   names appear as standalone lookups; checked hits appear in numbered search results.

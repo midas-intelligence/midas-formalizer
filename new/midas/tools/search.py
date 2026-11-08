@@ -12,9 +12,13 @@ from ..domain.records import identifier, items
 from ..domain.wire import decode
 from .protocol import (ENDPOINT, REQUEST_BYTES, SEARCH_BYTES, Search, Stage, pack, read,
                        source_selector, strings, text)
-from .bm25 import DETAILS, FILE_BYTES, TOTAL, corpus_key, database, ranked, stopped
+from .bm25 import DETAILS, FILE_BYTES, TOTAL, corpus_key, database, documents, ranked, stopped
+from .bm25_score import token_text
 
 HOSTED_BYTES = 5_000_000
+_HOSTED_FIELD_CHARS = 16_384
+_HOSTED_STOP = frozenset(('a', 'an', 'as', 'at', 'be', 'by', 'if', 'in', 'is', 'it',
+                          'of', 'on', 'or', 'so', 'to', 'find', 'lemma', 'theorem', 'prove', 'show'))
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,35 +70,29 @@ class SourceIndex:
         object.__setattr__(self, 'search_key', corpus_key(self))
 
     def resolve(self, prefixes):
+        """Normalize path hints and known module aliases, without requiring existence."""
         resolved = []
         for raw in prefixes:
-            selector = source_selector(raw)
-            forms = [selector]
-            if not selector.endswith('.lean'):
-                forms.append(selector + '.lean')
-            stem = selector.removesuffix('.lean')
-            if '.' in stem:
-                module = source_selector(stem.replace('.', '/'))
-                forms.extend([module + '.lean'] if selector.endswith('.lean') else [module, module + '.lean'])
-            matches = []
-            for form in dict.fromkeys(forms):
-                candidates = [form] if form.split('/')[0] in self.roots else [r+'/'+form for r in self.roots]
-                matches = [p for p in candidates if p in self.paths]
-                if len(matches) > 1:
-                    raise ValueError('Ambiguous source selector: ' + raw + '; qualify its source root')
-                if matches:
-                    break
-            if not matches:
-                # Module names can live below a package's srcDir rather than
-                # immediately below the frozen root.
-                entries = self.by_module.get(stem.replace('/', '.'), ())
-                if len(entries) > 1:
-                    raise ValueError('Ambiguous source selector: ' + raw + '; qualify its source root')
-                if not entries:
-                    raise ValueError('Source selector absent from frozen inputs: ' + raw)
-                matches = [entries[0].path]
-            if matches[0] not in resolved:
-                resolved.append(matches[0])
+            stem = source_selector(raw).removesuffix('.lean')
+            hint = stem if stem.split('/')[0] in self.roots else source_selector(stem.replace('.', '/'))
+            if hint.split('/')[0] in self.roots:
+                matches = [hint]
+            else:
+                # Known modules may live below a package's srcDir. Otherwise
+                # qualify using the top namespace, independent of descendants.
+                entries = self.by_module.get(hint.replace('/', '.'), ())
+                matches = [entry.path for entry in entries]
+                aliased_roots = {entry.path.split('/')[0] for entry in entries}
+                top = hint.split('/')[0]
+                roots = [r for r in self.roots if r+'/'+top in self.paths or r+'/'+top+'.lean' in self.by_path]
+                if not roots and not matches:
+                    roots = self.roots
+                matches.extend(r+'/'+hint for r in roots if r not in aliased_roots)
+            for match in matches:
+                if match+'.lean' in self.by_path:
+                    match += '.lean'
+                if match not in resolved:
+                    resolved.append(match)
         return tuple(resolved)
 
 
@@ -175,7 +173,7 @@ def source_search(stage, index, reader, cancel, deadline, *, cache_directory=Non
     if index is None or index.environment_id != stage.scope.environment_id:
         raise ValueError('Source index differs from search environment')
     action = stage.action
-    prefixes = index.resolve(action.backend.prefixes) if action.backend.prefixes else index.roots
+    prefixes = index.resolve(action.backend.prefixes)
     if context is None:
         with database(index, reader, cancel, deadline, cache_directory, prepared_path=prepared_path) as db:
             hits = ranked(db, action.query, prefixes, limit=action.limit,
@@ -201,6 +199,40 @@ class _NoRedirect(HTTPRedirectHandler):
         raise ValueError('Hosted search redirects are unsupported')
 
 
+def _hosted_terms(value):
+    return set(token_text(value).split()) - _HOSTED_STOP
+
+
+def _hosted_relevant(query_terms, row):
+    """Reject multi-term hints supported only by an isolated keyword collision.
+
+    LeanExplore exposes no relevance scores. Its informalization can supply
+    query wording absent from the Lean name (e.g. forward difference/fwdDiff).
+    Sparse or oversized metadata cannot establish a mismatch; retain those hints.
+    """
+    if len(query_terms) < 2:
+        return True
+    found = query_terms & _hosted_terms(row['name'])
+    described = incomplete = False
+    for key in ('informalization', 'docstring', 'source_text'):
+        if len(found) >= 2:
+            return True
+        value = row.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        described = True
+        incomplete |= len(value) > _HOSTED_FIELD_CHARS
+        value = value[:_HOSTED_FIELD_CHARS]
+        if key == 'source_text':
+            # Proof references and neighbouring commands are not evidence that
+            # this declaration addresses the query. Reuse the source index's
+            # lexical header extraction without loading any frozen sources.
+            declaration = next(documents(value), None)
+            value = declaration[-1] if declaration is not None else ''
+        found.update(query_terms & _hosted_terms(value))
+    return len(found) >= 2 or not described or incomplete
+
+
 def hosted(action, cancel, deadline, *, opener=None):
     if not isinstance(action, Search) or action.backend.name != 'leanexplore':
         raise ValueError('Expected hosted search')
@@ -222,11 +254,14 @@ def hosted(action, cancel, deadline, *, opener=None):
     value = decode(bytes(data), limit=HOSTED_BYTES)
     if type(value) is not dict or type(value.get('results')) is not list:
         raise ValueError('Invalid hosted search envelope')
-    result = []
+    result, query_terms = [], _hosted_terms(action.query)
     for row in value['results'][:action.limit]:
+        stopped(cancel, deadline)
         if type(row) is not dict:
             raise ValueError('Invalid hosted declaration')
-        result.append(Match((row.get('name'),)))
+        match = Match((row.get('name'),))
+        if _hosted_relevant(query_terms, row):
+            result.append(match)
     stopped(cancel, deadline)
     return tuple(result)
 

@@ -1301,8 +1301,8 @@ modules plus `__init__.py`:
 | --- | --- |
 | `tools/protocol.py` | Immutable scoped actions, binary requests, stable identities, bounded stage descriptions and probe-body expansion |
 | `tools/search.py` | Frozen source selectors, bounded search projection, hosted LeanExplore transport, worker execution and search receipt admission |
-| `tools/bm25.py` | Lexical declaration extraction, frozen-corpus SQLite FTS5 cache and file-scope preference |
-| `tools/bm25_score.py` | Compound token fields, identifier budgets and scoped span scoring |
+| `tools/bm25.py` | Lexical declaration extraction, frozen-corpus SQLite FTS5 cache and path preference |
+| `tools/bm25_score.py` | Compound token fields, identifier budgets and span scoring |
 | `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
 | `tools/research.py` | Mathematical guidance validation and advisory evidence |
 | `tools/web_search.py` | Reference validation, web-call bounds, recorded action IDs/types, quote bounds and advisory provenance |
@@ -1358,9 +1358,12 @@ preserving the stage key, scope and initial helper charge. Remaining stages and
 `continue_retrieval` reserve execution capacity without another helper charge.
 
 Search hints are fused using exact integer reciprocal-rank weights over the bounded
-rank domain. Explicit names retain priority. Local queries that are valid Lean
-identifiers are sent directly to checked lookup ahead of BM25 names, within the
-12-name selection bound, so generated declarations can appear first even when
+rank domain. Each declaration contributes once per query, using its best rank
+across backends: `sum_query max_backend 1/(60 + zero_based_rank)`. Contributions
+from distinct queries add; all backend occurrences remain in provenance. Missing
+or failed backends add no weight. Explicit names retain priority. Local queries
+that are valid Lean identifiers are sent directly to checked lookup ahead of BM25
+names, within the 12-name selection bound, so generated declarations can appear first even when
 absent from the lexical index. Equivalent query/result spellings are deduplicated.
 Forbidden names and their equivalent escaped spellings, internal Midas names and
 invalid identifiers cannot become lookup jobs.
@@ -1392,6 +1395,13 @@ bytes again. A missing, outdated or corrupt package index falls back to the
 application cache, keyed by the same corpus key. Files, postings and ranges use
 SQLite/raw bytes, without JSON corpus serialization or a GPU/model dependency.
 
+Source prefixes are soft ranking hints; all frozen text matches remain eligible.
+Paths need not exist, and files and directories use the same component-prefix
+comparison after removing `.lean`. For example, the nonexistent hint
+`mathlib/Mathlib/RingTheory/HilbertPolynomial` favors declarations below
+`mathlib/Mathlib/RingTheory`, including `Polynomial/HilbertPoly.lean`.
+No filesystem probes or repeated searches are needed.
+
 The index stores nine fields: lexical tokens, adjacent pairs, and adjacent triples,
 each with name/documentation/header weights 3/2/1. Tokens retain words and ASCII
 camel-case components, without stemming. Underscores and camel boundaries form
@@ -1405,21 +1415,51 @@ span receives `k/N` of its identifier's score budget. Uncovered components recei
 identifier receives 50% of its mean lexical score; ordinary words retain full
 weight. This prevents longer identifiers from gaining weight simply by producing
 more compound tokens. All postings are considered before the best 100 candidates
-are selected, with scope filtering and corpus-wide IDF. Exact identifier
+are selected, with path preferences and corpus-wide IDF. Exact identifier
 queries (including `_root_.` spellings) use checked lookup instead of an index
 name match; checked declarations appear within their search results, with unindexed
-generated declarations shown under that query's heading. Scores
-get a 1.5× ranking multiplier only for an explicitly selected file/module;
-directories grant no bonus. Ties preserve candidate ordering. Evidence retains
-the compound/component score before the file multiplier.
+generated declarations shown under that query's heading. For each normalized path
+hint, let `h` be its component count, `s` the number of shared leading components,
+and `b = min(2, h - 1)`. Its multiplier is
+`1 + 0.5 * max(0, s - b) / (h - b)`. This removes the source root and top-level
+namespace (such as `mathlib/Mathlib`) from longer hints' similarity scores; short
+root/namespace hints still favor their whole subtree. Each fully matched hint
+gives 1.5×, regardless of its depth. Broad ancestor hints are discarded when a
+more specific descendant hint is present. The best remaining hint wins; bonuses
+do not stack. With no hints the multiplier is 1. Path weighting happens before
+the top-100 cutoff, allowing otherwise omitted candidates to be promoted. Ties
+use document order. Evidence retains the content score before weighting.
 
 The production scorer uses sparse compound replacements and native SQL fallback.
 Component ID filters scan term postings instead of repeatedly seeking common
-terms. Temporary scope/scoring tables are confined to a query savepoint and are
+terms. Path weights use indexed file paths, with one temporary row per matching
+file. Uniform weights retain native FTS rank selection. Temporary path/scoring
+tables are confined to a query savepoint and are
 removed on success or cancellation without committing a caller's transaction.
 The `midas-bm25-source-v3-compound-spans` format changes the corpus key, so older
 three-field package indexes fall back to a freshly built disposable cache; newly
 prepared packages include the compound index. No package environment ID changes.
+
+Soft path preferences were validated on 2026-11-08 with 256 offline tests. Replaying
+the eight archived requests from node `obl_7b6a9f0e…` recovered all three searches
+that failed on a missing directory. Coverage of its 74 probe-inspected declarations
+changed from 31 to 29 compared with the earlier corrected-path replay; the same five
+were selected for checking overall. Weighted ranking took 6.6–56.8 ms across six
+queries; the simplicial-nerve query took 6.6 ms versus 2.28 seconds for v2's source
+scan. Replay details and timing boundaries are in `.local/search-soft-paths-20261108`.
+
+The relative-depth refinement replays the 200-query benchmark with its archived
+scopes (145 narrower than all Mathlib), plus 11 additional scope cases. Against
+the initial multiplier, known-target success improves from 115 to 116 at top 12
+and from 124 to 127 at top 50 across the original 138 scored queries. The later
+direct/specialization audit improves from 105 to 106 and 113 to 115 across 122
+queries. No top-12/top-50 successes are lost, though one first-place result moves
+to third. A 100% cap worsens early ranking, so the cap remains 50%. All 1,466
+production verification runs match the independent sweep; 257 offline tests pass.
+Warm median/p95 ranking time changes from 37.6/163.2 ms to 34.8/161.5 ms. Results,
+scope provenance, split definitions and timing boundaries are saved under
+`.local/search-path-multiplier-20261108`; these measure finite known-target
+recovery, rather than exhaustive relevance or proof success.
 
 Enabled in the production local-search path on 2026-11-03. Validation included
 93 offline tests, nine-field equality for all 249,981 frozen corpus entries, and
@@ -1445,15 +1485,26 @@ Extraction is lexical, not an elaborated declaration inventory: macro-generated
 names are not inferred, and anonymous instances appear as source hints. Thus the
 frozen-source corpus differs from the standalone LeanExplore experiment corpus.
 
-Dotted modules, paths and stems resolve against the frozen index; ambiguous
-selectors require a qualified root. Frozen project sources support both
+Dotted modules, paths and stems normalize against the frozen index; unqualified
+hints can favor multiple roots. Known module aliases retain their resolved source
+paths, including package source directories. Frozen project sources support both
 lookup excerpts and discovery. `project` is advertised alongside dependency roots;
-selectors can use `project`, explicit project paths, or unambiguous file/module
-names such as `ChallengeDeps` and `Submission.Helpers`. Exact directories take
-priority over file stems, so `Submission` selects `project/Submission/` when that
-directory exists; use `Submission.lean` for the source file itself. Hosted search
+hints can use `project`, explicit project paths, or file/module names such as
+`ChallengeDeps` and `Submission.Helpers`. `Submission` and `Submission.lean` both
+favor that source file and descendants of the same path stem. Hosted search
 uses the fixed LeanExplore endpoint, rejects redirects and bounds input at 5 MB, with cancellation/deadline
-checks between reads. `SearchService` implements the existing reserved-worker
+checks between reads and results. Before fusion, multi-term hosted queries reject
+hints supported by fewer than two distinct query tokens in the declaration name,
+documentation, informalization or source header. The shared tokenizer recognizes
+camel-case components; repeated words and common query boilerplate do not add
+support. Proof bodies and neighbouring declarations are excluded. Descriptions
+and headers are checked in bounded fields of at most 16,384 characters. Single-term
+queries and hints with missing or oversized metadata remain unfiltered. This is a
+lexical noise filter, so semantic relevance expressed entirely through different
+words can still be missed; LeanExplore does not expose relevance scores.
+Filtering preserves provider order and runs in both direct and isolated hosted
+execution, without extra requests or source-index reads.
+`SearchService` implements the existing reserved-worker
 callback and authenticates saved request/result bytes and receipt seals.
 
 `admit_checked` consumes a checker-admitted advisory handoff and its exact compiler
@@ -1557,7 +1608,7 @@ context limits can still be exceeded because token density is only estimated.
 Artifact publication and orphaned staging recovery remain storage responsibilities.
 
 BM25 integration validation: offline contracts cover direct identifier lookup
-priority, scope-before-candidate selection, file-only preference, raw score
+priority, path weighting before candidate selection, missing-path hints, raw score
 roundtrips, cache reuse/invalidation and concurrent builds, 12/50 delivery, paged
 overflow, and tail lookup. A real Lean 4.35.0-rc3 application check passed search,
 generated recursor lookup appearing first, checked tail source lookup, proof

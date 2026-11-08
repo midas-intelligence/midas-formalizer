@@ -34,9 +34,9 @@ class SearchTests(unittest.TestCase):
         return execute_search(stage, self.artifacts, self.cancel, self.deadline,
                               index=index, cache_directory=self.cache, prepared_path=prepared_path)
 
-    def isolated_search(self, index, query, *, memory_mib=128, prepared_path=None, cancellation=None):
+    def isolated_search(self, index, query, *, prefixes=(), memory_mib=128, prepared_path=None, cancellation=None):
         from midas.application.preparation import operate
-        stage = Stage('3'*64, 0, self.scope, Search(query, Backend('frozen-source')))
+        stage = Stage('3'*64, 0, self.scope, Search(query, Backend('frozen-source', prefixes)))
         return operate(lambda context: execute_search(stage, self.artifacts, context.cancellation,
             context.deadline, index=index, cache_directory=self.cache, prepared_path=prepared_path,
             context=context), limits=ResourceLimits(10000, memory_mib, 1024**2, 1024**2),
@@ -118,6 +118,30 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(hosted_search(stage, context), (Match(('Nat.add',)),))
             self.assertEqual(hosted.call_args.args[0], stage.action)
 
+    def test_hosted_worker_filters_before_returning_name_hints(self):
+        import io
+        from types import SimpleNamespace
+        from midas.executor import Outcome
+        from midas.tools.search_process import _main
+        context = SimpleNamespace(workspace=self.cache, check=lambda: None)
+        def run_search(request):
+            output = io.BytesIO()
+            with patch('sys.stdout', SimpleNamespace(buffer=output)):
+                _main(request)
+            return SimpleNamespace(outcome=Outcome.COMPLETED, stdout=SimpleNamespace(data=output.getvalue()))
+        context.run_search = run_search
+        payload = br'''{"results":[
+            {"name":"fwdDiff_iter_eq_sum_shift", "informalization":"Iterated forward difference."},
+            {"name":"Multiset.choose", "informalization":"Unique selection from a multiset."}
+        ]}'''
+        stage = Stage('3'*64, 0, self.scope,
+                      Search('polynomial forward difference choose', Backend('leanexplore')))
+        with patch('midas.tools.search.build_opener') as opener:
+            opener.return_value.open.side_effect = lambda *a, **k: io.BytesIO(payload)
+            result = execute_search(stage, self.artifacts, self.cancel, self.deadline, context=context)
+        self.assertEqual(result.records, (Match(('fwdDiff_iter_eq_sum_shift',)),))
+        self.assertEqual(SearchResult.load(result.payload), result)
+
     def test_tokenization_preserves_multiplicity_without_stemming(self):
         self.assertEqual(bm25.token_text('Functor.map_comp compactManifold functors objects α α the'),
             'functor map comp compactmanifold compact manifold functors objects α α')
@@ -160,23 +184,27 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(self.isolated_search(index, 'orderIsoFin'),
                          self.search(index, 'orderIsoFin', prefixes=()))
 
-    def test_compound_scope_filters_before_top100_with_global_scores(self):
+    def test_compound_path_preference_promotes_before_top100_with_global_scores(self):
         from tests.benchmark_search_uncovered import uncovered_ranked
         index = self.index(('lib/Mathlib/A.lean',
                             ''.join(f'def other{i}_order_iso_fin : Nat := 0\n' for i in range(150))),
-                           ('lib/Mathlib/B.lean', 'def target_order_iso : Fin 4 := by sorry\n'))
+                           ('lib/Mathlib/B.lean', 'def target_order_iso_fin : Nat := 0\n'))
+        self.assertNotIn(('target_order_iso_fin',), [r.names for r in self.search(index, 'order_iso_fin').records])
         result = self.search(index, 'order_iso_fin', ('Mathlib/B.lean',))
-        self.assertEqual([r.names for r in result.records], [('target_order_iso',)])
+        self.assertEqual(result.records[0].names, ('target_order_iso_fin',))
+        self.assertEqual(len(result.records), 50)
         with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
-            doc, = db.execute("SELECT id FROM documents WHERE name='target_order_iso'").fetchone()
-            expected = -dict(uncovered_ranked(db, 'order_iso_fin', .5, limit=1000))[doc]
+            doc, = db.execute("SELECT id FROM documents WHERE name='target_order_iso_fin'").fetchone()
+            reference = uncovered_ranked(db, 'order_iso_fin', .5, limit=1000)
+            self.assertGreater([id for id, score in reference].index(doc), 100)
+            expected = -dict(reference)[doc]
             self.assertAlmostEqual(result.records[0].score, expected, places=13)
 
     def test_compound_cancellation_cleans_query_tables_and_preserves_outer_transaction(self):
         index = self.index(('lib/Mathlib/A.lean', 'def order_iso : Fin 4 := by sorry\n'))
         with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
             def cancel_in_scoring():
-                if db.execute("SELECT 1 FROM sqlite_temp_master WHERE name='scope_docs'").fetchone():
+                if db.execute("SELECT 1 FROM sqlite_temp_master WHERE name='path_weights'").fetchone():
                     raise TimeoutError('cancelled compound scoring')
             with self.assertRaisesRegex(TimeoutError, 'compound scoring'):
                 bm25.ranked(db, 'order_iso_fin', ('lib/Mathlib',), check=cancel_in_scoring)
@@ -204,13 +232,13 @@ class SearchTests(unittest.TestCase):
         with sqlite3.connect(self.cache/(index.search_key+'.sqlite')) as db:
             self.assertEqual(len(db.execute('PRAGMA table_info(terms)').fetchall()), 9)
 
-    def test_sqlite_interrupt_during_scope_write_preserves_error_and_cleans_state(self):
+    def test_sqlite_interrupt_during_path_weight_write_preserves_error_and_cleans_state(self):
         import sqlite3
         index = self.index(('lib/Mathlib/A.lean', 'def order_iso : Fin 4 := by sorry\n'))
         with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
             state = {'armed': False, 'fired': False}
             def authorize(action, table, *args):
-                if action == sqlite3.SQLITE_INSERT and table == 'scope_docs':
+                if action == sqlite3.SQLITE_INSERT and table == 'path_weights':
                     state['armed'] = True
                 return sqlite3.SQLITE_OK
             def interrupt():
@@ -295,7 +323,7 @@ class SearchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Match(('N.bad',), 'lib/Mathlib/A.lean', 1, 1, '', score)
 
-    def test_file_preference_is_soft_canonical_and_directory_does_not_boost(self):
+    def test_file_preference_is_soft_canonical_and_hints_do_not_stack(self):
         index = self.index(('lib/Mathlib/A.lean', 'def apple : Nat := 0\n'),
                           ('lib/Mathlib/B.lean', 'def berry : Nat := 0\n'))
         baseline = self.search(index, 'Nat')
@@ -306,6 +334,9 @@ class SearchTests(unittest.TestCase):
             self.assertEqual([r.score for r in result.records], [r.score for r in baseline.records])
         duplicate_scope = self.search(index, 'Nat', ('Mathlib', 'lib/Mathlib'))
         self.assertEqual(duplicate_scope.records, baseline.records)
+        once = self.search(index, 'Nat', ('Mathlib/B.lean',))
+        repeated = self.search(index, 'Nat', ('Mathlib/B', 'Mathlib.B', 'lib/Mathlib', 'Mathlib/B.lean'))
+        self.assertEqual(once.records, repeated.records)
 
     def test_empty_prefixes_search_all_frozen_roots(self):
         index = self.index(('lib/Mathlib/A.lean', 'def apple : Nat := 0\n'),
@@ -314,18 +345,59 @@ class SearchTests(unittest.TestCase):
         self.assertEqual({r.names for r in result.records}, {('apple',), ('berry',)})
         self.assertEqual(result.records, self.search(index, 'Nat', index.roots).records)
         self.assertEqual([r.names for r in self.search(index, 'Nat', ('project',)).records],
-                         [('berry',)])
+                         [('berry',), ('apple',)])
 
-    def test_scope_filters_before_candidates_and_uses_global_idf(self):
+    def test_disjoint_hints_receive_equal_full_preference_at_different_depths(self):
+        index = self.index(('lib/Mathlib/A/Basic.lean', 'def apple : Nat := 0\n'),
+                          ('lib/Mathlib/B/C/Basic.lean', 'def berry : Nat := 0\n'),
+                          ('lib/Mathlib/Other.lean', 'def other : Nat := 0\n'))
+        hints = ('Mathlib/A', 'Mathlib/B/C/Basic.lean')
+        expected = self.search(index, 'Nat', hints)
+        self.assertEqual([r.names for r in expected.records], [('apple',), ('berry',), ('other',)])
+        self.assertEqual(self.search(index, 'Nat', ('Mathlib', 'Mathlib/B', *hints)).records, expected.records)
+        self.assertEqual(self.isolated_search(index, 'Nat', prefixes=hints).records, expected.records)
+
+    def test_file_and_directory_hints_have_the_same_meaning_across_roots(self):
+        index = self.index(('lib/Package/Basic.lean', 'def apple : Nat := 0\n'),
+                          ('project/Package/Basic/More.lean', 'def berry : Nat := 0\n'),
+                          ('project/Package/Other.lean', 'def other : Nat := 0\n'))
+        expected = self.search(index, 'Nat', ('Package.Basic',))
+        self.assertEqual([r.names for r in expected.records], [('apple',), ('berry',), ('other',)])
+        for selector in ('Package/Basic', 'Package/Basic.lean'):
+            self.assertEqual(self.search(index, 'Nat', (selector,)).records, expected.records)
+
+    def test_missing_hints_rank_shared_components_in_direct_and_isolated_execution(self):
+        index = self.index(
+            ('other/Main.lean', 'def other : Nat := 0\n'),
+            ('mathlib/Archive/Other.lean', 'def archive : Nat := 0\n'),
+            ('mathlib/Mathlib/Analysis/Other.lean', 'def outside : Nat := 0\n'),
+            ('mathlib/Mathlib/RingTheory/Polynomial/HilbertPoly.lean',
+             'def hilbert : Nat := 0\n'),
+            ('mathlib/Mathlib/Data/Nat/ChooseExtra.lean', 'def nearby : Nat := 0\n'),
+            ('mathlib/Mathlib/Data/Nat/Choose/Basic.lean', 'def choose : Nat := 0\n'))
+        requested = ('mathlib/Mathlib/RingTheory/HilbertPolynomial', 'mathlib/Mathlib/Data/Nat/Choose')
+        expected = self.search(index, 'Nat', requested)
+        self.assertEqual([row.names[0] for row in expected.records],
+                         ['choose', 'nearby', 'hilbert', 'other', 'archive', 'outside'])
+        self.assertEqual(self.search(index, 'Nat', (requested[0]+'.lean', requested[1]+'.lean')).records, expected.records)
+        self.assertEqual(self.isolated_search(index, 'Nat', prefixes=requested).records, expected.records)
+        baseline = self.search(index, 'Nat', ())
+        self.assertEqual({row.names: row.score for row in expected.records},
+                         {row.names: row.score for row in baseline.records})
+        self.assertEqual(self.search(index, 'Nat', ('Unknown/Absent.lean',)).records, baseline.records)
+
+    def test_path_preference_promotes_before_candidates_and_uses_global_idf(self):
         index = self.index(('lib/Mathlib/A.lean', ''.join(f'def needle{i} : Nat := 0\n' for i in range(150))),
                           ('lib/Mathlib/B.lean', 'def target : Nat := 0\n'))
         result = self.search(index, 'Nat', ('Mathlib/B.lean',))
-        self.assertEqual([r.names for r in result.records], [('target',)])
+        self.assertNotIn(('target',), [r.names for r in self.search(index, 'Nat').records])
+        self.assertEqual(result.records[0].names, ('target',))
+        self.assertEqual(len(result.records), 50)
         with bm25.database(index, self.artifacts, self.cancel, self.deadline, self.cache) as db:
             expected = -db.execute("SELECT bm25(terms,3,2,1) FROM terms WHERE terms MATCH 'nat' "
                 "AND rowid=(SELECT id FROM documents WHERE name='target')").fetchone()[0]
         self.assertEqual(result.records[0].score, expected)
-        self.assertFalse(self.search(index, 'needle0', ('Mathlib/B.lean',)).records)
+        self.assertEqual(self.search(index, 'needle0', ('Mathlib/B.lean',)).records[0].names, ('needle0',))
 
     def test_file_bonus_can_promote_from_below_fifty_and_remains_soft(self):
         index = self.index(('lib/Mathlib/A.lean', ''.join(f'def a{i:02} : Nat := 0\n' for i in range(70))),
@@ -346,6 +418,14 @@ class SearchTests(unittest.TestCase):
         index = replace(index, entries=(replace(index.entries[0], module='Support'), index.entries[1]))
         self.assertEqual(index.resolve(('Support',)), ('dep/src/Support.lean',))
         self.assertEqual(self.search(index, 'Nat', ('dep', 'Support')).records[0].names, ('berry',))
+
+    def test_exact_module_below_srcdir_retains_its_path_preference(self):
+        index = self.index(('dep/src/Package/Support.lean', 'def berry : Nat := 0\n'),
+                           ('dep/Package/Other.lean', 'def apple : Nat := 0\n'))
+        index = replace(index, entries=(replace(index.entries[0], module='Package.Support'), index.entries[1]))
+        self.assertEqual(index.resolve(('Package.Support',)), ('dep/src/Package/Support.lean',))
+        self.assertEqual([row.names for row in self.search(index, 'Nat', ('Package.Support',)).records],
+                         [('berry',), ('apple',)])
 
     def test_weighted_fields_prefer_name_then_documentation_then_header(self):
         index = self.index(('lib/Mathlib/X.lean',

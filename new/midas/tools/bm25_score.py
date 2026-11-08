@@ -1,4 +1,4 @@
-"""Identifier budgets and non-overlapping compound BM25 over scoped postings."""
+"""Identifier budgets and non-overlapping compound BM25 with path preferences."""
 from collections import defaultdict
 from fractions import Fraction
 import re
@@ -9,7 +9,13 @@ _IDENTIFIER = re.compile(r'[^\W]+')
 _CAMEL = re.compile(r'([a-z])([A-Z])')
 RANK = 'bm25(3,2,1,3,2,1,3,2,1)'
 _SCORE = 'bm25(terms,3,2,1,3,2,1,3,2,1)'
-_SCOPE = ' AND EXISTS (SELECT 1 FROM scope_docs s WHERE s.id=terms.rowid)'
+
+
+def _order(score, rowid, preferred):
+    # Qualify the outer row ID: both joined tables also have a SQLite rowid.
+    weight = ('*coalesce((SELECT p.weight FROM documents d JOIN path_weights p '
+              'ON p.id=d.file WHERE d.id='+rowid+'),1.0)') if preferred else ''
+    return score+weight+','+rowid
 
 
 def token_text(value):
@@ -67,7 +73,7 @@ def _expression(tokens):
     return ' OR '.join('"'+token.replace('"', '""')+'"' for token in tokens)
 
 
-def _ordinary(db, units, limit):
+def _ordinary(db, units, limit, preferred):
     weights = defaultdict(Fraction)
     for lexical, _, _ in units:
         for token in lexical:
@@ -80,27 +86,29 @@ def _ordinary(db, units, limit):
     if len(buckets) == 1:
         weight, tokens = next(iter(buckets.items()))
         return [(doc, score*float(weight)) for doc, score in db.execute(
-            'SELECT rowid,rank FROM terms WHERE terms MATCH ? AND rank MATCH ?'+_SCOPE+
-            ' ORDER BY rank LIMIT ?', (_expression(tokens), RANK, limit))]
+            'SELECT rowid,rank FROM terms WHERE terms MATCH ? AND rank MATCH ? ORDER BY '+
+            (_order('rank', 'terms.rowid', True) if preferred else 'rank')+
+            ' LIMIT ?', (_expression(tokens), RANK, limit))]
     parts, params = [], []
     for weight, tokens in buckets.items():
-        parts.append('SELECT rowid,'+_SCORE+'*? AS score FROM terms WHERE terms MATCH ?'+_SCOPE)
+        parts.append('SELECT rowid,'+_SCORE+'*? AS score FROM terms WHERE terms MATCH ?')
         params.extend((float(weight), _expression(tokens)))
     return db.execute('WITH scores AS MATERIALIZED ('+' UNION ALL '.join(parts)+') '
-        'SELECT rowid,sum(score) AS total FROM scores GROUP BY rowid ORDER BY total,rowid LIMIT ?',
+        'SELECT rowid,sum(score) AS total FROM scores GROUP BY rowid ORDER BY '+
+        _order('total', 'scores.rowid', preferred)+' LIMIT ?',
         (*params, limit)).fetchall()
 
 
-def candidates(db, query, limit, check):
-    """Score every in-scope posting before top-N, with full-corpus BM25 IDF.
+def candidates(db, query, limit, check, *, preferred=False):
+    """Apply path weights before top-N, retaining full-corpus BM25 scores/IDF.
 
-    The caller owns a savepoint enclosing scope_docs and span_replacements.
-    Checked exact-name lookup and file preference belong to the surrounding flow.
+    The caller owns a savepoint enclosing path_weights and span_replacements.
+    Returned scores exclude the path multiplier; ordering includes it.
     """
     check()
     units = list(_groups(query))
     if not any(locations for _, _, locations in units):
-        return _ordinary(db, units, limit)
+        return _ordinary(db, units, limit, preferred)
     replacements = []
     for unit, (lexical, parts, locations) in enumerate(units):
         check()
@@ -112,7 +120,7 @@ def candidates(db, query, limit, check):
             check()
             if token not in postings:
                 postings[token] = db.execute('SELECT rowid,'+_SCORE+
-                    ' FROM terms WHERE terms MATCH ?'+_SCOPE, (_expression([token]),)).fetchall()
+                    ' FROM terms WHERE terms MATCH ?', (_expression([token]),)).fetchall()
             mask = ((1 << (end-start))-1) << start
             for count, (doc, score) in enumerate(postings[token]):
                 if count % 500 == 0:
@@ -151,7 +159,7 @@ def candidates(db, query, limit, check):
     for unit, (lexical, _, locations) in enumerate(units):
         if lexical:
             sql_parts.append('SELECT rowid,? AS unit,'+_SCORE+
-                             '*? AS score FROM terms WHERE terms MATCH ?'+_SCOPE)
+                             '*? AS score FROM terms WHERE terms MATCH ?')
             params.extend((unit, (.5 if locations else 1.)/len(lexical), _expression(lexical)))
     lexical_sql = ' UNION ALL '.join(sql_parts) or 'SELECT 0 AS rowid,0 AS unit,0. AS score WHERE 0'
     sql = ('WITH lexical AS MATERIALIZED ('+lexical_sql+'), '
@@ -159,5 +167,5 @@ def candidates(db, query, limit, check):
            '(SELECT 1 FROM span_replacements r WHERE r.document=l.rowid AND r.unit=l.unit) '
            'UNION ALL SELECT document,score FROM span_replacements) '
            'SELECT rowid,sum(score) AS total FROM scores GROUP BY rowid '
-           'HAVING total<0 ORDER BY total,rowid LIMIT ?')
+           'HAVING total<0 ORDER BY '+_order('total', 'scores.rowid', preferred)+' LIMIT ?')
     return db.execute(sql, (*params, limit)).fetchall()

@@ -151,18 +151,46 @@ class ToolsTests(unittest.TestCase):
             plan_helper(self.request(Retrieve(('q',), backends=(Backend('leanexplore'),))),
                         self.policy, OwnerUsage(retrieval=10), self.services)
 
-    def test_source_selector_resolution_and_ambiguity(self):
+    def test_source_hint_resolution_and_multiple_roots(self):
         index = self.index((('mathlib/Mathlib/Topology/Basic.lean', b''), ('lean/Init/Prelude.lean', b'')))
         for selector in ('Mathlib.Topology.Basic', 'Mathlib/Topology/Basic', 'mathlib/Mathlib/Topology/Basic.lean'):
             self.assertEqual(index.resolve((selector,)), ('mathlib/Mathlib/Topology/Basic.lean',))
         self.assertEqual(index.resolve(('Mathlib',)), ('mathlib/Mathlib',))
         other = SourceIndex(index.environment_id, index.entries+(SourceEntry('project/Mathlib/Topology/Basic.lean', self.a.save(b'')),))
-        with self.assertRaisesRegex(ValueError, 'Ambiguous'):
-            other.resolve(('Mathlib.Topology.Basic',))
+        self.assertEqual(other.resolve(('Mathlib.Topology.Basic',)),
+                         ('mathlib/Mathlib/Topology/Basic.lean', 'project/Mathlib/Topology/Basic.lean'))
         self.assertEqual(other.resolve(('project/Mathlib/Topology/Basic',)), ('project/Mathlib/Topology/Basic.lean',))
-        for value in ('/Mathlib', 'checker/Foo', 'Mathlib/../secret', 'missing'):
+        for value in ('/Mathlib', 'checker/Foo', 'runtime.Foo', 'Mathlib/../secret'):
             with self.assertRaises(ValueError):
                 index.resolve((value,))
+
+    def test_missing_source_hints_retain_their_full_depth(self):
+        index = self.index((('mathlib/Mathlib/RingTheory/Polynomial/HilbertPoly.lean', b''),
+                            ('mathlib/Mathlib/Data/Nat/Choose/Basic.lean', b'')))
+        for selector in ('mathlib/Mathlib/RingTheory/HilbertPolynomial',
+                         'mathlib/Mathlib/RingTheory/HilbertPolynomial.lean',
+                         'Mathlib/RingTheory/HilbertPolynomial',
+                         'Mathlib.RingTheory.HilbertPolynomial'):
+            with self.subTest(selector=selector):
+                self.assertEqual(index.resolve((selector,)), ('mathlib/Mathlib/RingTheory/HilbertPolynomial',))
+        self.assertEqual(index.resolve(('mathlib/Missing.lean',)), ('mathlib/Missing',))
+        self.assertEqual(index.resolve(('mathlib/Mathlib/RingTheory/Missing',
+                                        'mathlib/Mathlib/RingTheory/Other.lean',
+                                        'Mathlib/Data/Nat/Choose')),
+                         ('mathlib/Mathlib/RingTheory/Missing', 'mathlib/Mathlib/RingTheory/Other',
+                          'mathlib/Mathlib/Data/Nat/Choose'))
+
+    def test_missing_hints_keep_root_qualification_and_allow_multiple_roots(self):
+        index = self.index((('mathlib/Mathlib/Topology/Basic.lean', b''),
+                            ('project/Mathlib/Topology/Other.lean', b'')))
+        self.assertEqual(index.resolve(('Mathlib/Topology/Missing.lean',)),
+                         ('mathlib/Mathlib/Topology/Missing', 'project/Mathlib/Topology/Missing'))
+        self.assertEqual(index.resolve(('project/Mathlib/Topology/Missing.lean',)),
+                         ('project/Mathlib/Topology/Missing',))
+        self.assertEqual(index.resolve(('project/Mathlib/RingTheory/Missing.lean',)),
+                         ('project/Mathlib/RingTheory/Missing',))
+        self.assertEqual(index.resolve(('unknown/Mathlib/Topology/Missing.lean',)),
+                         ('mathlib/unknown/Mathlib/Topology/Missing', 'project/unknown/Mathlib/Topology/Missing'))
 
     def test_source_search_content_names_and_bounded_excerpts(self):
         source = b'namespace Topology\n-- compact sets\ntheorem compact_set : True := by trivial\nend Topology\n'
@@ -259,18 +287,79 @@ class ToolsTests(unittest.TestCase):
             continue_retrieval(plan, reports, replace(self.scope, owner=replace(self.scope.owner, generation=1)))
 
     def test_fusion_matches_fraction_order_and_deduplicates_complete_stages(self):
-        request = self.request(Retrieve(('a query', 'b query', 'c query'), backends=(Backend('frozen-source', ('Mathlib',)),)))
-        stages = search_stages(request)
-        reports, expected = [], {}
-        for stage in stages:
-            names = tuple(f'N.x{(n*7+stage.ordinal)%1000}' for n in range(1000))
-            rows = tuple(Match(names[i:i+20], 'lib/X.lean', i+1, i+1, 'source', 1) for i in range(0,1000,20))
-            reports.append(SearchResult(stage.sha256, rows))
-            for rank, name in enumerate(names):
-                expected[name] = expected.get(name, Fraction())+Fraction(1,60+rank)
-        fusion = fuse(request, tuple(reports))
-        self.assertEqual(fusion.ranked, tuple(sorted(expected, key=lambda n: (-expected[n], n))))
-        self.assertEqual(fusion.selected, tuple(sorted(expected, key=lambda n: (-expected[n], n)))[:12])
+        local = Backend('frozen-source', ('Mathlib',))
+        for backends in ((local,), (local, Backend('leanexplore'))):
+            with self.subTest(backends=backends):
+                request = self.request(Retrieve(('a query', 'b query', 'c query'), backends=backends))
+                reports, per_query = [], {}
+                for stage in search_stages(request):
+                    count = 1000 if stage.action.backend.name == 'frozen-source' else 50
+                    names = tuple(f'N.x{(n*7+stage.ordinal)%1000}' for n in range(count))
+                    rows = (tuple(Match(names[i:i+20], 'lib/X.lean', i+1, i+1, 'source', 1)
+                                  for i in range(0, count, 20)) if count == 1000
+                            else tuple(Match((name,)) for name in names))
+                    reports.append(SearchResult(stage.sha256, rows))
+                    weights = per_query.setdefault(stage.action.query, {})
+                    for rank, name in enumerate(names):
+                        weights[name] = max(weights.get(name, Fraction()), Fraction(1, 60+rank))
+                expected = {}
+                for weights in per_query.values():
+                    for name, weight in weights.items():
+                        expected[name] = expected.get(name, Fraction()) + weight
+                ranked = tuple(sorted(expected, key=lambda n: (-expected[n], n)))
+                fusion = fuse(request, tuple(reports))
+                self.assertEqual(fusion.ranked, ranked)
+                self.assertEqual(fusion.selected, ranked[:12])
+
+    def test_fusion_same_query_backend_overlap_does_not_bury_first_hit(self):
+        target = 'Polynomial.fwdDiff_iter_degree_add_one_eq_zero'
+        peers = tuple(f'N.peer{i:02}' for i in range(20))
+        local, hosted = Backend('frozen-source'), Backend('leanexplore')
+        for backends in ((local, hosted), (hosted, local)):
+            with self.subTest(backends=backends):
+                plan = self.plan(Retrieve(('polynomial forward difference choose',), backends=backends))
+                reports = []
+                for stage in plan.stages:
+                    if stage.action.backend == local:
+                        # Duplicate rows in a backend must not add weight or move ranks.
+                        rows = tuple(Match((name,), 'lib/X.lean', 1, 1) for name in (peers[0], *peers))
+                    else:
+                        rows = tuple(Match((name,)) for name in (target, *peers))
+                    reports.append(SearchResult(stage.sha256, rows))
+                following, fusion = continue_retrieval(plan, tuple(reports), self.scope)
+                self.assertEqual(fusion.ranked, (peers[0], target, *peers[1:]))
+                self.assertEqual(following.stages[0].action.names, fusion.ranked[:12])
+                self.assertEqual(dict(fusion.provenance)[peers[5]], tuple(
+                    (s.ordinal, 5 if s.action.backend == local else 6) for s in plan.stages))
+                self.assertEqual(dict(fusion.provenance)[target], tuple(
+                    (s.ordinal, 0) for s in plan.stages if s.action.backend == hosted))
+
+    def test_fusion_distinct_queries_add_even_when_only_one_backend_finds_the_name(self):
+        request = self.request(Retrieve(('first query', 'second query'),
+            backends=(Backend('frozen-source'), Backend('leanexplore'))))
+        names = (('A.first', 'Z.across_queries', 'N.within_one_query'),
+                 ('B.first', 'N.within_one_query'),
+                 ('C.first', 'Z.across_queries'), ('D.first',))
+        reports = tuple(SearchResult(stage.sha256, tuple(
+            Match((name,), 'lib/X.lean', 1, 1) if stage.action.backend.name == 'frozen-source'
+            else Match((name,)) for name in found)) for stage, found in zip(search_stages(request), names))
+        fusion = fuse(request, reports)
+        self.assertEqual(fusion.ranked,
+            ('Z.across_queries', 'A.first', 'B.first', 'C.first', 'D.first', 'N.within_one_query'))
+        self.assertEqual(dict(fusion.provenance)['Z.across_queries'], ((0, 1), (2, 1)))
+        self.assertEqual(dict(fusion.provenance)['N.within_one_query'], ((0, 2), (1, 1)))
+
+    def test_fusion_missing_backend_preserves_the_other_query_contribution(self):
+        request = self.request(Retrieve(('search terms',),
+            backends=(Backend('frozen-source'), Backend('leanexplore'))))
+        local, hosted = search_stages(request)
+        for error in (None, 'search failure'):
+            with self.subTest(error=error):
+                fusion = fuse(request, (SearchResult(local.sha256, error=error),
+                    SearchResult(hosted.sha256, (Match(('N.found',)),))))
+                self.assertEqual(fusion.selected, ('N.found',))
+                self.assertEqual(fusion.provenance, (('N.found', ((1, 0),)),))
+                self.assertEqual(fusion.errors, ((0, error),) if error else ())
 
     def test_local_identifier_query_requests_lookup_without_indexed_name(self):
         for error in (None, 'search failure'):

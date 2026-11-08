@@ -261,35 +261,57 @@ def database(index, reader, cancel, deadline, cache_directory=None, *, prepared_
         db.close()
 
 
-def _ranked(db, query, prefixes, limit, check):
-    """Filter before top-100, preserving corpus IDF; then apply file preference.
+def _path_weights(prefixes):
+    """Relative-depth bonuses, ignoring the source root and top-level namespace."""
+    hints = tuple(dict.fromkeys(p.removesuffix('.lean') for p in prefixes))
+    weights = {}
+    for hint in hints:
+        # All text matches are eligible already. A broad parent hint must not
+        # give its full bonus to every sibling of a more specific requested path.
+        if any(other.startswith(hint+'/') for other in hints):
+            continue
+        parts = hint.split('/')
+        # Short root/namespace hints still prefer their entire subtree. Longer
+        # hints give no bonus merely for sharing e.g. mathlib/Mathlib.
+        base = min(2, len(parts)-1)
+        for depth in range(base+1, len(parts)+1):
+            prefix = '/'.join(parts[:depth])
+            weight = 1+.5*(depth-base)/(len(parts)-base)
+            weights[prefix] = max(weights.get(prefix, 1.), weight)
+    return weights
 
-    Scores returned to evidence use normalized compound/component budgets.
-    The 1.5 multiplier affects ordering only. Stable ties preserve FTS order.
-    """
-    db.execute('CREATE TEMP TABLE scope_docs(id INTEGER PRIMARY KEY, preferred INTEGER NOT NULL)')
-    for prefix in prefixes:
-        db.execute('''INSERT INTO scope_docs
-            SELECT d.id, f.path=? FROM files f JOIN documents d ON d.file=f.id
-            WHERE f.path=? OR (f.path>=? AND f.path<?)
-            ON CONFLICT(id) DO UPDATE SET preferred=max(preferred,excluded.preferred)''',
-            (prefix, prefix, prefix+'/', prefix+'0'))
-    candidates = [(doc, -score) for doc, score in
-                  bm25_score.candidates(db, query.strip(), CANDIDATES, check)]
-    hits = []
-    for id, score in candidates:
-        row = db.execute('''SELECT d.name,f.path,d.line,d.start_line,d.start,d.end,s.preferred
-            FROM documents d JOIN files f ON f.id=d.file JOIN scope_docs s ON s.id=d.id
-            WHERE d.id=?''', (id,)).fetchone()
-        hits.append((score, row))
-    hits.sort(key=lambda h: -h[0]*(1.5 if h[1][-1] else 1))
+
+def _path_preferences(db, prefixes, check):
+    """Apply the best hint's bonus once per file, using indexed path ranges."""
+    db.execute('CREATE TEMP TABLE path_weights(id INTEGER PRIMARY KEY, weight REAL NOT NULL)')
+    weights = _path_weights(prefixes)
+    if not weights:
+        return False
+    # Highest weight first: INSERT OR IGNORE keeps the best hint. Different-depth
+    # hints can each give the full 50%, so depth alone does not order the bonuses.
+    for prefix, weight in sorted(weights.items(), key=lambda item: -item[1]):
+        check()
+        db.execute('''INSERT OR IGNORE INTO path_weights
+            SELECT id,? FROM files WHERE path=? OR (path>=? AND path<?)''',
+            (weight, prefix+'.lean', prefix+'/', prefix+'0'))
+    count, low, high = db.execute('SELECT count(*),min(weight),max(weight) FROM path_weights').fetchone()
+    # Keep native FTS rank selection if every file receives the same multiplier.
+    return bool(count) and (low != high or count != db.execute('SELECT count(*) FROM files').fetchone()[0])
+
+
+def _ranked(db, query, prefixes, limit, check):
+    """Rank all text matches with a soft path boost before candidate selection."""
+    preferred = _path_preferences(db, prefixes, check)
+    candidates = bm25_score.candidates(db, query.strip(), CANDIDATES, check, preferred=preferred)
     seen, result = set(), []
-    for score, row in hits:
+    for id, score in candidates:
+        row = db.execute('''SELECT d.name,f.path,d.line,d.start_line,d.start,d.end
+            FROM documents d JOIN files f ON f.id=d.file WHERE d.id=?''', (id,)).fetchone()
         name = row[0]
         if name and name in seen:
             continue
         seen.add(name)
-        result.append((*row[:-1], score))
+        result.append((*row, -score))
         if len(result) == limit:
             break
     return result
