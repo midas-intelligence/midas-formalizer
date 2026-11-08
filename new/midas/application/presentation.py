@@ -51,6 +51,8 @@ def candidate(draft, context, *, selected=None, checked=None):
                 lines.append(field.capitalize() + ' fragment: ' + path)
         if entry['key'] in draft.unproved:
             lines.append('Proof: pending obligation; see child English guidance.')
+        else:
+            lines.append('Proof: supplied Lean term.')
         dependencies = []
         for dep in entry['dependencies']:
             ref = dep['entry']

@@ -73,7 +73,7 @@ def main():
         assert app.verify(root/'export', package=package).verified
         print('standalone bundle recheck passed', flush=True)
         decompose = dict(action, mode='decomposition', proof_body='by have witness := h; trivial',
-            children=[dict(name='h', statement='1 = 1', proof='Use reflexivity.', usefulness='Test dependency.', depends_on=[])])
+            children=[dict(name='h', statement='1 = 1', proof_body=None, proof='Use reflexivity.', usefulness='Test dependency.', depends_on=[])])
         review = b'{"verdict":"accept","rationale":"The glue uses its stated premise.","findings":[],"question":"","urls":[],"child_declarations":[]}'
         suggested_review = model_json(dict(verdict='accept', rationale='Use reflexivity.', findings=[],
             question='', urls=[], child_declarations=[dict(child='h',
@@ -213,8 +213,8 @@ def main():
         from midas.provider import ModelOutput, Route
         from midas.domain import Usage
         splitting = dict(decompose, proof_body='by have witness := second; trivial', children=[
-            dict(name='first', statement='1 = 1', proof='Use reflexivity.', usefulness='Premise.', depends_on=[]),
-            dict(name='second', statement='2 = 2', proof='Use reflexivity.', usefulness='Conclusion.', depends_on=['first'])])
+            dict(name='first', statement='1 = 1', proof_body=None, proof='Use reflexivity.', usefulness='Premise.', depends_on=[]),
+            dict(name='second', statement='2 = 2', proof_body=None, proof='Use reflexivity.', usefulness='Conclusion.', depends_on=['first'])])
         alias_probe = dict(mode='probe', rationale='Check the inherited alias.', cases=[dict(
             code='Lean.Elab.Tactic.evalTactic (← `(tactic| have witness := first; rfl))')])
         second_calls = []

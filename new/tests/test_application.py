@@ -1449,7 +1449,7 @@ class Contracts(unittest.TestCase):
                         queries=['addition'], backends=[dict(name='leanexplore', prefixes=[])])
         probe = dict(mode='probe', rationale='Inspect internals.', cases=[dict(code='pure ()')])
         action = decomposition()
-        action['children'] = [dict(name='support', statement='True ∧ True', proof='Use Nat.add and the constructor.',
+        action['children'] = [dict(name='support', statement='True ∧ True', proof_body=None, proof='Use Nat.add and the constructor.',
                                    usefulness='Provides the required fact.', depends_on=[])]
         action['proof_body'] = 'by exact support'
         invalid = dict(mode='recall', rationale='Read missing evidence.', result_id='missing-result')

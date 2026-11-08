@@ -6,7 +6,12 @@ from .protocol import DomainError, Prompt, array, display, obj, schema_bytes, st
 DECOMPOSITION_INSTRUCTIONS = b"""Review the exact displayed candidate and selected review entry independently.
 Check required outputs, conditional composition, ordered child statements, English
 proof plans, named definitions, and each child's checked dependency interfaces.
-Acceptance permits pursuing the decomposition; it does not certify its children.
+Children may instead supply Lean terms, which are checked directly without model
+review. Assess the proposed work for English-guided children; do not require an
+English plan for a supplied Lean term. Acceptance permits pursuing the English
+obligations; it does not certify them or discharge a Lean term's dependencies.
+Child guidance may be empty. Assess such children from their statements and
+allowed premises; do not reject solely because English guidance is missing.
 Do not rewrite the candidate or require completed child proofs.
 The selected entry identifies the exact composition being reviewed. Read it with
 the ordered candidate entries, explicit dependency map and child English guidance.
@@ -28,8 +33,8 @@ for acceptance and actionable findings for rejection.
 Read the rationale as claims to check against the actual statements and method.
 Consider review, context, duplicated work and assembly overhead. Routine setup or
 renaming the parent is insufficient; limited parallelism alone is not a flaw.
-Every child needs a credible mathematical route using its explicit hypotheses,
-definitions and selected dependencies. Missing library foundations can be developed
+Every English-guided child needs a credible mathematical route using its explicit
+hypotheses, definitions and selected dependencies. Missing library foundations can be developed
 recursively; a difficult next layer need not already have a completed Lean proof.
 For constructions check operation contracts, assembly invariants, and correctness
 and quantitative bounds for the same objects, including composition overhead.
@@ -135,4 +140,4 @@ def render(snapshot):
         raise DomainError('Reviewer requires an exact subject and candidate')
     sections = display(snapshot, ('source', 'definitions', 'subject', 'interfaces', 'evidence',
                        'history', 'candidate', 'memory', 'feedback', 'capabilities', 'question'))
-    return Prompt('reviewer', 'reviewer-v5', 'review-verdict-v2', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('reviewer', 'reviewer-v7', 'review-verdict-v2', INSTRUCTIONS, SCHEMA, sections)

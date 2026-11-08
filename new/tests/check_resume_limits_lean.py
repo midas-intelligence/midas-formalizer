@@ -27,7 +27,7 @@ def main():
         config = replace(base, prover=route, reviewer=route,
                          export=replace(base.export, timeout_ms=1))
         decompose = dict(proof(), mode='decomposition', proof_body='by have witness := h; trivial',
-            children=[dict(name='h', statement='1 = 1', proof='Use reflexivity.',
+            children=[dict(name='h', statement='1 = 1', proof_body=None, proof='Use reflexivity.',
                            usefulness='Proves the target.', depends_on=[])])
         review = b'{"verdict":"accept","rationale":"The glue uses its premise.","findings":[],"question":"","urls":[],"child_declarations":[]}'
         with app.start(root/'run', package=package, selection=selected, config=config,

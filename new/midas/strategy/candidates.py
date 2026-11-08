@@ -9,7 +9,9 @@ from ..domain.records import identifier, items, uuid
 from .memory import pack, text
 
 MAX_BYTES = 8 * 1024**2
+DRAFT_METADATA_BYTES = 256 * 1024
 EMPTY = pack([])
+EMPTY_DRAFT_METADATA = pack([[], [], []])
 
 
 class RevisionError(ValueError):
@@ -149,6 +151,7 @@ class Draft:
     guidance: bytes
     unproved: tuple[str, ...] = ()
     closed_definitions: tuple[str, ...] = ()
+    review_entries: tuple[str, ...] = ()
     id: str = field(init=False)
     mode: str = field(init=False)
 
@@ -169,7 +172,7 @@ class Draft:
             fields(row, ('proof', 'usefulness'))
             if key not in keys:
                 raise ValueError('Guidance names an unknown entry')
-            text(row['proof'])
+            text(row['proof'], empty=True)
             text(row['usefulness'], empty=True)
         items(self.unproved, str)
         if len(set(self.unproved)) != len(self.unproved) or not set(self.unproved) <= keys:
@@ -177,15 +180,20 @@ class Draft:
         for e in value['entries']:
             if e['key'] in self.unproved and (e['subject']['kind'] != 'lemma'
                     or e['proof'] != 'by sorry' or e['key'] not in guidance['children']):
-                raise ValueError('Unproved entries require a lemma binding and English plan')
+                raise ValueError('Unproved entries require a lemma binding and guidance slot')
         items(self.closed_definitions, str)
         targets = {e['key'] for e in value['entries'] if e['subject']['kind'] == 'target'}
         if (len(set(self.closed_definitions)) != len(self.closed_definitions)
                 or not set(self.closed_definitions) <= targets):
             raise ValueError('Closed definitions must name selected target entries')
+        items(self.review_entries, str)
+        if self.review_entries and (len(set(self.review_entries)) != len(self.review_entries)
+                or not set(self.review_entries) <= keys - set(self.unproved)
+                or not self.unproved):
+            raise ValueError('Reviews require a composition with English-guided children')
         digest = sha256(self.submission)
         digest.update(self.guidance)
-        digest.update(pack([list(self.unproved), list(self.closed_definitions)]))
+        digest.update(self._metadata)
         object.__setattr__(self, 'id', digest.hexdigest())
         logical = any(d['entry']['submission_id'] != value['submission_id']
             or d['entry']['key'] not in self.closed_definitions for e in value['entries'] for d in e['dependencies'])
@@ -203,19 +211,31 @@ class Draft:
         object.__setattr__(result, 'unproved', unproved)
         object.__setattr__(result, 'closed_definitions', tuple(e['key'] for e in value['entries']
             if e['subject']['kind'] == 'target' and e['subject']['name'] in context.definition_targets))
+        reviews = ()
+        if unproved:
+            subjects = {s.name: s.value() for s in context.subjects}
+            reviews = tuple(e['key'] for e in value['entries']
+                if subjects.get(e['subject']['name']) == e['subject'] and e['key'] not in unproved)
+        object.__setattr__(result, 'review_entries', reviews)
         result._finish(value, guidance)
         return result
 
     @property
+    def _metadata(self):
+        if not (self.unproved or self.closed_definitions or self.review_entries):
+            return EMPTY_DRAFT_METADATA
+        return pack([list(self.unproved), list(self.closed_definitions), list(self.review_entries)], DRAFT_METADATA_BYTES)
+
+    @property
     def payload(self):
-        return (b'MIDASDRAFT\x01' + len(self.submission).to_bytes(8, 'little') + self.submission
+        return (b'MIDASDRAFT\x02' + len(self.submission).to_bytes(8, 'little') + self.submission
                 + len(self.guidance).to_bytes(8, 'little') + self.guidance
-                + pack([list(self.unproved), list(self.closed_definitions)]))
+                + self._metadata)
 
     @classmethod
     def load(cls, payload):
-        magic = b'MIDASDRAFT\x01'
-        if (type(payload) is not bytes or len(payload) > 2 * MAX_BYTES + 65536
+        magic = b'MIDASDRAFT\x02'
+        if (type(payload) is not bytes or len(payload) > 2 * MAX_BYTES + DRAFT_METADATA_BYTES
                 or not payload.startswith(magic)):
             raise ValueError('Invalid candidate draft')
         pos, values = len(magic), []
@@ -226,10 +246,10 @@ class Draft:
                 raise ValueError('Invalid draft field length')
             values.append(payload[pos:pos+size])
             pos += size
-        remaining = load_record(payload[pos:], limit=65536)
-        if type(remaining) is not list or len(remaining) != 2 or any(type(v) is not list for v in remaining):
+        remaining = load_record(payload[pos:], limit=DRAFT_METADATA_BYTES)
+        if type(remaining) is not list or len(remaining) != 3 or any(type(v) is not list for v in remaining):
             raise ValueError('Invalid draft unproved entries')
-        return cls(*values, tuple(remaining[0]), tuple(remaining[1]))
+        return cls(*values, *(tuple(row) for row in remaining))
 
     def checks(self):
         """Least dependent entry first; unproved entries receive binding only.
@@ -263,7 +283,7 @@ def _entry(key, subject, proof, dependencies, statement_count, proof_count, *, i
         scope.update(inherited_prerequisites=[p.parameter for p in inherited],
                      prerequisites={p.parameter: p.statement for p in inherited})
     return dict(key=key, subject=subject, proof=proof, dependencies=dependencies,
-                review=dict(decision='approve', rationale='Proposed composition; independent review required.')
+                review=dict(decision='approve', rationale='Proposed composition; dependencies remain obligations.')
                     if dependencies else None, revision_of=None, definition_scope=scope)
 
 
@@ -362,14 +382,17 @@ def expand(action, context, submission_id):
             deps = child['depends_on']
             if len(set(deps)) != len(deps):
                 raise ValueError('Duplicate child prerequisites')
+            proof = child['proof_body']
+            if proof is None:
+                unproved.append(name)
+                proof = 'by sorry'
             entries.append(_entry(name, Subject('lemma', name, subject.scope_target or subject.name,
-                          child['statement']).value(), 'by sorry', [dependency(n) for n in deps],
+                          child['statement']).value(), proof, [dependency(n) for n in deps],
                           len(definitions), len(definitions),
                           inherited=tuple(external[n] for n in deps if n in external)))
             # Child work retains all declared prerequisites, including siblings.
             entries[-1]['definition_scope'].pop('inherited_prerequisites', None)
             children[name] = dict(proof=child['proof'], usefulness=child['usefulness'])
-            unproved.append(name)
     elif mode == 'candidate':
         entries = []
         subjects = {subject.name: subject for subject in context.subjects}
@@ -458,7 +481,7 @@ def revise(action, base, context, submission_id):
     edits = action['edits']
     if not edits:
         raise RevisionError('Revision requires edits')
-    pending = {}
+    pending, removed = {}, set()
     for index, edit in enumerate(edits, 1):
         if edit['path'] not in paths:
             raise RevisionError('Unadvertised fragment path: ' + edit['path'])
@@ -475,6 +498,13 @@ def revise(action, base, context, submission_id):
                 raise RevisionError(f'Edit {index} at {edit["path"]}: '
                                     f'Old fragment must match exactly once ({matches})')
             end = first + len(old)
+        if new is None:
+            if (key != 'proof' or owner.get('subject', {}).get('kind') != 'lemma'
+                    or owner['subject'] in [subject.value() for subject in context.subjects]):
+                raise RevisionError('Null new is allowed only for a supporting child Lean proof: ' + edit['path'])
+            if first != 0 or end != len(current):
+                raise RevisionError('Null new must replace the whole child Lean proof: ' + edit['path'])
+            removed.add(owner['key'])
         if new == (current if old is None else old):
             raise RevisionError('No-op fragment edit: ' + edit['path'])
         pending.setdefault(edit['path'], []).append((first, end, new, index))
@@ -487,6 +517,10 @@ def revise(action, base, context, submission_id):
                 raise RevisionError(f'Edits {left[3]} and {right[3]} at {path}: Overlapping edits')
         owner, key = paths[path]
         current = owner[key]
+        if replacements[0][2] is None:
+            owner[key] = 'by sorry'
+            changed = True
+            continue
         parts, end = [], 0
         for first, stop, new, _ in replacements:
             parts.extend((current[end:first], new))
@@ -498,18 +532,19 @@ def revise(action, base, context, submission_id):
         owner[key] = new
     if not changed:
         raise RevisionError('Revision has no net changes')
+    for name in sorted(removed):
+        guidance['children'].setdefault(name, dict(proof='', usefulness=''))
     guidance['rationale'] = action['rationale']
     value['submission_id'] = submission_id
     for entry in value['entries']:
         for dep in entry['dependencies']:
             if dep['entry']['submission_id'] == original_id:
                 dep['entry']['submission_id'] = submission_id
-    # Revisions cannot silently turn proposed child bindings into proof jobs.
-    # A complete candidate is required when changing the set of unproved entries.
-    revised = Draft._create(value, guidance, base.unproved, context)
-    if revised.mode != base.mode:
-        raise ValueError('Revision changed candidate mode')
-    return revised
+    unproved = base.unproved
+    if removed:
+        keys = set(unproved) | removed
+        unproved = tuple(entry['key'] for entry in value['entries'] if entry['key'] in keys)
+    return Draft._create(value, guidance, unproved, context)
 
 
 def supplied(payload, context, *, guidance):

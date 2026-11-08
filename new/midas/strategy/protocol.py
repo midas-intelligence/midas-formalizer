@@ -8,7 +8,7 @@ from ..prompt import prover, reviewer
 from .memory import Update, text
 
 RESPONSE_BYTES = 8 * 1024**2
-CONTRACTS = {'prover': 'prover-action-v3', 'reviewer': 'review-verdict-v2'}
+CONTRACTS = {'prover': 'prover-action-v5', 'reviewer': 'review-verdict-v2'}
 
 
 def _validator(schema, root):

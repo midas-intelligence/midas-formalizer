@@ -919,8 +919,48 @@ Reviewed joint proofs remain private while that work runs, and required roots
 enter domain's atomic `accept_joint` path together. Candidates with only closed
 definition dependencies retain the direct-attempt classification.
 
-`Draft` saves the binary submission and separate English guidance. Exact named
-fragment edits all resolve against the displayed base before any replacements.
+Decomposition children choose between a complete Lean term in `proof_body` and
+`proof_body: null` with English guidance in `proof`, which may be empty. Both forms can occur
+in the same flat child list and use explicit `depends_on` names. Supplied Lean
+children are checked directly in dependency order, without child prover or
+reviewer calls. Only English-guided children receive new prover contexts and
+reviewer-selected declarations. A failed supplied term returns diagnostics to the
+proposing context, where its `/entries/<child>/proof` fragment can be revised.
+A revision may clear a supplied child Lean proof by setting `new: null` on
+`/entries/<child>/proof`. Use `old: null` or the exact whole old term. The child's
+`/children/<child>/proof` guidance carries over when present and defaults to an
+empty string when missing; it can also be edited in the same revision. Missing
+guidance does not request another revision. Clearing and guidance edits apply
+atomically, and the result receives the ordinary English-child review and work.
+This also works when the earlier Lean attempt already bound the child. Current
+goal and required target proofs cannot be cleared. Other fragment replacements
+remain strings; supplying Lean for an English-guided child still requires a
+complete new candidate.
+
+Guidance edits use the same `{path, old, new}` format as Lean proof edits.
+`/entries/<child>/proof` edits Lean code; `/children/<child>/proof` edits English
+guidance. Copy the displayed fragment path for the child entry key. Set `old: null`
+to replace the whole guidance, or use an exact matching substring for a partial
+edit. Set `new: ""` to clear guidance. For example:
+
+```json
+{"action":{"mode":"revise","rationale":"Clarify the child's approach.","edits":[
+  {"path":"/children/helper/proof","old":null,"new":"Apply induction on n, then simplify the successor case."}
+]},"memory_update":null}
+```
+
+Guidance can be edited by itself or alongside a Lean proof edit in the same `edits` list.
+
+Independent review remains for the current subject's composition when it proposes
+English-guided children. All-Lean decompositions go directly through checking and
+assembly. Conditional supplied terms retain their checked prerequisites and need
+verified dependency proofs before assembly can close them. Their local acceptance
+uses the compiler receipt; it does not invoke a model or certify those dependencies.
+The general `candidate` action uses the same routing for its entries.
+
+`Draft` saves the binary submission, separate English guidance, and a flat list of
+entries requiring independent review. Its binary format is `MIDASDRAFT` version 2.
+Exact named fragment edits all resolve against the displayed base before any replacements.
 Disjoint spans apply atomically, independent of edit order; each affected fragment
 is rebuilt once. A whole-fragment replacement cannot share its path with another
 edit. Revisions either produce a complete new draft or fail without effects. They
@@ -993,7 +1033,10 @@ library operations disabled.
 
 ```sh
 python3 -B -m unittest tests.test_strategy -v
+python3 -B -m unittest tests.test_decomposition -v
 python3 -B -m tests.benchmark_strategy
+# Requires the Lean-test permission described in AGENTS.md:
+python3 -B -m tests.check_decomposition_lean /absolute/path/to/toolchain/bin/lean
 ```
 
 ## Prompt
@@ -1013,7 +1056,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v10`, `reviewer-v4`, `researcher-v3`, and `web-searcher-v2`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v13`, `reviewer-v7`, `researcher-v3`, and `web-searcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat retained observations; superseded candidate-check and edit failures are excluded from prompts. Compiler feedback reserves error headers and adds bounded first/last-five-line excerpts. No prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
@@ -1038,7 +1081,7 @@ Probes follow v2's body-only approach: each case has only `id` and `code`, where
 The generated code must fit 16,000 UTF-8 bytes; diagnostics refer to that generated
 code, with the body starting on line 2. Use
 ``Lean.Elab.Tactic.evalTactic (← `(tactic| intro C))`` to run a proof tactic in the body.
-This schema is versioned as `prover-action-v3`. A new direct proof replaces the
+This schema is versioned as `prover-action-v5`. A new direct proof replaces the
 previous decomposition; keeping proposed
 children requires a complete decomposition or an exact revision of its fragments.
 

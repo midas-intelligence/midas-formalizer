@@ -14,7 +14,7 @@ from ..executor import Executor
 from ..export import Export
 from ..policy import Config, Policy, load_config
 from ..storage import (Changes, CounterChange, FrozenRun, NodeChange, claim_writer, create, open_reader)
-from ..strategy import Context, Subject
+from ..strategy import Context, Draft, Subject
 from ..tools import SearchService
 from . import candidates, preparation, providers, records as r
 from .workflow import Workflow
@@ -308,6 +308,7 @@ class Application:
         """Re-admit current proof authority in bounded pages, without external work."""
         reader, flow = run.writer, run.workflow
         admitted = {}
+        review_entries = {}
         def receipt_value(receipt):
             key = receipt.original_execution_id
             if key not in admitted:
@@ -343,8 +344,13 @@ class Application:
                 if value == node.selected:
                     invocation = reader.invocation(node.review.receipt.original_execution_id)
                     binding = r.value(reader, 'application.jobs', invocation.request.job.semantic_key)
-                    if not candidates.submission(reader, binding[1])['supplied']:
-                        raise ValueError('Missing supplied review authority')
+                    saved = candidates.submission(reader, binding[1])
+                    if not saved['supplied']:
+                        if binding[1] not in review_entries:
+                            review_entries[binding[1]] = Draft.load(
+                                r.read(reader, r.unref(saved['draft']), 17*1024**2)).review_entries
+                        if binding[2] in review_entries[binding[1]]:
+                            raise ValueError('Missing independent review for English-guided decomposition')
                 else:
                     from ..strategy import interpret
                     from ..strategy.state import candidate_hash

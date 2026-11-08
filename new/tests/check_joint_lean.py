@@ -46,7 +46,7 @@ def main():
                           proof_body='by exact hp.1', proof='Use its specification.',
                           dependencies=[dep('value', 'value'), dep('hp', 'spec')])])
         child = dict(proof(), mode='decomposition', proof_body='by exact ⟨0, zero⟩',
-                     children=[dict(name='zero', statement='(0 : Nat) = 0', proof='Reflexivity.',
+                     children=[dict(name='zero', statement='(0 : Nat) = 0', proof_body=None, proof='Reflexivity.',
                                     usefulness='Witness specification.', depends_on=[])])
         review = b'{"verdict":"accept","rationale":"The glue uses its stated premise.","findings":[],"question":"","urls":[],"child_declarations":[]}'
         script = (('prover', response(action)), ('prover', response(child)),

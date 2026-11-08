@@ -84,8 +84,8 @@ def proof(**extra):
 def decomposition():
     value = proof()
     value.update(mode='decomposition', proof_body='by exact second', children=[
-        dict(name='second', statement='True', proof='Apply the first lemma.', usefulness='Concludes the goal.', depends_on=['first']),
-        dict(name='first', statement='True', proof='Use the constructor.', usefulness='Provides a witness.', depends_on=[])])
+        dict(name='second', statement='True', proof_body=None, proof='Apply the first lemma.', usefulness='Concludes the goal.', depends_on=['first']),
+        dict(name='first', statement='True', proof_body=None, proof='Use the constructor.', usefulness='Provides a witness.', depends_on=[])])
     return value
 
 
@@ -140,19 +140,19 @@ def admitted(artifacts, dispatched, raw, **kwargs):
 class ProtocolTests(unittest.TestCase):
     def test_default_contracts_are_strict_and_role_bound(self):
         value = response(proof())
-        parsed = interpret(value, role='prover', contract='prover-action-v3')
+        parsed = interpret(value, role='prover', contract='prover-action-v5')
         self.assertEqual(parsed.mode, 'proof')
         for raw in (value + b'{}',
                     b'{"action":{},"action":{}}', b'{"x":NaN}', b'{"x":"\\ud800"}'):
             with self.subTest(raw=raw[:60]), self.assertRaises(ValueError):
-                interpret(raw, role='prover', contract='prover-action-v3')
-        for role, contract in (('reviewer', 'prover-action-v3'), ('prover', 'unknown')):
+                interpret(raw, role='prover', contract='prover-action-v5')
+        for role, contract in (('reviewer', 'prover-action-v5'), ('prover', 'unknown')):
             with self.assertRaises(ValueError):
                 interpret(value, role=role, contract=contract)
         malformed = proof()
         malformed['environment'] = {}
         with self.assertRaises(ValueError):
-            interpret(response(malformed), role='prover', contract='prover-action-v3')
+            interpret(response(malformed), role='prover', contract='prover-action-v5')
 
     def test_single_wrapped_object_preserves_validation(self):
         action = proof()
@@ -161,19 +161,19 @@ class ProtocolTests(unittest.TestCase):
         for prefix, suffix in ((b'```json\n', b'\n```'), (b'Here is the proof:\n', b'\nThis closes the goal.'),
                                (b'"Result":\n```json\n', b'\n```\nDone.')):
             with self.subTest(prefix=prefix):
-                parsed = interpret(prefix+value+suffix, role='prover', contract='prover-action-v3')
+                parsed = interpret(prefix+value+suffix, role='prover', contract='prover-action-v5')
                 self.assertEqual(parsed.value['proof_body'], action['proof_body'])
         for raw in (b'['+value+b']', b'{"nested":'+value+b'}', value+b'\n'+value,
                     b'{}\n'+value, b'{broken}\n'+value, value[:-1], b'```json\n'+value[:-1]+b'\n```'):
             with self.subTest(raw=raw[:40]), self.assertRaises(ValueError):
-                interpret(raw, role='prover', contract='prover-action-v3')
+                interpret(raw, role='prover', contract='prover-action-v5')
 
     def test_large_response_never_calls_json_library(self):
         action = proof()
         action['proof_body'] = 'by\n  -- ' + 'x'*900000 + '\n  rfl'
         raw = response(action)
         with patch('json.loads', side_effect=AssertionError('JSON loads')), patch('json.dumps', side_effect=AssertionError('JSON dumps')):
-            result = interpret(b'Here is the proof:\n```json\n'+raw+b'\n```', role='prover', contract='prover-action-v3')
+            result = interpret(b'Here is the proof:\n```json\n'+raw+b'\n```', role='prover', contract='prover-action-v5')
             draft = expand(result.value, context(), uid('large'))
             self.assertEqual(load_submission(draft.submission)['entries'][0]['proof'], action['proof_body'])
             self.assertEqual(Draft.load(draft.payload), draft)
@@ -185,39 +185,39 @@ class ProtocolTests(unittest.TestCase):
                         names=[], backends=[dict(name='leanexplore', prefixes=[])]))
         for action in actions:
             with self.subTest(mode=action['mode']):
-                parsed = interpret(response(action), role='prover', contract='prover-action-v3')
+                parsed = interpret(response(action), role='prover', contract='prover-action-v5')
                 self.assertEqual(parsed.value, action)
                 for extra in (dict(inspect=False), dict(inspect=True), dict(offset=0), dict(offset=12)):
                     with self.assertRaises(ValueError):
-                        interpret(response(dict(action, **extra)), role='prover', contract='prover-action-v3')
+                        interpret(response(dict(action, **extra)), role='prover', contract='prover-action-v5')
 
     def test_retrieval_ignores_non_string_queries_without_coercing_them(self):
         backend = dict(name='leanexplore', prefixes=[])
         action = dict(mode='retrieve', rationale='Find addition.', names=[], backends=[backend],
                       queries=[{'query': 'not a search string'}, 'addition', None, 1, True, ['nested']])
-        parsed = interpret(response(action), role='prover', contract='prover-action-v3')
+        parsed = interpret(response(action), role='prover', contract='prover-action-v5')
         self.assertEqual(parsed.value['queries'], ['addition'])
         self.assertEqual(parsed.value['backends'], [backend])
         for queries in ('addition', {'query': 'addition'}, ['a', 'b', 'c', 'd'], ['x'*2049]):
             with self.subTest(queries=queries), self.assertRaises(ValueError):
-                interpret(response(dict(action, queries=queries)), role='prover', contract='prover-action-v3')
+                interpret(response(dict(action, queries=queries)), role='prover', contract='prover-action-v5')
         # Other string arrays remain strict.
         with self.assertRaises(ValueError):
-            interpret(response(dict(action, names=[{'name': 'Nat.add'}])), role='prover', contract='prover-action-v3')
+            interpret(response(dict(action, names=[{'name': 'Nat.add'}])), role='prover', contract='prover-action-v5')
 
     def test_retrieval_deduplicates_names_in_first_occurrence_order(self):
         action = dict(mode='retrieve', rationale='Inspect addition.', queries=[], backends=[],
                       names=['Nat.add_comm', 'Nat.add', 'Nat.add_comm', 'Nat.add_assoc', 'Nat.add'])
-        parsed = interpret(response(action), role='prover', contract='prover-action-v3')
+        parsed = interpret(response(action), role='prover', contract='prover-action-v5')
         self.assertEqual(parsed.value['names'], ['Nat.add_comm', 'Nat.add', 'Nat.add_assoc'])
         for names in (['Nat.add'] * 13, ['Nat.add', {'name': 'Nat.add'}]):
             with self.subTest(names=names), self.assertRaises(ValueError):
-                interpret(response(dict(action, names=names)), role='prover', contract='prover-action-v3')
+                interpret(response(dict(action, names=names)), role='prover', contract='prover-action-v5')
 
     def test_retrieval_keeps_names_when_all_queries_are_discarded(self):
         action = dict(mode='retrieve', rationale='Inspect addition.', names=['Nat.add'],
                       backends=[dict(name='leanexplore', prefixes=[])], queries=[{'dummy': ''}])
-        parsed = interpret(response(action), role='prover', contract='prover-action-v3')
+        parsed = interpret(response(action), role='prover', contract='prover-action-v5')
         self.assertEqual(parsed.value['queries'], [])
         self.assertEqual(parsed.value['backends'], [])
         self.assertEqual(parsed.value['names'], ['Nat.add'])
@@ -228,7 +228,7 @@ class ProtocolTests(unittest.TestCase):
                    dict(mode='lookup', rationale='Read the definition.', names=['Nat.add']))
         for action in actions:
             with self.subTest(mode=action['mode']), self.assertRaises(ValueError):
-                interpret(response(action), role='prover', contract='prover-action-v3')
+                interpret(response(action), role='prover', contract='prover-action-v5')
 
     def test_review_findings_and_research_invariants(self):
         value = dict(child_declarations=[], verdict='accept', rationale='A valid plan.', findings=[], question='', urls=[])
@@ -277,7 +277,7 @@ class CandidateTests(unittest.TestCase):
                               dependencies=[dict(parameter='h', submission='current', key='helper')])
                 action = dict(mode='candidate', rationale='Compose the proof.', entries=[helper, parent],
                               proof='Use the helper.', proof_departures='', definitions=[], imports=[])
-                parsed = interpret(response(action), role='prover', contract='prover-action-v3')
+                parsed = interpret(response(action), role='prover', contract='prover-action-v5')
                 for scope, statement in ((None, None), ('Wrong.scope', 'False')):
                     # Existing subjects always retain their exact saved proposition.
                     parsed.value['entries'][1].update(scope_target=scope, statement=statement)
@@ -289,7 +289,7 @@ class CandidateTests(unittest.TestCase):
                     self.assertEqual(child_context(draft, 'helper', ctx).subjects[0].statement, 'True')
                 parent['kind'] = required.kind
                 with self.assertRaisesRegex(ValueError, 'Response fields differ'):
-                    interpret(response(action), role='prover', contract='prover-action-v3')
+                    interpret(response(action), role='prover', contract='prover-action-v5')
 
     def test_recursive_children_use_flat_context_and_inherit_imports(self):
         ctx = replace(context(), imports=('Mathlib',))
@@ -340,6 +340,7 @@ class CandidateTests(unittest.TestCase):
         draft = expand(action, ctx, uid('joint-supported'))
         self.assertEqual(draft.mode, 'decomposition')
         self.assertEqual(draft.checks(), (('exists', 'binding'), ('witness', 'proof'), ('property', 'proof')))
+        self.assertEqual(draft.review_entries, ('witness', 'property'))
         self.assertEqual(child_context(draft, 'exists', ctx).subjects[0].scope_target, 'witness')
         self.assertEqual(Draft.load(draft.payload), draft)
         prop['dependencies'] = []
@@ -368,12 +369,174 @@ class CandidateTests(unittest.TestCase):
         value = load_submission(draft.submission)
         self.assertEqual(draft.checks(), (('first', 'binding'), ('second', 'binding'), ('parent', 'proof')))
         self.assertEqual(draft.unproved, ('second', 'first'))
+        self.assertEqual(draft.review_entries, ('parent',))
         self.assertEqual(draft.mode, 'decomposition')
         self.assertNotIn('/entries/first/proof', dict(fragments(draft, context())))
         self.assertEqual(value['entries'][0]['definition_scope']['inherited_prerequisites'], [])
         self.assertEqual(len(value['definitions']), 0)
         self.assertEqual(Draft.load(draft.payload), draft)
         self.assertEqual(Context.load(context().payload), context())
+
+    def test_decomposition_mixes_lean_and_english_and_preserves_routing_on_revision(self):
+        for lean_index in (0, 1):
+            with self.subTest(lean_index=lean_index):
+                action = decomposition()
+                child = action['children'][lean_index]
+                child.update(proof_body='by trivial', proof='')
+                parsed = interpret(response(action), role='prover', contract='prover-action-v5')
+                draft = expand(parsed.value, context(), uid('mixed'))
+                lean, english = child['name'], action['children'][1-lean_index]['name']
+                self.assertEqual(draft.unproved, (english,))
+                self.assertEqual(draft.review_entries, ('parent',))
+                self.assertEqual(dict(draft.checks())[lean], 'proof')
+                self.assertEqual(dict(draft.checks())[english], 'binding')
+                path = '/entries/' + lean + '/proof'
+                self.assertEqual(dict(fragments(draft, context()))[path], 'by trivial')
+                revised = revise(dict(mode='revise', rationale='Correct the supplied child.', edits=[
+                    dict(path=path, old=None, new='by exact True.intro')]), draft, context(), uid('mixed-revision'))
+                self.assertEqual(revised.unproved, draft.unproved)
+                self.assertEqual(revised.review_entries, draft.review_entries)
+                self.assertEqual(Draft.load(revised.payload), revised)
+
+    def test_all_lean_decomposition_checks_in_dependency_order_without_review(self):
+        action = decomposition()
+        for child in action['children']:
+            child.update(proof_body='by trivial', proof='')
+        draft = expand(action, context(), uid('all-lean'))
+        self.assertEqual(draft.checks(), (('first', 'proof'), ('second', 'proof'), ('parent', 'proof')))
+        self.assertEqual(draft.unproved, ())
+        self.assertEqual(draft.review_entries, ())
+        self.assertEqual(Draft.load(draft.payload), draft)
+
+    def test_revision_can_clear_child_lean_and_supply_guidance_atomically(self):
+        action = decomposition()
+        for child in action['children']:
+            child.update(proof_body='by trivial', proof='')
+        base = expand(action, context(), uid('all-lean-base'))
+        before = base.payload
+        for old in (None, 'by trivial'):
+            for reverse in (False, True):
+                with self.subTest(old=old, reverse=reverse):
+                    edits = [dict(path='/entries/first/proof', old=old, new=None),
+                             dict(path='/children/first/proof', old=None, new='Use the constructor.')]
+                    if reverse:
+                        edits.reverse()
+                    edit = dict(mode='revise', rationale='Delegate this child.', edits=edits)
+                    parsed = interpret(response(edit), role='prover', contract='prover-action-v5')
+                    revised = revise(parsed.value, base, context(), uid('cleared'))
+                    self.assertEqual(revised.unproved, ('first',))
+                    self.assertEqual(revised.review_entries, ('parent',))
+                    self.assertEqual(revised.checks(), (('first', 'binding'), ('second', 'proof'), ('parent', 'proof')))
+                    self.assertNotIn('/entries/first/proof', dict(fragments(revised, context())))
+                    self.assertEqual(dict(fragments(revised, context()))['/children/first/proof'], 'Use the constructor.')
+                    self.assertEqual(Draft.load(revised.payload), revised)
+                    value = load_submission(revised.submission)
+                    self.assertTrue(all(d['entry']['submission_id'] == uid('cleared')
+                                        for e in value['entries'] for d in e['dependencies']))
+                    self.assertEqual(base.payload, before)
+
+    def test_revision_clears_a_sorry_term_using_existing_english_guidance(self):
+        action = decomposition()
+        action['children'][1]['proof_body'] = 'by sorry'
+        base = expand(action, context(), uid('sorry-base'))
+        revised = revise(dict(mode='revise', rationale='Make the missing proof explicit.', edits=[
+            dict(path='/entries/first/proof', old=None, new=None)]), base, context(), uid('sorry-cleared'))
+        self.assertEqual(revised.unproved, ('second', 'first'))
+        self.assertEqual(revised.review_entries, ('parent',))
+        self.assertNotEqual(revised.id, base.id)
+
+    def test_revision_clears_child_with_empty_or_missing_guidance(self):
+        action = decomposition()
+        for child in action['children']:
+            child.update(proof_body='by trivial', proof='', usefulness='')
+        base = expand(action, context(), uid('empty-guidance-base'))
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                guidance = load_record(base.guidance, limit=8*1024**2)
+                if missing:
+                    del guidance['children']['first']
+                current = replace(base, guidance=pack(guidance))
+                revised = revise(dict(mode='revise', rationale='Delegate without guidance.', edits=[
+                    dict(path='/entries/first/proof', old=None, new=None)]), current, context(), uid('empty-guidance'))
+                self.assertEqual(revised.unproved, ('first',))
+                self.assertEqual(revised.review_entries, ('parent',))
+                self.assertEqual(load_record(revised.guidance, limit=8*1024**2)['children']['first'],
+                                 dict(proof='', usefulness=''))
+                self.assertEqual(Draft.load(revised.payload), revised)
+
+    def test_revision_rejects_invalid_null_edits_without_changing_the_base(self):
+        action = decomposition()
+        for child in action['children']:
+            child.update(proof_body='by trivial', proof='')
+        base = expand(action, context(), uid('null-edits-base'))
+        before = base.payload
+        for path, old, message in (
+                ('/entries/first/proof', 'trivial', 'whole child Lean proof'),
+                ('/entries/first/proof', 'by missing', 'no matches'),
+                ('/entries/parent/proof', None, 'only for a supporting child'),
+                ('/entries/first/statement', None, 'only for a supporting child'),
+                ('/children/first/proof', None, 'only for a supporting child'),
+                ('/proof', None, 'only for a supporting child')):
+            with self.subTest(path=path, old=old), self.assertRaisesRegex(RevisionError, message):
+                revise(dict(mode='revise', rationale='Invalid removal.', edits=[
+                    dict(path='/proof_departures', old=None, new='Uncommitted explanation.'),
+                    dict(path=path, old=old, new=None)]), base, context(), uid('invalid-null'))
+            self.assertEqual(base.payload, before)
+        for new in (None, 'by exact True.intro'):
+            with self.subTest(overlap=new), self.assertRaisesRegex(RevisionError, 'Overlapping edits'):
+                revise(dict(mode='revise', rationale='Conflicting removals.', edits=[
+                    dict(path='/entries/first/proof', old=None, new=None),
+                    dict(path='/entries/first/proof', old=None, new=new)]), base, context(), uid('null-overlap'))
+        ctx = replace(context(), subjects=(Subject('lemma', 'current', 'goal', 'True'),))
+        nested = expand(action, ctx, uid('nested-null'))
+        with self.assertRaisesRegex(RevisionError, 'only for a supporting child'):
+            revise(dict(mode='revise', rationale='Cannot delegate the exact current goal.', edits=[
+                dict(path='/entries/parent/proof', old=None, new=None)]), nested, ctx, uid('null-goal'))
+
+    def test_child_requires_explicit_proof_choice_but_allows_empty_guidance(self):
+        action = decomposition()
+        del action['children'][0]['proof_body']
+        with self.assertRaises(ValueError):
+            interpret(response(action), role='prover', contract='prover-action-v5')
+        for guidance in ('', '  '):
+            action = decomposition()
+            action['children'][0].update(proof_body=None, proof=guidance)
+            self.assertIn('second', expand(action, context(), uid('empty-child-guidance')).unproved)
+        action['children'][0].update(proof_body='', proof='An explanation.')
+        with self.assertRaises(ValueError):
+            expand(action, context(), uid('invalid-child'))
+
+    def test_candidate_lean_support_is_checked_without_its_own_review(self):
+        child = dict(key='support', name='support', scope_target=None, statement='True',
+                     proof_body=None, proof='Use the constructor.', dependencies=[])
+        solved = dict(key='solved', name='solved', scope_target=None, statement='True', proof_body='by exact h',
+                      proof='', dependencies=[dict(parameter='h', submission='current', key='support')])
+        parent = dict(key='goal', name='goal', scope_target=None, statement=None, proof_body='by exact h',
+                      proof='', dependencies=[dict(parameter='h', submission='current', key='solved')])
+        action = dict(mode='candidate', rationale='Use a checked intermediate step.', entries=[parent, solved, child],
+                      definitions=[], imports=[], proof='', proof_departures='')
+        draft = expand(action, context(), uid('mixed-candidate'))
+        self.assertEqual(draft.review_entries, ('goal',))
+        self.assertEqual(draft.checks(), (('support', 'binding'), ('solved', 'proof'), ('goal', 'proof')))
+        child.update(proof_body='by trivial', proof='')
+        draft = expand(action, context(), uid('lean-candidate'))
+        self.assertEqual(draft.review_entries, ())
+        self.assertEqual(draft.unproved, ())
+
+    def test_joint_review_metadata_roundtrips_long_entry_keys(self):
+        subjects = tuple(Subject('target', 'target_'+str(i)) for i in range(128))
+        ctx = replace(context(), subjects=subjects)
+        entries = [dict(key=str(i)+'x'*250, name=subject.name, scope_target=None, statement=None,
+                        proof_body='by trivial', proof='', dependencies=[])
+                   for i, subject in enumerate(subjects)]
+        entries.append(dict(key='support', name='support', scope_target=subjects[0].name, statement='True',
+                            proof_body=None, proof='Use the constructor.', dependencies=[]))
+        action = dict(mode='candidate', rationale='Joint outputs.', entries=entries,
+                      definitions=[], imports=[], proof='', proof_departures='')
+        draft = expand(action, ctx, uid('long-keys'))
+        draft = replace(draft, closed_definitions=tuple(e['key'] for e in entries[:-1]))
+        self.assertGreater(len(draft.payload) - len(draft.submission) - len(draft.guidance), 65536)
+        self.assertEqual(Draft.load(draft.payload), draft)
 
     def test_cycles_missing_names_and_collisions_are_rejected(self):
         for mutation in ('cycle', 'unknown', 'duplicate', 'definition'):

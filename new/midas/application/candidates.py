@@ -164,9 +164,10 @@ def plan(flow, reader, key, saved):
         checked = r.uncheck(row.get('checked'))
         if checked:
             if checked.kind == CheckKind.CONDITIONAL:
-                if saved['supplied']:
-                    # Supplied approval is explicit input. Its provenance is the
-                    # compiler receipt binding the exact saved candidate source.
+                if saved['supplied'] or entry_key not in draft.review_entries:
+                    # No new English obligation is proposed by this entry.
+                    # Reuse the checker receipt for the local acceptance decision;
+                    # dependencies still require verified proofs and assembly.
                     review = AdmittedReview(checked.candidate, checked.receipt, True)
                     return activate(flow, reader, key, saved, entry_key, checked, review)
                 return flow.review_job(reader, key, saved, entry_key, checked)
@@ -282,16 +283,19 @@ def on_binding(flow, reader, key, saved, entry_key, bound):
     if previous is None or previous.node != node:
         effects.append(Effect(Changes(nodes=(NodeChange(previous.version if previous else None, node),),
             graph_revision=reader.status_snapshot().graph_revision)))
-    if previous is None or (previous.node.binding is None and entry['subject']['kind'] == 'lemma'):
+    new_context = previous is None or (previous.node.binding is None and entry['subject']['kind'] == 'lemma')
+    if new_context:
         _, parent = r.owner_state(reader, saved['owner'][0])
         context = child_context(draft, entry_key, Context.load(r.read(reader, parent.context, 8*1024**2)))
         context_data, identity_data = artifact(context.payload), artifact(ident.reference_payload())
         effects.extend((Effect(artifacts=(context_data, identity_data)),
             r.save_owner(reader, ident.id, r.Owner(context_data.reference, identity_data.reference, index))))
-        guidance = codec.load_record(draft.guidance, limit=8*1024**2)['children'].get(entry_key)
-        if guidance:
-            effects.append(r.save(reader, 'application.guidance', ident.id,
-                (guidance['proof']+'\n'+guidance['usefulness']).encode()))
+    # A cleared Lean proof can reuse its earlier binding, but still needs its
+    # first English guidance before child work begins. Preserve shared guidance.
+    if entry_key in draft.unproved and (new_context or reader.record('application.guidance', ident.id) is None):
+        guidance = codec.load_record(draft.guidance, limit=8*1024**2)['children'][entry_key]
+        effects.append(r.save(reader, 'application.guidance', ident.id,
+            '\n'.join(part for part in (guidance['proof'], guidance['usefulness']) if part).encode()))
     row = dict(owner=ident.id, version=r.owner(owner), candidate=None, checked=None, done=False)
     effects.append(_row(reader, key, saved, entry_key, row))
     # A stable entry index makes later external prerequisites a bounded read.
