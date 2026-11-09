@@ -1548,11 +1548,17 @@ class Contracts(unittest.TestCase):
 
     def test_retrieve_and_probe_deliver_readable_evidence_and_continue(self):
         from midas.application import helpers, records as r
-        from midas.tools import Match, SearchService
-        self.app.search_factory = lambda: SearchService(transport=lambda *args: (Match(('Nat.add',)),))
+        from midas.tools import Match, SearchService, SourceEntry, SourceIndex
+        from tests.test_tools import Artifacts
+        artifacts = Artifacts()
+        source = b'namespace Nat\n/-- Addition. -/\ndef add : Nat := 0\nend Nat\n'
+        index = SourceIndex(self.environment.id, (SourceEntry('project/Support.lean', artifacts.save(source)),))
+        self.app.search_factory = lambda: SearchService(index=index, source_reader=artifacts,
+            transport=lambda *args: (Match(('Nat.add',)),))
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         retrieve = dict(mode='retrieve', rationale='Find and inspect addition.', queries=['addition'], names=[],
-                        backends=[dict(name='leanexplore', prefixes=[])])
+                        backends=[dict(name=name, prefixes=[]) for name in
+                                  ('frozen-source', 'leanexplore', 'leansearch')])
         probe = dict(mode='probe', rationale='Try the proof.', cases=[dict(
             code='Lean.Elab.Tactic.evalTactic (← `(tactic| trivial))'),
             dict(code='Lean.Elab.Tactic.evalTactic (← `(tactic| exact True.intro))')])
@@ -1573,6 +1579,8 @@ class Contracts(unittest.TestCase):
                      for a in helpers.advertised(run.writer, owner)]
             self.assertEqual(len(pages), 2)
             self.assertIn('Search (leanexplore): addition\n', pages[0])
+            self.assertIn('Search (leansearch): addition\n', pages[0])
+            self.assertIn('Search (frozen-source): addition\n', pages[0])
             self.assertIn('\nNat.add\n', pages[0])
             self.assertIn('Probe case1 (tactic): closed_exploratory (advisory)', pages[1])
             self.assertIn('Probe case2 (tactic): closed_exploratory (advisory)', pages[1])

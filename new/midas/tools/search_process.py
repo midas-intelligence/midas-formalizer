@@ -109,7 +109,8 @@ def search_hits(index, reader, action, prefixes, context, *, cache_directory=Non
 def hosted_search(stage, context):
     from midas.tools.search import Match
     with TemporaryDirectory(prefix='search-hosted-', dir=context.workspace) as temporary:
-        answer = _call(context, temporary, ['hosted', stage.action.query, stage.action.limit])
+        answer = _call(context, temporary,
+                       ['hosted', stage.action.backend.name, stage.action.query, stage.action.limit])
         if type(answer) is not list or len(answer) != 2 or answer[0] != 'hosted':
             raise ValueError('Invalid hosted search worker result')
         return tuple(Match((name,)) for name in answer[1])
@@ -152,7 +153,8 @@ def _main(request):
                 finally:
                     db.close()
         elif header[0] == 'hosted':
-            action = Search(header[1], Backend('leanexplore'), header[2])
+            _, backend, query, limit = header
+            action = Search(query, Backend(backend), limit)
             answer = ['hosted', [row.names[0] for row in hosted(action, cancel, deadline)]]
         else:
             raise ValueError('Unknown search worker operation')

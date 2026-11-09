@@ -182,7 +182,12 @@ class ProtocolTests(unittest.TestCase):
         actions = (dict(mode='retrieve', rationale='Read the definition.', names=['Nat.add'],
                         queries=[], backends=[]),
                    dict(mode='retrieve', rationale='Find supporting declarations.', queries=['addition'],
-                        names=[], backends=[dict(name='leanexplore', prefixes=[])]))
+                        names=[], backends=[dict(name='leanexplore', prefixes=[])]),
+                   dict(mode='retrieve', rationale='Find another description.', queries=['addition'],
+                        names=[], backends=[dict(name='leansearch', prefixes=[])]),
+                   dict(mode='retrieve', rationale='Combine search indexes.', queries=['addition'],
+                        names=[], backends=[dict(name=name, prefixes=[]) for name in
+                                           ('frozen-source', 'leanexplore', 'leansearch')]))
         for action in actions:
             with self.subTest(mode=action['mode']):
                 parsed = interpret(response(action), role='prover', contract='prover-action-v5')

@@ -1300,7 +1300,7 @@ modules plus `__init__.py`:
 | New module | Responsibility |
 | --- | --- |
 | `tools/protocol.py` | Immutable scoped actions, binary requests, stable identities, bounded stage descriptions and probe-body expansion |
-| `tools/search.py` | Frozen source selectors, bounded search projection, hosted LeanExplore transport, worker execution and search receipt admission |
+| `tools/search.py` | Frozen source selectors, bounded search projection, hosted LeanExplore/LeanSearch transports, worker execution and search receipt admission |
 | `tools/bm25.py` | Lexical declaration extraction, frozen-corpus SQLite FTS5 cache and path preference |
 | `tools/bm25_score.py` | Compound token fields, identifier budgets and span scoring |
 | `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
@@ -1327,8 +1327,9 @@ bounded result excerpts. Custom injected search transports own their isolation.
 forbidden names and `Scope`. Search and lookup are accepted only as internal
 stages; they are absent from the model schema, capabilities and action parser.
 For direct inspection, use `retrieve` with `names` and empty `queries` and
-`backends`. For discovery, supply up to three queries and two backends; retrieval
-merges and ranks the results, then checks the top twelve ranked names plus up to
+`backends`. For discovery, supply up to three queries and any combination of the
+available backends; retrieval merges and ranks the results, then checks the top
+twelve ranked names plus up to
 twelve explicit names. Explicit names appear as standalone lookup results; checked
 search hits appear within the numbered search results. Exact local identifier
 queries also get checked, with generated declarations shown in their search section.
@@ -1491,10 +1492,16 @@ paths, including package source directories. Frozen project sources support both
 lookup excerpts and discovery. `project` is advertised alongside dependency roots;
 hints can use `project`, explicit project paths, or file/module names such as
 `ChallengeDeps` and `Submission.Helpers`. `Submission` and `Submission.lean` both
-favor that source file and descendants of the same path stem. Hosted search
-uses the fixed LeanExplore endpoint, rejects redirects and bounds input at 5 MB, with cancellation/deadline
-checks between reads and results. Before fusion, multi-term hosted queries reject
-hints supported by fewer than two distinct query tokens in the declaration name,
+favor that source file and descendants of the same path stem. The model can choose
+any combination of `frozen-source`, `leanexplore` and `leansearch` in one retrieval.
+Both hosted backends require empty prefixes and run as supervised network-search
+jobs. They use fixed endpoints, reject redirects and bound responses at 5 MB,
+with cancellation/deadline checks between reads and results. LeanSearch posts one
+unchanged query and the requested result count to `https://leansearch.net/search`,
+preserving provider order without query augmentation. Only its bounded request
+metadata uses JSON serialization; responses use the shared bounded wire decoder.
+Before fusion, multi-term LeanExplore queries reject hints supported by fewer
+than two distinct query tokens in the declaration name,
 documentation, informalization or source header. The shared tokenizer recognizes
 camel-case components; repeated words and common query boilerplate do not add
 support. Proof bodies and neighbouring declarations are excluded. Descriptions

@@ -109,15 +109,19 @@ ACTION: retrieve
 Discover and check Lean declarations. If enabled and you need the meaning of a
 named constant in the goal, your next action must retrieve that Lean name. Use
 retrieve for missing definitions or theorem interfaces; imports do not display them.
-- Supply up to three queries and two backends for discovery, and up to twelve
-  known names for direct inspection. Known names need no prior result ID.
+- Supply up to three queries and choose any combination of the available backends
+  for discovery, plus up to twelve known names for direct inspection. Known names
+  need no prior result ID.
 - Queries require backends. For names-only retrieval, set queries and backends
   to []. If queries and names are both empty, retrieval is disabled for this node
   and proof work continues without a lookup.
 - frozen-source searches all frozen sources. Its prefixes are soft path preferences:
   roots, files, directories or modules; closer path matches rank higher. Missing
   paths are valid hints. [] gives no path preference; project favors frozen project
-  sources when offered. leanexplore requires prefixes: [].
+  sources when offered.
+- leanexplore and leansearch search hosted Mathlib indexes using names or natural
+  language. Both require prefixes: []. Their indexes may differ from the frozen
+  sources; returned names are checked locally. Choose backends to suit the query.
 Results:
 - Discovery hits are merged and ranked; the top twelve names are checked. Explicit
   names appear as standalone lookups; checked hits appear in numbered search results.
@@ -186,6 +190,7 @@ CONTEXT
 
 def schema():
     text, code = string(), string(1024 * 1024)
+    backends = ['frozen-source', 'leanexplore', 'leansearch']
     ref = lambda name: {'$ref': '#/$defs/' + name}
     definitions = {
         'definition': obj(name=string(256), kind={'enum': ['def', 'abbrev'], 'type': 'string'},
@@ -196,7 +201,7 @@ def schema():
         'entry': obj(key=string(256), name=string(1024),
                      scope_target=nullable(string(1024)), statement=nullable(code),
                      proof_body=nullable(code), proof=text, dependencies=array(ref('dependency'), 128)),
-        'backend': obj(name={'type': 'string', 'enum': ['frozen-source', 'leanexplore']},
+        'backend': obj(name={'type': 'string', 'enum': backends},
                        prefixes=array(string(1024), 16)),
         'memory': obj(strategy=text, upsert=array(obj(id=string(256), text=text), 32),
                       forget=array(string(256), 32), pin_evidence=array(string(256), 24),
@@ -215,7 +220,7 @@ def schema():
         action('stop', objection=nullable(obj(category={'type': 'string', 'enum':
             ['suspected_false', 'missing_assumption', 'context_mismatch']}, evidence=text))),
         action('retrieve', queries=array(string(2048), 3), names=array(string(1024), 12),
-               backends=array(ref('backend'), 2)),
+               backends=array(ref('backend'), len(backends))),
         action('probe', cases=dict(array(obj(code=dict(string(16000),
                description='Only the TacticM do-block body after run_tac do; omit the wrapper.')), 3), minItems=1)),
         action('research', question=string(8000)),

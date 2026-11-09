@@ -288,7 +288,9 @@ class ToolsTests(unittest.TestCase):
 
     def test_fusion_matches_fraction_order_and_deduplicates_complete_stages(self):
         local = Backend('frozen-source', ('Mathlib',))
-        for backends in ((local,), (local, Backend('leanexplore'))):
+        for backends in ((local,), (local, Backend('leanexplore')), (local, Backend('leansearch')),
+                         (Backend('leanexplore'), Backend('leansearch')),
+                         (local, Backend('leanexplore'), Backend('leansearch'))):
             with self.subTest(backends=backends):
                 request = self.request(Retrieve(('a query', 'b query', 'c query'), backends=backends))
                 reports, per_query = [], {}

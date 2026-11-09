@@ -1,5 +1,6 @@
-"""LeanExplore relevance regressions; no network, Lean or model execution."""
+"""Hosted search contracts and relevance regressions; no network or Lean."""
 import io
+import json
 from threading import Event
 import time
 import unittest
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from midas.tools import Backend, Search
 from midas.tools.search import hosted
+from midas.domain.wire import decode
 
 
 class HostedSearchTests(unittest.TestCase):
@@ -89,6 +91,64 @@ class HostedSearchTests(unittest.TestCase):
         payload = br'''{"results":[{"name":2, "informalization":"Unrelated selection."}]}'''
         with self.assertRaises(ValueError):
             self.search('polynomial choose', payload)
+
+
+class LeanSearchTests(unittest.TestCase):
+    def search(self, payload, *, query='compact', limit=50, opener=None, cancel=None):
+        return hosted(Search(query, Backend('leansearch'), limit), cancel or Event(),
+                      time.monotonic()+10, opener=opener or (lambda *a, **k: io.BytesIO(payload)))
+
+    def test_post_escapes_query_and_preserves_provider_order_without_filtering(self):
+        query = 'continuous "α"\\β\nmaximum'
+        payload = b'''[[
+          {"result":{"name":["N","first"],"informalization":"Unrelated."},"distance":0.9},
+          {"result":{"name":["N","second"]},"distance":0.1}
+        ]]'''
+        calls = []
+        def opener(request, *, timeout):
+            calls.append(request)
+            self.assertLessEqual(timeout, 15)
+            return io.BytesIO(payload)
+        result = self.search(payload, query=query, opener=opener)
+        self.assertEqual([r.names for r in result], [('N.first',), ('N.second',)])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].full_url, 'https://leansearch.net/search')
+        self.assertEqual(calls[0].get_method(), 'POST')
+        self.assertEqual(calls[0].get_header('Content-type'), 'application/json')
+        self.assertEqual(decode(calls[0].data, limit=16384), {'query': [query], 'num_results': 50})
+
+    def test_response_never_uses_whole_document_json_operations(self):
+        payload = b'[[{"result":{"name":["Nat","add"],"value":"'+b'x'*200000+b'"}}]]'
+        with patch('json.loads', side_effect=AssertionError('whole-response JSON')), \
+                patch('json.dumps', wraps=json.dumps) as dumps:
+            result = self.search(payload)
+        self.assertEqual(result[0].names, ('Nat.add',))
+        self.assertEqual(dumps.call_count, 1)
+        self.assertEqual(dumps.call_args.args[0], {'query': ['compact'], 'num_results': 50})
+
+    def test_response_shape_names_and_bounds(self):
+        for payload in (b'{}', b'[]', b'[[],[]]', b'[[null]]', b'[[{"result":[]}]]',
+                        b'[[{"result":{"name":"Nat.add"}}]]', b'[[{"result":{"name":[]}}]]',
+                        b'[[{"result":{"name":["Nat",2]}}]]', b'[[{"result":{"name":[""]}}]]',
+                        b'[[{"result":{"name":["'+b'x'*1025+b'"]}}]]',
+                        b'[[{"result":{"name":["'+b'x'*512+b'","'+b'y'*512+b'"]}}]]',
+                        b'[[]] trailing', b'[[{"result":{"name":["x"],"name":["y"]}}]]'):
+            with self.subTest(payload=payload[:80]), self.assertRaises(ValueError):
+                self.search(payload)
+        payload = b'[[{"result":{"name":["N","a"]}},{"result":{"name":["N","b"]}}]]'
+        self.assertEqual(len(self.search(payload, limit=1)), 1)
+        self.assertEqual(self.search(b'[[]]'), ())
+        with patch('midas.tools.search.HOSTED_BYTES', 20), self.assertRaises(ValueError):
+            self.search(payload)
+
+    def test_cancellation_during_response_read_is_honored(self):
+        cancel = Event()
+        class Response(io.BytesIO):
+            def read1(self, size):
+                cancel.set()
+                return super().read1(size)
+        with self.assertRaisesRegex(TimeoutError, '[Cc]ancel'):
+            self.search(b'', cancel=cancel, opener=lambda *a, **k: Response(b'[[]]'))
 
 
 if __name__ == '__main__':

@@ -15,7 +15,8 @@ REQUEST_BYTES = 256 * 1024
 RESULT_BYTES = 8 * 1024**2
 SEARCH_BYTES = 512 * 1024
 ENDPOINT = 'https://www.leanexplore.com/api/v2/search'
-BACKENDS = ('frozen-source', 'leanexplore')
+LEANSEARCH_ENDPOINT = 'https://leansearch.net/search'
+BACKENDS = ('frozen-source', 'leanexplore', 'leansearch')
 
 
 def pack(value, limit=REQUEST_BYTES):
@@ -137,7 +138,7 @@ class Retrieve:
         strings(self.names, 12, 1024, 'retrieval names', names=True)
         items(self.backends, Backend)
         if (not self.queries and not self.names or bool(self.backends) != bool(self.queries)
-                or len(self.backends) > 2 or len({b.name for b in self.backends}) != len(self.backends)):
+                or len({b.name for b in self.backends}) != len(self.backends)):
             raise ValueError('Invalid retrieval query/backends')
 
 
@@ -297,7 +298,7 @@ class Stage:
 
     @property
     def kind(self):
-        if isinstance(self.action, Search) and self.action.backend.name == 'leanexplore':
+        if isinstance(self.action, Search) and self.action.backend.name != 'frozen-source':
             return JobKind.NETWORK_SEARCH
         return {Search: JobKind.SEARCH, Lookup: JobKind.LOOKUP, Probe: JobKind.PROBE,
                 Research: JobKind.MODEL, WebSearch: JobKind.MODEL}[type(self.action)]

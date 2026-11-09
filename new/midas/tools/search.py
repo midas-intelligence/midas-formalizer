@@ -1,4 +1,4 @@
-"""Bounded frozen-source discovery and one hosted search; no task scheduling."""
+"""Bounded frozen-source and hosted discovery; no task scheduling."""
 from dataclasses import dataclass, field
 from math import isfinite
 import time
@@ -10,7 +10,7 @@ from ..domain import (ArtifactRef, DeliveryCertainty, ResultStatus, Termination,
 from ..domain import encoding as codec
 from ..domain.records import identifier, items
 from ..domain.wire import decode
-from .protocol import (ENDPOINT, REQUEST_BYTES, SEARCH_BYTES, Search, Stage, pack, read,
+from .protocol import (ENDPOINT, LEANSEARCH_ENDPOINT, REQUEST_BYTES, SEARCH_BYTES, Search, Stage, pack, read,
                        source_selector, strings, text)
 from .bm25 import DETAILS, FILE_BYTES, TOTAL, corpus_key, database, documents, ranked, stopped
 from .bm25_score import token_text
@@ -146,7 +146,7 @@ class SearchResult:
         if len(self.records) > stage.action.limit:
             raise ValueError('Search result exceeds requested count')
         for row in self.records:
-            if (row.path is None) != (stage.action.backend.name == 'leanexplore'):
+            if (row.path is None) != (stage.action.backend.name != 'frozen-source'):
                 raise ValueError('Search result differs from backend')
         return self
 
@@ -234,12 +234,21 @@ def _hosted_relevant(query_terms, row):
 
 
 def hosted(action, cancel, deadline, *, opener=None):
-    if not isinstance(action, Search) or action.backend.name != 'leanexplore':
+    if not isinstance(action, Search) or action.backend.name == 'frozen-source':
         raise ValueError('Expected hosted search')
     stopped(cancel, deadline)
-    url = ENDPOINT + '?' + urlencode({'q': action.query, 'limit': action.limit, 'packages': 'Mathlib'})
+    headers = {'Accept': 'application/json', 'User-Agent': 'midas'}
+    if action.backend.name == 'leanexplore':
+        url = ENDPOINT + '?' + urlencode({'q': action.query, 'limit': action.limit, 'packages': 'Mathlib'})
+        request = Request(url, headers=headers)
+    else:
+        # Only the already bounded query and result count are serialized.
+        # Response bodies use the incremental external wire decoder below.
+        body = codec.canonical({'query': [action.query], 'num_results': action.limit})
+        request = Request(LEANSEARCH_ENDPOINT, data=body,
+                          headers={**headers, 'Content-Type': 'application/json'})
     opener = opener or build_opener(_NoRedirect()).open
-    with opener(Request(url, headers={'Accept': 'application/json', 'User-Agent': 'midas'}),
+    with opener(request,
                 timeout=max(.001, min(15, deadline-time.monotonic()))) as response:
         data = bytearray()
         while True:
@@ -252,6 +261,22 @@ def hosted(action, cancel, deadline, *, opener=None):
                 raise ValueError('Hosted search response exceeds byte allowance')
     stopped(cancel, deadline)
     value = decode(bytes(data), limit=HOSTED_BYTES)
+    if action.backend.name == 'leansearch':
+        if type(value) is not list or len(value) != 1 or type(value[0]) is not list:
+            raise ValueError('Invalid LeanSearch envelope')
+        result = []
+        for row in value[0][:action.limit]:
+            stopped(cancel, deadline)
+            if type(row) is not dict or type(row.get('result')) is not dict:
+                raise ValueError('Invalid LeanSearch declaration')
+            parts = row['result'].get('name')
+            if (type(parts) is not list or not parts
+                    or any(type(p) is not str or not p or len(p) > 1024 for p in parts)
+                    or sum(map(len, parts)) + len(parts) - 1 > 1024):
+                raise ValueError('Invalid LeanSearch declaration name')
+            result.append(Match(('.'.join(parts),)))
+        stopped(cancel, deadline)
+        return tuple(result)
     if type(value) is not dict or type(value.get('results')) is not list:
         raise ValueError('Invalid hosted search envelope')
     result, query_terms = [], _hosted_terms(action.query)

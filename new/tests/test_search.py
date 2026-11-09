@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from midas.application.helpers import page_text
-from midas.domain import OwnerVersion, ResourceLimits
+from midas.domain import JobKind, OwnerVersion, ResourceLimits
 from midas.tools import (Backend, Lookup, Match, Scope, Search, SearchResult,
     SourceEntry, SourceIndex, Stage, execute_search, prepare_archive, search_summary)
 from midas.tools import bm25
@@ -113,10 +113,16 @@ class SearchTests(unittest.TestCase):
                 _main(request)
             return SimpleNamespace(outcome=Outcome.COMPLETED, stdout=SimpleNamespace(data=output.getvalue()))
         context.run_search = run_search
-        stage = Stage('3'*64, 0, self.scope, Search('addition', Backend('leanexplore')))
-        with patch('midas.tools.search.hosted', return_value=(Match(('Nat.add',)),)) as hosted:
-            self.assertEqual(hosted_search(stage, context), (Match(('Nat.add',)),))
-            self.assertEqual(hosted.call_args.args[0], stage.action)
+        for backend in ('leanexplore', 'leansearch'):
+            stage = Stage('3'*64, 0, self.scope, Search('addition', Backend(backend)))
+            self.assertEqual(stage.kind, JobKind.NETWORK_SEARCH)
+            self.assertEqual(Stage.load(stage.payload), stage)
+            with patch('midas.tools.search.hosted', return_value=(Match(('Nat.add',)),)) as hosted:
+                result = SearchResult(stage.sha256, hosted_search(stage, context))
+                self.assertEqual(result.validate_for(stage).records, (Match(('Nat.add',)),))
+                self.assertEqual(hosted.call_args.args[0], stage.action)
+                with self.assertRaises(ValueError):
+                    SearchResult(stage.sha256, (Match(('Nat.add',), 'lib/X.lean', 1, 1),)).validate_for(stage)
 
     def test_hosted_worker_filters_before_returning_name_hints(self):
         import io
