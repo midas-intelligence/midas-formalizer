@@ -908,7 +908,7 @@ of the sixteen v2 modules mapped in the cleanup blueprint:
 | --- | --- |
 | `protocol.py` | Strict default prover/reviewer contract interpretation with bounded wire decoding |
 | `candidates.py` | Flat candidate expansion, ordered checks, child contexts, exact revisions and supplied admission |
-| `memory.py` | Immutable semantic lessons, scoped evidence pins, admitted observations and whole-record retention |
+| `memory.py` | Immutable semantic lessons, admitted observations and whole-record retention |
 | `state.py` | Frozen snapshots, dispatch bindings and atomic proposed effects |
 | `service.py` | Planning, prompt preparation, model/check/review reduction and helper continuations |
 | `repairs.py` | Current direct-consumer objection delivery, policy-gated retirement and repair grants |
@@ -999,7 +999,7 @@ Consecutive revisions replace the displayed candidate. Prompts include each fail
 node's latest compiler feedback, or the latest review feedback, and the latest
 failed-edit message after that check, if any. A failed edit leaves the current check relevant; a new check
 supersedes both earlier check and edit failures. Older results stay saved, while
-strategy, lessons, objections and helper evidence retain their existing treatment.
+lessons, objections and helper evidence retain their existing treatment.
 
 The controller supplies an immutable `Snapshot`, then calls `Strategy.plan`.
 Returned `Work` values describe operations to lower through the owning component.
@@ -1083,11 +1083,11 @@ adaptation keeps these responsibilities without importing the old implementation
 
 | v2 prompt block | v2.1 presentation |
 | --- | --- |
-| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v13`, `decomposition-reviewer-v1`, `stop-reviewer-v1`, `researcher-v3`, and `web-searcher-v2`. |
+| Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v14`, `decomposition-reviewer-v1`, `stop-reviewer-v1`, `researcher-v3`, and `web-searcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
 | Retained history dictionary | Flat retained observations; superseded candidate-check and edit failures are excluded from prompts. Compiler feedback reserves error headers and adds bounded first/last-five-line excerpts. No prior-session access. |
 | Current candidate and checked interfaces | Ordered entries, definition scopes, dependency map, English guidance, and exact fenced editable fragments. Reviews identify the selected entry explicitly. |
-| Current turn: memory, feedback and evidence | Strategy, named lessons, pins, evidence pages and latest feedback, followed by changing capabilities and the action request. Omitted diagnostics and evicted memory are counted. |
+| Current turn: memory, feedback and evidence | Evidence pages, history, candidate, latest feedback, then named lessons, changing capabilities and the action request. Omitted diagnostics and evicted memory are counted. |
 | Research context and question | Readable source, exact task, proof guidance, checked interfaces, available candidate/evidence and the question. |
 | Web-search context and question | Formal context, proof guidance, checked interfaces, web allowance, question and URLs. Candidate/history/evidence archives are excluded. |
 
@@ -1240,7 +1240,7 @@ to the provider default and emits no explicit boundaries.
 
 Following the [OpenAI prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
 prover requests mark the shared contract, the end of formal context, and each
-retained evidence, history and candidate section. Earlier markers remain when more sections
+retained evidence and history section. Earlier markers remain when more sections
 are appended: moving a single marker to the new tail would lose the old lookup
 endpoint. The provider can write at most four prefixes per request, while explicit
 lookup considers the first two and latest fifty markers. The first two delimit the
@@ -1254,10 +1254,11 @@ to be cached; no padding is added. This policy applies to newly built requests;
 retries keep their frozen wire bytes.
 
 In prover requests, retained evidence precedes history and the current candidate,
-so changing a draft or memory does not invalidate those evidence prefixes. Memory,
-feedback, action availability and the final action request follow the cache
-boundaries. Evicting or reordering retained content still invalidates prefixes
-from the first change.
+so changing a draft or memory does not invalidate those evidence prefixes.
+Candidate, feedback, memory, action availability and the final action request
+follow the last cache boundary. Candidate and feedback have no cache-write
+markers. Evicting or reordering retained content still invalidates prefixes from
+the first change.
 The prover action schema has four cached variants for independent research and
 web-search availability. Research needs its service; web search also needs web calls. Capabilities report
 available mathematical and helper modes, revision availability and offered page
@@ -1573,9 +1574,20 @@ delivery key and scope when committing. Scope changes invalidate cursors.
 Delivered evidence pages and result archives remain saved. The `page` action fetches
 additional undelivered pages using advertised cursors. There is no `recall` action.
 Results use stable names such as `tool-result-1`, numbered by saved result order
-within each obligation. The cursor `tool-result-1:2` requests page 2. Names also
-identify evidence pins and remain stable across prompt truncation and resume;
+within each obligation. The cursor `tool-result-1:2` requests page 2. Names remain
+stable across prompt truncation and resume and can be referenced in lessons;
 archive hashes remain internal for integrity checks.
+Memory updates contain only `upsert` and `forget`. Strategies are ordinary lessons
+with model-chosen IDs. The retired `strategy`, `pin_evidence`, and `unpin_evidence`
+fields are omitted from the response schema and ignored in older replies.
+Older saved memories remain readable: a saved strategy becomes an ordinary
+`legacy-strategy` lesson (with a suffix if that ID already exists), subject to
+normal memory retention, and old pin lists are discarded.
+Prover feedback precedes memory; both follow the last explicit cache boundary.
+Feedback includes checker/reviewer
+diagnostics, action/edit failures, stop-review responses, and omission notices.
+Superseded check/edit/protocol errors are hidden from the prompt; some other
+observations become history when newer observations arrive.
 The 16,000-byte storage page bound still applies.
 
 `prover.input_token_budget` in `config.json` controls the prompt's rolling evidence

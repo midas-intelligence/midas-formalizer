@@ -1,5 +1,5 @@
 """Immutable semantic memory; model lessons and admitted observations stay distinct."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..domain import ArtifactRef
 from ..domain.encoding import fields, load_record, record_parts
@@ -31,39 +31,33 @@ class Lesson:
 
 @dataclass(frozen=True, slots=True)
 class Update:
-    strategy: str
     upsert: tuple[Lesson, ...] = ()
     forget: tuple[str, ...] = ()
-    pin_evidence: tuple[str, ...] = ()
-    unpin_evidence: tuple[str, ...] = ()
 
     def __post_init__(self):
-        text(self.strategy, empty=True)
         items(self.upsert, Lesson)
         if len(self.upsert) > 32 or len({x.id for x in self.upsert}) != len(self.upsert):
             raise ValueError('Duplicate or excessive lesson updates')
-        for values, maximum in ((self.forget, 32), (self.pin_evidence, 24), (self.unpin_evidence, 24)):
-            items(values, str)
-            if len(values) > maximum or len(set(values)) != len(values):
-                raise ValueError('Duplicate or excessive memory keys')
-            for value in values:
-                text(value, 256)
-        if (set(self.forget) & {x.id for x in self.upsert}
-                or set(self.pin_evidence) & set(self.unpin_evidence)):
+        items(self.forget, str)
+        if len(self.forget) > 32 or len(set(self.forget)) != len(self.forget):
+            raise ValueError('Duplicate or excessive memory keys')
+        for value in self.forget:
+            text(value, 256)
+        if set(self.forget) & {x.id for x in self.upsert}:
             raise ValueError('Conflicting memory update')
 
     @classmethod
     def from_value(cls, value):
         if value is None:
             return None
-        fields(value, ('strategy', 'upsert', 'forget', 'pin_evidence', 'unpin_evidence'))
-        for key in ('upsert', 'forget', 'pin_evidence', 'unpin_evidence'):
+        fields(value, ('upsert', 'forget'))
+        for key in ('upsert', 'forget'):
             if type(value[key]) is not list:
                 raise ValueError('Expected memory update arrays')
         for row in value['upsert']:
             fields(row, ('id', 'text'))
-        return cls(value['strategy'], tuple(Lesson(**row) for row in value['upsert']),
-                   *(tuple(value[k]) for k in ('forget', 'pin_evidence', 'unpin_evidence')))
+        return cls(tuple(Lesson(**row) for row in value['upsert']),
+                   tuple(value['forget']))
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,32 +97,25 @@ class Observation:
 @dataclass(frozen=True, slots=True)
 class Memory:
     version: int = 0
-    strategy: str = ''
     lessons: tuple[Lesson, ...] = ()
     observations: tuple[Observation, ...] = ()
-    pins: tuple[str, ...] = ()
     evicted: int = 0
 
     def __post_init__(self):
         natural(self.version, 'Memory version')
         natural(self.evicted, 'Evicted memory records')
-        text(self.strategy, empty=True)
         items(self.lessons, Lesson)
         items(self.observations, Observation)
-        items(self.pins, str)
-        if (len(self.lessons) > 64 or len(self.observations) > 64 or len(self.pins) > 24
-                or len({x.id for x in self.lessons}) != len(self.lessons)
-                or len(set(self.pins)) != len(self.pins)):
+        if (len(self.lessons) > 64 or len(self.observations) > 64
+                or len({x.id for x in self.lessons}) != len(self.lessons)):
             raise ValueError('Invalid memory collections')
-        for pin in self.pins:
-            text(pin, 256)
         self.payload
 
     def value(self):
-        return ['midas-memory-v1', self.version, self.strategy,
+        return ['midas-memory-v1', self.version, '',
                 [[x.id, x.text] for x in self.lessons],
                 [[x.source, x.status, x.evidence.to_dict(), list(x.messages), x.omitted]
-                 for x in self.observations], list(self.pins), self.evicted]
+                 for x in self.observations], [], self.evicted]
 
     @property
     def payload(self):
@@ -144,13 +131,24 @@ class Memory:
         if (any(type(x) is not list or len(x) != 2 for x in v[3])
                 or any(type(x) is not list or len(x) != 5 or type(x[3]) is not list for x in v[4])):
             raise ValueError('Invalid memory row')
-        return cls(v[1], v[2], tuple(Lesson(*x) for x in v[3]),
-                   tuple(Observation(x[0], x[1], ArtifactRef.from_dict(x[2]), tuple(x[3]), x[4])
-                         for x in v[4]), tuple(v[5]), v[6])
+        # Preserve the v1 layout with empty strategy/pin slots. Convert a saved
+        # strategy into an ordinary lesson without overwriting a model-chosen ID.
+        text(v[2], empty=True)
+        memory = cls(v[1], tuple(Lesson(*x) for x in v[3]),
+                     tuple(Observation(x[0], x[1], ArtifactRef.from_dict(x[2]), tuple(x[3]), x[4])
+                           for x in v[4]), v[6])
+        if v[2].strip():
+            names = {lesson.id for lesson in memory.lessons}
+            name, suffix = 'legacy-strategy', 1
+            while name in names:
+                name = f'legacy-strategy-{suffix}'
+                suffix += 1
+            memory = replace(update_memory(memory, Update((Lesson(name, v[2]),))), version=v[1])
+        return memory
 
 
-def update_memory(memory, change=None, *, observation=None, allowed_pins=(), budget=16000):
-    """Linear retention of whole records. Pins/strategy are never silently cut.
+def update_memory(memory, change=None, *, observation=None, budget=16000):
+    """Linear retention of whole lesson and observation records.
 
     The soft budget retains at least the newest lesson and two observations when
     possible; the fixed 64 KiB emergency ceiling always applies. Evictions are
@@ -162,21 +160,13 @@ def update_memory(memory, change=None, *, observation=None, allowed_pins=(), bud
     if change is None and observation is None:
         return memory
     lessons = {x.id: x for x in memory.lessons}
-    strategy, pins = memory.strategy, memory.pins
     if change is not None:
         instance(change, Update)
-        if not set(change.pin_evidence) <= set(allowed_pins):
-            raise ValueError('Unknown or out-of-scope evidence pin')
-        strategy = change.strategy
         for key in change.forget:
             lessons.pop(key, None)
         for lesson in change.upsert:
             lessons.pop(lesson.id, None)
             lessons[lesson.id] = lesson
-        pins = tuple(dict.fromkeys((*[p for p in pins if p not in change.unpin_evidence],
-                                   *change.pin_evidence)))
-        if len(pins) > 24:
-            raise ValueError('Memory pin limit exceeded')
     observations = list(memory.observations)
     if observation is not None:
         instance(observation, Observation)
@@ -184,7 +174,7 @@ def update_memory(memory, change=None, *, observation=None, allowed_pins=(), bud
     rows = list(lessons.values())
     # Each binary list member is independently encoded; no repeated whole-memory
     # serialization while evicting. Reserve fixed metadata/collection overhead.
-    fixed = len(pack(['midas-memory-v1', memory.version + 1, strategy, [], [], list(pins), memory.evicted]))
+    fixed = len(pack(['midas-memory-v1', memory.version + 1, '', [], [], [], memory.evicted]))
     sizes = [len(pack([x.id, x.text])) for x in rows]
     osizes = [len(pack([x.source, x.status, x.evidence.to_dict(), list(x.messages), x.omitted]))
               for x in observations]
@@ -201,5 +191,5 @@ def update_memory(memory, change=None, *, observation=None, allowed_pins=(), bud
     while a < len(rows) and size > MAX_BYTES:
         size -= sizes[a]
         a += 1
-    return Memory(memory.version + 1, strategy, tuple(rows[a:]), tuple(observations[b:]),
-                  pins, memory.evicted + a + b)
+    return Memory(memory.version + 1, tuple(rows[a:]), tuple(observations[b:]),
+                  memory.evicted + a + b)

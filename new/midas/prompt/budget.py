@@ -51,6 +51,9 @@ def window(prompt, tokens, sample=None):
             + b'Delivered pages remain saved; only the newest pages are shown.')
         if size + section_bytes(notice) <= limit:
             sections = tuple(s for s in prompt.sections if s.name not in omitted)
-            # Put the notice before the final question without reordering retained pages.
-            return replace(prompt, sections=(*sections[:-1], notice, sections[-1]))
+            # Prover feedback precedes memory so lesson updates leave the
+            # diagnostic prefix reusable. Other roles keep the final notice.
+            index = (next((i for i, s in enumerate(sections) if s.kind == 'memory'), len(sections)-1)
+                     if prompt.role == 'prover' else len(sections)-1)
+            return replace(prompt, sections=(*sections[:index], notice, *sections[index:]))
     raise DomainError('Input token budget cannot fit the required prompt and newest evidence page')

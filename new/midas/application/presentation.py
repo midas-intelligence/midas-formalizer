@@ -136,11 +136,7 @@ def memory(value, *, include_checks=True):
                               or index == len(observations) - 1) else 'history'
         sections.append(Section(kind, f'observation-{index+1}', b'\n\n'.join(rows)))
     rows = []
-    if value.strategy:
-        rows.append('Strategy:\n' + value.strategy)
     rows.extend(f'Lesson {lesson.id}:\n{lesson.text}' for lesson in value.lessons)
-    if value.pins:
-        rows.append('Pinned evidence:\n' + '\n'.join(value.pins))
     if value.evicted:
         rows.append(f'{value.evicted} older memory record(s) evicted.')
     if rows:

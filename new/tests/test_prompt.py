@@ -148,10 +148,10 @@ class PromptTests(unittest.TestCase):
                 cached = [m for m in wire['input'] if isinstance(m['content'], list)]
                 # More than four markers are valid: old endpoints remain lookup
                 # candidates even though the provider limits writes per request.
-                self.assertEqual(len(cached), 7 if role is prover else 1)
+                self.assertEqual(len(cached), 6 if role is prover else 1)
                 self.assertEqual(cached[0]['role'], 'developer')
                 self.assertEqual([m['content'][0]['text'].split()[0] for m in cached[1:]],
-                                 ['SUBJECT', 'EVIDENCE', 'EVIDENCE', 'HISTORY', 'HISTORY', 'CANDIDATE']
+                                 ['SUBJECT', 'EVIDENCE', 'EVIDENCE', 'HISTORY', 'HISTORY']
                                  if role is prover else [])
                 malformed = result.wire.replace(b'"prompt_cache_breakpoint":{"mode":"explicit"}',
                                                 b'"prompt_cache_breakpoint":{"mode":"unknown"}', 1)
@@ -226,8 +226,29 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(before['HISTORY old-check'], after['HISTORY old-check'])
         wire = build(turn, options, renderer=prover.render).wire
         last = wire.rfind(b'"prompt_cache_breakpoint"')
+        self.assertGreater(wire.index(b'CANDIDATE current-proof'), last)
         self.assertGreater(wire.index(b'MEMORY strategy'), last)
         self.assertGreater(wire.index(b'FEEDBACK new-check'), last)
+
+    def test_candidate_feedback_and_memory_stay_outside_cache_boundaries(self):
+        turn = replace(snapshot(), sections=(*snapshot().sections,
+            Section('memory', 'memory', b'Lesson arbitrary-plan:\nTry induction.'),
+            Section('feedback', 'latest-check', b'The successor case remains open.')))
+        for transport in ('azure_responses', 'bedrock_responses'):
+            with self.subTest(transport=transport):
+                options = Options(transport, 'model', prompt_cache='explicit', cache_scope='a'*64)
+                before = build(turn, options, renderer=prover.render)
+                for kind in ('candidate', 'feedback', 'memory'):
+                    changed = replace(turn, sections=tuple(
+                        replace(s, text=b'Updated turn material') if s.kind == kind else s
+                        for s in turn.sections))
+                    after = build(changed, options, renderer=prover.render)
+                    self.assertEqual(cache_prefixes(before), cache_prefixes(after))
+                    self.assertNotEqual(before.wire, after.wire)
+                last = before.wire.rfind(b'"prompt_cache_breakpoint"')
+                for label in (b'CANDIDATE current-proof', b'FEEDBACK latest-check', b'MEMORY memory'):
+                    self.assertGreater(before.wire.index(label), last)
+                self.assertLess(before.wire.index(b'FEEDBACK latest-check'), before.wire.index(b'MEMORY memory'))
 
     def test_all_roles_produce_provider_accepted_wire(self):
         routes = (Route('openai', 'model', 'codex'),

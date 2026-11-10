@@ -87,7 +87,6 @@ class Snapshot:
     attempt: Attempt | None = None
     busy: bool = False
     stopped: bool = False
-    allowed_pins: tuple[str, ...] = ()
     forbidden_names: tuple[str, ...] = ()
     cursors: tuple[str, ...] = ()
     stop_request: 'StopRequest | None' = None
@@ -126,7 +125,7 @@ class Snapshot:
                 child = self.graph.node(dependency.owner)
                 if child.environment_id != self.environment_id or child.interface != dependency.interface:
                     raise ValueError('Pending dependency differs from graph')
-        for values in (self.allowed_pins, self.forbidden_names, self.cursors, self.compiled):
+        for values in (self.forbidden_names, self.cursors, self.compiled):
             items(values, str)
             if len(values) > 4096 or len(set(values)) != len(values):
                 raise ValueError('Invalid snapshot names')

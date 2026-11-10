@@ -130,9 +130,9 @@ def _breakpoints(prompt):
     by _prefix; no later boundary should write the large review-specific suffix.
     For provers, the provider limits writes, not the number of retained markers.
     Explicit lookup checks the first two and latest fifty markers. Keep the
-    contract and formal context first, then each evidence/history/candidate
+    contract and formal context first, then each evidence/history
     endpoint, so appending a section does not erase the previous cache boundary.
-    Memory, feedback and allowances are changing suffixes, not cache writes.
+    Candidate, feedback, memory and allowances have no cache-write boundaries.
     https://developers.openai.com/api/docs/guides/prompt-caching
     """
     if prompt.role == 'reviewer':
@@ -140,7 +140,7 @@ def _breakpoints(prompt):
     formal = ('source', 'definitions', 'subject', 'interfaces')
     points = {0, max((i for i, s in enumerate(prompt.sections, 1) if s.kind in formal), default=0)}
     points.update(i for i, s in enumerate(prompt.sections, 1)
-                  if s.kind in ('evidence', 'history', 'candidate'))
+                  if s.kind in ('evidence', 'history'))
     return points
 
 

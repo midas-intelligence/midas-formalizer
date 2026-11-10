@@ -1805,7 +1805,6 @@ class Contracts(unittest.TestCase):
                 self.assertIn(f'Result ID: tool-result-1\nPage 1 of {len(archive.pages)}.'.encode(), results[0].text)
                 self.assertNotIn(archive.id.encode(), results[0].text)
                 self.assertEqual(results[0].text.count(declaration.encode()), 1)
-                self.assertEqual(snapshot.allowed_pins, ('tool-result-1',))
                 self.assertEqual(snapshot.cursors, tuple(f'tool-result-1:{i+1}' for i in range(1, len(archive.pages))))
                 work = flow.strategy.plan(snapshot, flow.policy).work[0]
                 prepared = flow.strategy.prepare_model(snapshot, flow.policy, work, display, Options('codex', 'fixture'))

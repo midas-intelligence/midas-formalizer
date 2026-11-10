@@ -100,7 +100,6 @@ class Workflow:
             attempt, busy=pending is not None,
             stopped=state.stopped and not (attempt and attempt.candidate.joint_submission_id),
             forbidden_names=tuple(t.selector for t in self.selection.selected.targets),
-            allowed_pins=tuple(name for name, _ in archives),
             cursors=tuple(f'{name}:{i+1}' for name, a in archives for i in range(1, min(len(a.pages), 128))
                           if a.pages[i] not in displayed),
             stop_request=StopRequest.load(r.read(reader, state.stop_request, 65536)) if state.stop_request else None,

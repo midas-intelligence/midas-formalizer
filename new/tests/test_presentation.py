@@ -96,11 +96,11 @@ class PresentationTests(unittest.TestCase):
             self.assertEqual(rest[:-len(fence)-1].decode(), raw)
             self.assertNotIn(fence, raw.encode())
 
-    def test_memory_displays_latest_check_preserving_lessons_pins_and_omissions(self):
+    def test_memory_displays_latest_check_preserving_lessons_and_omissions(self):
         old = Observation('checker', 'rejected', artifact('old'), ('old failure\n  exact line',), 2)
         latest = replace(old, status='binding_failed', messages=('latest failure\n  another line',), omitted=1)
-        saved = Memory(strategy='Try an invariant.', lessons=(Lesson('invariant', 'Keep its boundary case.'),),
-                       observations=(old, latest), pins=('result-a',), evicted=3)
+        saved = Memory(lessons=(Lesson('invariant', 'Keep its boundary case.'),),
+                       observations=(old, latest), evicted=3)
         sections = presentation.memory(saved)
         rendered = prover.render(Snapshot((subject('goal', signature()), *sections)))
         self.assertFalse(any(s.kind == 'history' for s in rendered.sections))
@@ -111,7 +111,7 @@ class PresentationTests(unittest.TestCase):
         self.assertIn(latest.messages[0].encode(), feedback.text)
         self.assertIn(b'1 diagnostic message(s) omitted', feedback.text)
         self.assertIn(b'Lesson invariant:\nKeep its boundary case.', memory.text)
-        self.assertIn(b'Pinned evidence:\nresult-a', memory.text)
+        self.assertNotIn(b'Pinned evidence:', memory.text)
         self.assertIn(b'3 older memory record(s) evicted', memory.text)
         self.assertNotIn(old.evidence.id.encode(), feedback.text)
         self.assertEqual(saved.observations, (old, latest))

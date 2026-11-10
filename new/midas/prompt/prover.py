@@ -176,8 +176,8 @@ mathematical evidence about the exact statement; otherwise use null objection.
 Exhaustion, resource failures and lack of progress are not statement objections.
 
 MEMORY
-memory_update is null or concise strategy, lessons and evidence pins to retain.
-- Pin result IDs shown in tool results or offered in CAPABILITIES.
+memory_update is null or lesson updates using upsert and forget.
+- Store strategies as ordinary lessons with IDs of your choice.
 - Use displayed lesson IDs to update or forget lessons. Retain useful names,
   attempted approaches and why they failed, unresolved work and conditions for
   revisiting a route. Consolidate lessons; keep exact proofs and child guidance
@@ -203,9 +203,8 @@ def schema():
                      proof_body=nullable(code), proof=text, dependencies=array(ref('dependency'), 128)),
         'backend': obj(name={'type': 'string', 'enum': backends},
                        prefixes=array(string(1024), 16)),
-        'memory': obj(strategy=text, upsert=array(obj(id=string(256), text=text), 32),
-                      forget=array(string(256), 32), pin_evidence=array(string(256), 24),
-                      unpin_evidence=array(string(256), 24)),
+        'memory': obj(upsert=array(obj(id=string(256), text=text), 32),
+                      forget=array(string(256), 32)),
     }
     def action(mode, **fields):
         return obj(mode={'type': 'string', 'enum': [mode]}, rationale=text, **fields)
@@ -252,7 +251,7 @@ def render(snapshot):
     if not any(s.kind == 'subject' for s in snapshot.sections):
         raise DomainError('Prover requires an exact subject')
     sections = display(snapshot, ('source', 'definitions', 'subject', 'interfaces',
-                       'evidence', 'history', 'candidate', 'memory', 'feedback', 'capabilities', 'question'))
+                       'evidence', 'history', 'candidate', 'feedback', 'memory', 'capabilities', 'question'))
     name = 'next-action'
     names = {section.name for section in sections}
     while name in names:
@@ -264,4 +263,4 @@ def render(snapshot):
     sections = tuple(s for s in sections if s.kind != 'capabilities')
     sections += (Section('question', name, b'\n\n'.join((*capabilities, b'Choose the next action for this turn. '
         b'Return the action JSON now.'))),)
-    return Prompt('prover', 'prover-v13', 'prover-action-v5', INSTRUCTIONS, SCHEMA, sections)
+    return Prompt('prover', 'prover-v14', 'prover-action-v5', INSTRUCTIONS, SCHEMA, sections)

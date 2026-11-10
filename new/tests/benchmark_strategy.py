@@ -62,8 +62,8 @@ def main():
     before = old_memory.empty()
     before['lessons'] = [dict(id=f'lesson{i}', text='An approach and its limitation. '*20) for i in range(12)]
     after = Memory(lessons=tuple(Lesson(x['id'], x['text']) for x in before['lessons']))
-    old_change = dict(strategy='Try induction.', upsert=[dict(id='new', text='The successor case requires rewriting.')])
-    new_change = Update('Try induction.', (Lesson('new', old_change['upsert'][0]['text']),))
+    old_change = dict(upsert=[dict(id='new', text='The successor case requires rewriting.')])
+    new_change = Update((Lesson('new', old_change['upsert'][0]['text']),))
     assert len(model_json(before)) < 16384
     compare('memory_update', lambda: old_memory.update(before, old_change),
             lambda: update_memory(after, new_change))

@@ -73,6 +73,16 @@ class BudgetTests(unittest.TestCase):
         result = window(value, 3000)
         self.assertEqual(len({s.name for s in result.sections}), len(result.sections))
 
+    def test_window_feedback_precedes_prover_memory(self):
+        value = prompt()
+        memory = Section('memory', 'memory', b'Lesson next-plan:\nUse induction.')
+        value = replace(value, sections=(*value.sections[:-1], memory, value.sections[-1]))
+        result = window(value, 3300)
+        kinds = [s.kind for s in result.sections]
+        self.assertLess(kinds.index('feedback'), kinds.index('memory'))
+        self.assertEqual(result.sections[-1], value.sections[-1])
+        self.assertLessEqual(input_bytes(result), byte_budget(3300))
+
 
 if __name__ == '__main__':
     unittest.main()

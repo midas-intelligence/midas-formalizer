@@ -150,8 +150,10 @@ class ProtocolTests(unittest.TestCase):
         lookup = parse(dict(action=dict(mode='retrieve', rationale='Read addition.', names=['Nat.add'])))
         self.assertEqual(lookup.value['queries'], [])
         self.assertEqual(lookup.value['backends'], [])
-        memory = parse(dict(action=minimal, memory_update=dict(strategy='Use reflexivity.')))
-        self.assertEqual(memory.memory, Update('Use reflexivity.'))
+        memory = parse(dict(action=minimal, memory_update=dict(
+            upsert=[dict(id='try-reflexivity', text='Use reflexivity.')])))
+        self.assertEqual(memory.memory, Update((Lesson('try-reflexivity', 'Use reflexivity.'),)))
+        self.assertEqual(parse(dict(action=minimal, memory_update={})).memory, Update())
 
     def test_defaults_do_not_replace_invalid_values_or_required_content(self):
         minimal = dict(mode='proof', rationale='Use reflexivity.', proof_body='by rfl')
@@ -167,8 +169,9 @@ class ProtocolTests(unittest.TestCase):
         for action in actions:
             with self.subTest(action=action), self.assertRaises(ValueError):
                 interpret(response(action), role='prover', contract='prover-action-v5')
-        with self.assertRaises(ValueError):
-            interpret(response(minimal, {}), role='prover', contract='prover-action-v5')
+        for memory in (dict(upsert=None), dict(forget={}), dict(unexpected=[])):
+            with self.subTest(memory=memory), self.assertRaises(ValueError):
+                interpret(response(minimal, memory), role='prover', contract='prover-action-v5')
 
     def test_optional_reviewer_fields_preserve_verdict_requirements(self):
         parse = lambda v: interpret(model_json(v), role='reviewer', contract='review-verdict-v2')
@@ -774,22 +777,36 @@ class CandidateTests(unittest.TestCase):
 
 
 class MemoryTests(unittest.TestCase):
-    def test_updates_are_versioned_immutable_and_scope_checked(self):
+    def test_updates_are_versioned_immutable_and_conflict_checked(self):
         original = Memory()
-        update = Update('Try induction.', (Lesson('induction', 'The successor case needs rewriting.'),), pin_evidence=('e',))
-        result = update_memory(original, update, allowed_pins=('e',))
+        update = Update((Lesson('induction', 'The successor case needs rewriting.'),))
+        result = update_memory(original, update)
         self.assertEqual(result.version, 1)
         self.assertEqual(original, Memory())
         self.assertEqual(Memory.load(result.payload), result)
         with self.assertRaises(ValueError):
-            update_memory(original, update)
+            Update((Lesson('x', 'a'), Lesson('x', 'b')))
         with self.assertRaises(ValueError):
-            Update('', (Lesson('x', 'a'), Lesson('x', 'b')))
-        with self.assertRaises(ValueError):
-            Update('', pin_evidence=('x',), unpin_evidence=('x',))
+            Update((Lesson('x', 'a'),), forget=('x',))
+
+    def test_old_memory_discards_pins_preserving_other_records(self):
+        original = Memory(version=7,
+            lessons=(Lesson('base', 'Prove the base case first.'),),
+            observations=(Observation('checker', 'rejected', artifact('evidence'), ('Unsolved goal.',)),),
+            evicted=3)
+        legacy = original.value()
+        legacy[5] = ['tool-result-14', 'tool-result-15']
+        restored = Memory.load(pack(legacy))
+        self.assertEqual(restored, original)
+        self.assertEqual(load_record(restored.payload, limit=65536)[5], [])
+        updated = update_memory(restored, Update())
+        self.assertEqual(updated.version, 8)
+        self.assertEqual(updated.lessons, original.lessons)
+        self.assertEqual(updated.observations, original.observations)
+        self.assertEqual(updated.evicted, 3)
 
     def test_whole_record_eviction_and_observation_omissions(self):
-        change = Update('Strategy.', tuple(Lesson(str(i), 'x'*1000) for i in range(32)))
+        change = Update(tuple(Lesson(str(i), 'x'*1000) for i in range(32)))
         with patch('json.loads', side_effect=AssertionError), patch('json.dumps', side_effect=AssertionError):
             memory = update_memory(Memory(), change, budget=2000)
             observation = Observation.select('checker', 'rejection', artifact('evidence'), ('x'*9000, 'Actual error.'))
@@ -799,6 +816,28 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(memory.observations[-1].messages, ('Actual error.',))
         self.assertEqual(memory.observations[-1].omitted, 1)
         self.assertLessEqual(len(memory.payload), 65536)
+
+    def test_old_strategy_becomes_an_editable_lesson_without_id_collision(self):
+        saved = Memory(version=4, lessons=(Lesson('legacy-strategy', 'Keep this existing lesson.'),))
+        legacy = saved.value()
+        legacy[2] = 'Try induction.'
+        restored = Memory.load(pack(legacy))
+        self.assertEqual(restored.version, saved.version)
+        self.assertEqual(restored.lessons, (*saved.lessons, Lesson('legacy-strategy-1', 'Try induction.')))
+        self.assertEqual(Memory.load(restored.payload), restored)
+        self.assertEqual(load_record(restored.payload, limit=65536)[2], '')
+        updated = update_memory(restored, Update(
+            (Lesson('my-next-approach', 'Use a direct proof.'),), forget=('legacy-strategy-1',)))
+        self.assertEqual(updated.lessons, (*saved.lessons, Lesson('my-next-approach', 'Use a direct proof.')))
+
+    def test_old_strategy_migration_obeys_lesson_limits(self):
+        saved = Memory(lessons=tuple(Lesson(str(i), 'A lesson.') for i in range(64)))
+        legacy = saved.value()
+        legacy[2] = 'Try induction.'
+        restored = Memory.load(pack(legacy))
+        self.assertEqual(len(restored.lessons), 64)
+        self.assertEqual(restored.lessons[-1], Lesson('legacy-strategy', 'Try induction.'))
+        self.assertEqual(restored.evicted, 1)
 
 
 class StateTests(unittest.TestCase):
@@ -836,20 +875,18 @@ class StateTests(unittest.TestCase):
 
     def test_prover_schema_filters_disabled_research_and_capabilities_report_availability(self):
         cases = (
-            (Services(), OwnerUsage(), (), (), {'retrieve', 'probe'}),
-            (Services(), OwnerUsage(), ('result-1',), (), {'retrieve', 'probe'}),
-            (Services(research=True, web_search=True, web_calls=0), OwnerUsage(), (), (), {'research', 'retrieve', 'probe'}),
-            (Services(research=True, web_search=True, web_calls=3), OwnerUsage(), ('result-1',), ('result-1:1',),
+            (Services(), OwnerUsage(), (), {'retrieve', 'probe'}),
+            (Services(research=True, web_search=True, web_calls=0), OwnerUsage(), (), {'research', 'retrieve', 'probe'}),
+            (Services(research=True, web_search=True, web_calls=3), OwnerUsage(), ('result-1:1',),
              set(prover.HELPER_MODES)),
             (Services(research=True, web_search=True, web_calls=3), OwnerUsage(research=7, web_search=7, retrieval=10, probe=6),
-             (), (), set()),
-            (Services(compiler=False), OwnerUsage(), (), (), set()),
+             (), set()),
+            (Services(compiler=False), OwnerUsage(), (), set()),
         )
-        for services, usage, pins, cursors, expected in cases:
-            with self.subTest(services=services, usage=usage, pins=pins):
+        for services, usage, cursors, expected in cases:
+            with self.subTest(services=services, usage=usage):
                 artifacts, snapshot = fixture()
-                snapshot = replace(snapshot, services=services, usage=usage, allowed_pins=pins,
-                                   cursors=cursors)
+                snapshot = replace(snapshot, services=services, usage=usage, cursors=cursors)
                 _, prepared, _ = dispatch(snapshot, artifacts)
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
                 schema = response_schema(prepared)
@@ -987,8 +1024,7 @@ class StateTests(unittest.TestCase):
                 (Services(research=True, web_search=True, web_calls=3), {'accept', 'reject', 'research', 'web_search'})):
             with self.subTest(services=services):
                 artifacts, snapshot = fixture(conditional=True)
-                snapshot = replace(snapshot, services=services, cursors=('unused-cursor',),
-                                   allowed_pins=('unused-result',))
+                snapshot = replace(snapshot, services=services, cursors=('unused-cursor',))
                 _, prepared, _ = dispatch(snapshot, artifacts)
                 wire = decode(prepared.wire.wire, limit=8*1024**2)
                 self.assertEqual(set(response_schema(prepared)['properties']['verdict']['enum']), expected)
@@ -1181,9 +1217,8 @@ class StateTests(unittest.TestCase):
         self.assertEqual(changes.helper.request.action.names, tuple(names))
         self.assertEqual(len(changes.helper.stages), 1)
 
-    def test_displayed_result_can_be_pinned_but_not_recalled(self):
+    def test_displayed_result_can_be_referenced_in_memory_but_not_recalled(self):
         artifacts, snapshot = fixture()
-        snapshot = replace(snapshot, allowed_pins=('displayed-result',))
         dispatched, prepared, _ = dispatch(snapshot, artifacts)
         wire = decode(prepared.wire.wire, limit=8*1024**2)
         helpers = next(line.removeprefix('Helper modes: ').split(', ') for line in wire['input'][-1]['text'].splitlines()
@@ -1194,13 +1229,32 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unknown strategy action'):
             self.strategy.on_model(snapshot, self.policy, dispatched,
                 admitted(artifacts, dispatched, response(action)), artifacts)
-        memory = dict(strategy='Use the displayed definition.', upsert=[], forget=[],
-                      pin_evidence=['displayed-result'], unpin_evidence=[])
+        self.assertEqual(set(response_schema(prepared)['$defs']['memory']['properties']),
+                         {'upsert', 'forget'})
+        memory = dict(upsert=[dict(id='definition-plan', text='Use the definition in displayed-result.')], forget=[])
         action = dict(mode='retrieve', rationale='Inspect a related definition.', names=['Nat.add'],
                       queries=[], backends=[])
         changes = self.strategy.on_model(snapshot, self.policy, dispatched,
             admitted(artifacts, dispatched, response(action, memory)), artifacts)
-        self.assertEqual(changes.memory.pins, ('displayed-result',))
+        self.assertEqual(changes.memory.lessons, (Lesson(**memory['upsert'][0]),))
+
+    def test_retired_memory_fields_cannot_reject_an_otherwise_valid_action(self):
+        artifacts, snapshot = fixture()
+        dispatched, _, _ = dispatch(snapshot, artifacts)
+        action = dict(mode='retrieve', rationale='Inspect a related definition.', names=['Nat.add'],
+                      queries=[], backends=[])
+        for pins, unpins in ((['unknown-result'], []),
+                             (['duplicate'] * 25, ['duplicate']),
+                             (None, {'invalid': 'old reminder'})):
+            with self.subTest(pins=pins, unpins=unpins):
+                memory = dict(upsert=[dict(id='use-definition', text='Use the displayed definition.')],
+                              strategy={'invalid': 'obsolete field'},
+                              pin_evidence=pins, unpin_evidence=unpins)
+                changes = self.strategy.on_model(snapshot, self.policy, dispatched,
+                    admitted(artifacts, dispatched, response(action, memory)), artifacts)
+                self.assertEqual(changes.memory.lessons, (Lesson(**memory['upsert'][0]),))
+                self.assertEqual(changes.helper.request.action.names, ('Nat.add',))
+                self.assertIsNone(changes.revision_charge)
 
     def test_live_scripted_and_supplied_candidate_paths(self):
         drafts = []
@@ -1286,7 +1340,7 @@ class StateTests(unittest.TestCase):
         artifacts, snapshot = fixture()
         scope = Scope(snapshot.version.owner, snapshot.environment_id, snapshot.version.context)
         archive = prepare_archive(scope, 'a'*64, [{'answer': 'x'*40000}], (artifact('provenance'),), artifacts)
-        snapshot = replace(snapshot, allowed_pins=(archive.id,), cursors=(archive.id+':1',))
+        snapshot = replace(snapshot, cursors=(archive.id+':1',))
         dispatched, _, _ = dispatch(snapshot, artifacts)
         action = dict(mode='page', rationale='Read the next page.', cursor=archive.id+':1')
         changes = self.strategy.on_model(snapshot, self.policy, dispatched, admitted(artifacts, dispatched, response(action)), artifacts)
@@ -1350,8 +1404,7 @@ class StateTests(unittest.TestCase):
                 action = dict(mode='revise', rationale='Fix the proof.', edits=[
                     dict(path='/proof', old=None, new='An uncommitted proof plan.'),
                     *(dict(path='/entries/parent/proof', old=old, new='by trivial') for old in olds)])
-                update = dict(strategy='Uncommitted memory.', upsert=[], forget=[],
-                              pin_evidence=[], unpin_evidence=[])
+                update = dict(upsert=[dict(id='new-plan', text='Uncommitted memory.')], forget=[])
                 output = admitted(artifacts, dispatched, response(action, update))
                 result = self.strategy.on_model(snapshot, self.policy, dispatched, output, artifacts,
                                                 submission_id=uid('failed-edit'))
@@ -1362,7 +1415,7 @@ class StateTests(unittest.TestCase):
                 self.assertIsNone(result.draft)
                 self.assertIsNone(result.stopped)
                 self.assertEqual(base.payload, before)
-                self.assertEqual(result.memory.strategy, snapshot.memory.strategy)
+                self.assertEqual(result.memory.lessons, snapshot.memory.lessons)
                 observation = result.memory.observations[-1]
                 self.assertEqual(observation.status, 'revision_failed')
                 self.assertEqual(observation.evidence, output.raw)

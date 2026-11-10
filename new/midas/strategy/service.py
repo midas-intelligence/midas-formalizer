@@ -244,7 +244,7 @@ class Strategy:
             result = Changes(snapshot.version, (_work(snapshot, mode, detail=pack([key, dispatch.turn.id])),))
         else:
             raise ValueError('Unsupported prover action')
-        memory = update_memory(snapshot.memory, response.memory, allowed_pins=snapshot.allowed_pins)
+        memory = update_memory(snapshot.memory, response.memory)
         return replace(result, memory=memory if memory != snapshot.memory else None)
 
     def on_stop_review(self, snapshot, verdict, *, evidence):
