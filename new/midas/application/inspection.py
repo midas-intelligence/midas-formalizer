@@ -87,7 +87,14 @@ def node_details(reader, owner):
     references = [(name, reference) for name in ('context', 'identity', 'base', 'memory', 'stop_request')
                   if (reference := getattr(state, name)) is not None]
     references.extend(('evidence', ref) for ref in state.evidence)
-    return NodeDetails(owner, state.stopped, state.reason, state.submission, tuple(references))
+    cause = None
+    if state.reason == 'protocol_revision_allowance_exhausted' and state.memory is not None:
+        from ..strategy import Memory
+        memory = Memory.load(r.read(reader, state.memory))
+        observation = next((o for o in reversed(memory.observations) if o.status == 'protocol'), None)
+        if observation and observation.messages:
+            cause = observation.messages[0].splitlines()[0].removeprefix('Action rejected: ')
+    return NodeDetails(owner, state.stopped, state.reason, state.submission, tuple(references), cause)
 
 
 def session(directory):

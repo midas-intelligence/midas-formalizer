@@ -195,8 +195,13 @@ class Draft:
         digest.update(self.guidance)
         digest.update(self._metadata)
         object.__setattr__(self, 'id', digest.hexdigest())
-        logical = any(d['entry']['submission_id'] != value['submission_id']
-            or d['entry']['key'] not in self.closed_definitions for e in value['entries'] for d in e['dependencies'])
+        # Proving a child under its inherited premises is a proof attempt, not
+        # another decomposition. Keep those dependencies for checking, but only
+        # newly introduced logical dependencies spend decomposition allowance.
+        logical = any((d['entry']['submission_id'] != value['submission_id']
+            or d['entry']['key'] not in self.closed_definitions)
+            and d['parameter'] not in e['definition_scope'].get('inherited_prerequisites', ())
+            for e in value['entries'] for d in e['dependencies'])
         object.__setattr__(self, 'mode', 'decomposition' if self.unproved or logical else 'direct')
 
     @classmethod
@@ -345,7 +350,8 @@ def expand(action, context, submission_id):
     inherited = load_record(context.definitions, limit=MAX_BYTES)
     definitions = inherited + action['definitions']
     validate_definitions(definitions)
-    names = {d['name'] for d in definitions} | {p.parameter for p in context.prerequisites}
+    definition_names = {d['name'] for d in definitions}
+    names = definition_names | {p.parameter for p in context.prerequisites}
     if len(names) != len(definitions) + len(context.prerequisites):
         raise ValueError('Definition shadows an inherited prerequisite')
     children, unproved = {}, []
@@ -379,9 +385,8 @@ def expand(action, context, submission_id):
         # children introduced by this plan when a later repair reopens its parent.
         entries[0]['definition_scope']['inherited_prerequisites'] = [p.parameter for p in context.prerequisites]
         for name, child in by_name.items():
-            deps = child['depends_on']
-            if len(set(deps)) != len(deps):
-                raise ValueError('Duplicate child prerequisites')
+            # Definitions are already in every child's scope, not theorem premises.
+            deps = list(dict.fromkeys(n for n in child['depends_on'] if n not in definition_names))
             proof = child['proof_body']
             if proof is None:
                 unproved.append(name)

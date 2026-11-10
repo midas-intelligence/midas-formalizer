@@ -176,7 +176,7 @@ class Controller:
         return ProviderGate(*saved.record(self.writer, 'controller.gate', route, [0, False])) if route else ProviderGate()
 
     def _note_provider(self, operation, invocation, accepted, receipt):
-        if operation.route is None or accepted.failure not in (Failure.TRANSPORT, Failure.RATE_LIMIT, Failure.TIMEOUT):
+        if operation.route is None or accepted.failure not in (Failure.TRANSPORT, Failure.RATE_LIMIT, Failure.SERVICE_UNAVAILABLE, Failure.TIMEOUT):
             return
         key = invocation.original_execution_id
         if self.writer.record('controller.failure', key) is not None:

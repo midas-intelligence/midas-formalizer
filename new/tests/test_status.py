@@ -140,6 +140,37 @@ class StatusTests(unittest.TestCase):
             self.assertEqual({label for label, _ in page.details.artifacts}, {'context', 'identity'})
             self.assertIsNone(page.details.reason)
 
+    def test_protocol_stop_reports_saved_underlying_cause_without_changing_reason(self):
+        from midas.application import records as r
+        from midas.controller import Effect, artifact
+        from midas.strategy import Memory, Observation
+        from midas.status.render import write_details
+        from midas.application.service import commit
+        with self.fixture.start() as run:
+            owner = self.fixture.selected.identities[0].id
+            _, state = r.owner_state(run.writer, owner)
+            evidence = artifact(b'rejected action')
+            memory = artifact(Memory(observations=(Observation('protocol', 'protocol', evidence.reference,
+                ('Action rejected: decomposition_allowance_exhausted\nCorrect the action.',)),)).payload)
+            commit(run.writer, 'protocol-stop', r.merge(
+                Effect(artifacts=(evidence, memory)), r.save_owner(run.writer, owner,
+                    replace(state, stopped=True, reason='protocol_revision_allowance_exhausted',
+                            memory=memory.reference))))
+            details = inspection.nodes(self.root/'run', owner=owner).details
+            self.assertEqual(details.reason, 'protocol_revision_allowance_exhausted')
+            self.assertEqual(details.cause, 'decomposition_allowance_exhausted')
+            text, encoded = io.StringIO(), io.StringIO()
+            write_details(text, details)
+            write_details(encoded, details, json=True)
+            self.assertIn('cause: decomposition_allowance_exhausted', text.getvalue())
+            row = json.loads(encoded.getvalue().splitlines()[0])
+            self.assertEqual(row['cause'], details.cause)
+            self.assertEqual(row['reason'], details.reason)
+            # Historical memory must not appear as a cause after reopening.
+            commit(run.writer, 'reopened', r.save_owner(run.writer, owner,
+                replace(state, memory=memory.reference)))
+            self.assertIsNone(inspection.nodes(self.root/'run', owner=owner).details.cause)
+
     def test_json_node_output_serializes_rows_separately(self):
         with self.fixture.start():
             page = inspection.nodes(self.root/'run')

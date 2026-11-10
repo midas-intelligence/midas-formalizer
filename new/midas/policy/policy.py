@@ -236,6 +236,7 @@ def cost_microusd(prices: Prices | None, usage: Usage, *, cache_write_tokens: in
 class Failure(str, Enum):
     TRANSPORT = 'transport'
     RATE_LIMIT = 'rate_limit'
+    SERVICE_UNAVAILABLE = 'service_unavailable'
     TIMEOUT = 'timeout'
     MEMORY = 'memory'
     CRASH = 'crash'
@@ -621,12 +622,15 @@ class Policy:
         if history.retry_after_ms > rules.retry_after_cap_ms:
             return RetryDecision(False, 'provider_retry_after_limit')
         if model:
-            if failure not in (Failure.TRANSPORT, Failure.RATE_LIMIT, Failure.TIMEOUT):
+            if failure not in (Failure.TRANSPORT, Failure.RATE_LIMIT, Failure.SERVICE_UNAVAILABLE, Failure.TIMEOUT):
                 return RetryDecision(False, 'permanent_failure')
             if history.transport_retries >= rules.transport_retries:
                 return RetryDecision(False, 'provider_retry_exhausted')
+            # Explicit provider failures have a known outcome even when delivered.
+            # Their turns and any unknown usage remain charged normally.
             uncertain = result.delivery_certainty != DeliveryCertainty.NOT_SENT and not (
-                failure == Failure.RATE_LIMIT and result.delivery_certainty == DeliveryCertainty.DELIVERED)
+                failure in (Failure.RATE_LIMIT, Failure.SERVICE_UNAVAILABLE)
+                and result.delivery_certainty == DeliveryCertainty.DELIVERED)
             if uncertain and history.unknown_retries >= rules.unknown_retries:
                 return RetryDecision(False, 'unknown_outcome_policy')
             count = history.transport_retries

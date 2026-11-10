@@ -401,7 +401,8 @@ class Workflow:
                     self.parent_request(reader, work.owner), reader, maximum=self.policy.config.export.max_bytes)
             elif work.kind == JobKind.INTEGRATE:
                 request = self.export.prepare_integration(self.selection, graph, reader, buffer, profile=profile,
-                    library=self.library, maximum=self.policy.config.export.max_bytes, allow_sorry=self.allow_sorry)
+                    library=self.library, maximum=self.policy.config.export.max_bytes, allow_sorry=self.allow_sorry,
+                    max_heartbeat=limits.max_heartbeat, max_rec_depth=limits.max_rec_depth)
             else:
                 request = self.export.prepare_verification(integration, self.selection, graph, reader, buffer)
         except ValueError as error:

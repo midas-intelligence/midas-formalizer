@@ -284,7 +284,7 @@ class RootReplacement:
 
 
 def integrate(selection, roots, *, imports=(), available=frozenset(), current_module=None, maximum=MAX_BYTES,
-              regions=None, calls=None):
+              regions=None, calls=None, command_prefix=b''):
     """Replace exactly the selected bodies; preserve authored scopes and attributes."""
     if type(roots) is not tuple or any(not isinstance(root, RootReplacement) for root in roots):
         raise ValueError('Expected immutable checked root replacements')
@@ -298,8 +298,11 @@ def integrate(selection, roots, *, imports=(), available=frozenset(), current_mo
         root = by_name[target.selector]
         if target.replacement is None or not root.proof.data.strip():
             raise ValueError('Missing replaceable target proof')
-        if root.declarations.data:
-            edits.append(Edit(ByteSpan(target.declaration.start, target.declaration.start), root.declarations))
+        if root.declarations.data or command_prefix:
+            writer = Builder(maximum)
+            writer.append(command_prefix)
+            writer.generated(root.declarations)
+            edits.append(Edit(ByteSpan(target.declaration.start, target.declaration.start), writer.finish()))
         writer = Builder(maximum)
         original = source.data[target.replacement.start:target.replacement.end]
         if original.lstrip().startswith(b':='):
@@ -315,6 +318,11 @@ def integrate(selection, roots, *, imports=(), available=frozenset(), current_mo
         for edit in sorted(edits, key=lambda edit: (edit.span.start, edit.span.end)):
             spans = regions if edit.span.start == edit.span.end else calls
             if spans is not None:
-                spans.append([edit.span.start + shift, edit.span.start + shift + len(edit.replacement.data)])
+                # Options apply to helpers and the selected declaration. Keep
+                # them outside helper regions so projection cannot discard them.
+                prefix = len(command_prefix) if edit.span.start == edit.span.end else 0
+                if prefix < len(edit.replacement.data):
+                    spans.append([edit.span.start + shift + prefix,
+                                  edit.span.start + shift + len(edit.replacement.data)])
             shift += len(edit.replacement.data) - (edit.span.end - edit.span.start)
     return augmented

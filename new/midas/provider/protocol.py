@@ -10,7 +10,7 @@ from ..domain.records import instance, natural, text
 
 META_BYTES = 16 * 1024
 WIRE_BYTES = 8 * 1024**2
-ERRORS = frozenset(('timeout', 'rate_limit', 'transient', 'certificate', 'authentication',
+ERRORS = frozenset(('timeout', 'rate_limit', 'transient', 'service_unavailable', 'certificate', 'authentication',
     'configuration', 'unsupported_retry_control', 'malformed_output', 'output_limit', 'cancelled', 'crash', 'refusal'))
 
 

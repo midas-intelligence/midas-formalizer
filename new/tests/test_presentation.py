@@ -128,11 +128,11 @@ class PresentationTests(unittest.TestCase):
         sections = presentation.memory(saved)
         self.assertEqual(presentation.memory(Memory.load(saved.payload)), sections)
         text = b'\n'.join(s.text for s in sections)
-        for message in (*current.messages, *last_edit.messages, *objection.messages):
+        for message in (*current.messages, *last_edit.messages, *objection.messages, *protocol.messages):
             self.assertIn(message.encode(), text)
-        for message in (*old.messages, *first_edit.messages, *protocol.messages):
+        for message in (*old.messages, *first_edit.messages):
             self.assertNotIn(message.encode(), text)
-        self.assertEqual(sum(s.kind == 'feedback' for s in sections), 2)
+        self.assertEqual(sum(s.kind == 'feedback' for s in sections), 3)
         for source in ('checker', 'review'):
             with self.subTest(source=source):
                 next_check = replace(current, source=source, evidence=artifact('next'), messages=('New candidate feedback.',))
@@ -144,11 +144,26 @@ class PresentationTests(unittest.TestCase):
                     self.assertNotIn(message.encode(), text)
         self.assertEqual(saved.payload, before)
 
-    def test_hidden_check_protocol_failure_still_supersedes_old_candidate_errors(self):
+    def test_check_protocol_failure_is_visible_and_supersedes_old_candidate_errors(self):
         old = Observation('checker', 'rejection', artifact('old'), ('An outdated error.',))
         failed_edit = Observation('revision', 'revision_failed', artifact('edit'), ('An outdated edit failure.',))
-        latest = Observation('checker', 'protocol', artifact('latest'), ('A hidden protocol failure.',))
-        self.assertEqual(presentation.memory(Memory(observations=(old, failed_edit, latest))), ())
+        latest = Observation('checker', 'protocol', artifact('latest'), ('A protocol failure.',))
+        sections = presentation.memory(Memory(observations=(old, failed_edit, latest)))
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0].kind, 'feedback')
+        self.assertIn(b'A protocol failure.', sections[0].text)
+
+    def test_protocol_feedback_keeps_only_latest_rejection_and_current_check(self):
+        checked = Observation('checker', 'rejection', artifact('check'), ('Fix the proof.',))
+        failures = tuple(Observation('protocol', 'protocol', artifact(str(i)),
+            (f'Action rejected: invalid-{i}',)) for i in range(6))
+        sections = presentation.memory(Memory(observations=(checked, *failures)))
+        self.assertEqual(len(sections), 2)
+        text = b'\n'.join(s.text for s in sections)
+        self.assertIn(b'Fix the proof.', text)
+        self.assertIn(b'Action rejected: invalid-5', text)
+        self.assertNotIn(b'Action rejected: invalid-4', text)
+        self.assertTrue(all(s.kind == 'feedback' for s in sections))
 
     def test_consecutive_revisions_replace_code_and_errors_without_prompt_growth(self):
         ctx = context()

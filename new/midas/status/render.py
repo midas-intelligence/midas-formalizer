@@ -83,9 +83,10 @@ def write_nodes(stream, page, *, json=False):
 def write_details(stream, details, *, json=False):
     if json:
         write_json(stream, dict(type='node-details', id=details.id, stopped=details.stopped,
-                               reason=details.reason, submission=details.submission))
+                               reason=details.reason, cause=details.cause, submission=details.submission))
     else:
-        stream.write(f'stopped: {details.stopped} | reason: {safe(details.reason or "none")}\n')
+        stream.write(f'stopped: {details.stopped} | reason: {safe(details.reason or "none")}'
+                     + (f' | cause: {safe(details.cause)}' if details.cause else '')+'\n')
     for label, reference in details.artifacts:
         if json:
             write_json(stream, dict(type='node-artifact', label=label, **reference.to_dict()))

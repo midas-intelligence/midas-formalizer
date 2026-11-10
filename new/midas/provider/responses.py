@@ -146,7 +146,7 @@ class ResponsesTransport:
                 c.value['retry_after_ms'] = max(c.value.get('retry_after_ms', 0), delay)
                 raise TransportError(error)
             return True
-        if kind == 'error':
+        if kind == 'error' or (kind is None and isinstance(event.get('error'), dict)):
             error, delay = provider_error(event)
             c.value['retry_after_ms'] = max(c.value.get('retry_after_ms', 0), delay)
             raise TransportError(error)

@@ -106,9 +106,9 @@ def candidate(draft, context, *, selected=None, checked=None, compiled=(), failu
 def memory(value, *, include_checks=True):
     sections = []
     # Saved observations remain intact. A new check supersedes earlier check
-    # and edit failures; a failed edit keeps the current check relevant.
+    # and action failures; a failed edit/action keeps the current check relevant.
     observations = []
-    seen_check = seen_revision = False
+    seen_check = seen_revision = seen_protocol = False
     for observation in reversed(value.observations):
         if observation.source in ('checker', 'review'):
             if seen_check:
@@ -119,7 +119,9 @@ def memory(value, *, include_checks=True):
                 continue
             seen_revision = True
         if observation.status == 'protocol':
-            continue
+            if seen_protocol or (seen_check and observation.source not in ('checker', 'review')):
+                continue
+            seen_protocol = True
         if not include_checks and observation.source in ('checker', 'review'):
             continue
         observations.append(observation)
@@ -129,7 +131,8 @@ def memory(value, *, include_checks=True):
         rows.extend(message.encode() for message in observation.messages)
         if observation.omitted:
             rows.append(f'{observation.omitted} diagnostic message(s) omitted.'.encode())
-        kind = 'feedback' if (observation.source in ('checker', 'review', 'revision')
+        kind = 'feedback' if (observation.status == 'protocol'
+                              or observation.source in ('checker', 'review', 'revision')
                               or index == len(observations) - 1) else 'history'
         sections.append(Section(kind, f'observation-{index+1}', b'\n\n'.join(rows)))
     rows = []

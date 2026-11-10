@@ -366,12 +366,15 @@ class RenderTests(unittest.TestCase):
         helpers = (b'def Midas.witness := 0\n', b'def Midas.property : True := trivial\n')
         roots = (RootReplacement('witness', GeneratedSource(b'@Midas.witness'), GeneratedSource(helpers[0])),
                  RootReplacement('property', GeneratedSource(b'by rfl'), GeneratedSource(helpers[1])))
-        regions, calls = [], []
-        result = integrate(selection, roots, imports=('Lean',), available=frozenset({'Lean'}),
-                           regions=regions, calls=calls)
-        self.assertTrue(result.data.startswith(b'import Lean\n'))
-        self.assertEqual([result.data[a:b] for a, b in regions], list(helpers))
-        self.assertEqual([result.data[a:b] for a, b in calls], [b'@Midas.witness\n', b'by rfl\n'])
+        for prefix in (b'', b'set_option maxHeartbeats 0\nset_option maxRecDepth 4096\n\n'):
+            regions, calls = [], []
+            result = integrate(selection, roots, imports=('Lean',), available=frozenset({'Lean'}),
+                               regions=regions, calls=calls, command_prefix=prefix)
+            self.assertTrue(result.data.startswith(b'import Lean\n'))
+            self.assertEqual([result.data[a:b] for a, b in regions], list(helpers))
+            self.assertEqual([result.data[a:b] for a, b in calls], [b'@Midas.witness\n', b'by rfl\n'])
+            if prefix:
+                self.assertEqual(result.data.count(prefix), 2)
 
     def test_proof_application_uses_telescope(self):
         sig = signature(['forall', name('x'), 'explicit', ['const', name('Nat'), []], ['const', name('True'), []]])

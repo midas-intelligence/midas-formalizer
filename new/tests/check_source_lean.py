@@ -104,6 +104,20 @@ def main():
         identifiers.append('end IdentifierRegression')
         (root / 'Identifiers.lean').write_text('\n'.join(identifiers) + '\n')
         (root / 'Examples.lean').write_bytes(b'\n'.join(snippets))
+        # Compile without -D flags: the exported source must carry its limits,
+        # including for selected declarations which have no helper declarations.
+        check_limits = '''by
+  run_tac do
+    let opts ← Lean.MonadOptions.getOptions
+    unless Lean.maxHeartbeats.get opts == 0 && Lean.maxRecDepth.get opts == 4096 do
+      throwError "exported Lean limits were lost"
+'''.encode()
+        limits_source = integrate(selection, (
+            RootReplacement('witness', GeneratedSource(check_limits + b'  exact 0')),
+            RootReplacement('property', GeneratedSource(check_limits + b'  rfl'))),
+            imports=('Lean',), available=frozenset({'Lean'}),
+            command_prefix=b'set_option maxHeartbeats 0\nset_option maxRecDepth 4096\n\n')
+        (root / 'Limits.lean').write_bytes(limits_source.data)
         scoped = Context(SourceFile('Scoped.lean', b'namespace Scoped\nsection\n'), 25, signature())
         (root / 'Scoped.lean').write_bytes(candidate(scoped, SourceFile('proof', b'by trivial')).data)
         header = module_tree((Module('Header', GeneratedSource(b'module\nexample : True := by trivial\n'), ('Std',)),),
@@ -114,7 +128,7 @@ def main():
         command = ['bwrap', '--die-with-parent', '--unshare-all', '--ro-bind', '/', '/',
                    '--dev', '/dev', '--proc', '/proc', '--bind', directory, directory,
                    '--chdir', directory, '--setenv', 'LEAN_PATH', directory, compiler]
-        for module in ('Identifiers', 'Examples', 'Scoped', 'Header', *tree.build_order):
+        for module in ('Identifiers', 'Examples', 'Limits', 'Scoped', 'Header', *tree.build_order):
             result = subprocess.run([*command, '-o', module + '.olean', module + '.lean'],
                                     capture_output=True, text=True, timeout=60)
             if result.returncode:

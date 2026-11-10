@@ -16,6 +16,10 @@ def present (type : Expr) (source : Bool := false) : MetaM String := do
       |>.setBool `pp.letVarTypes true
       |>.setBool `pp.deepTerms true
     let opts := if source then opts.setBool `pp.proofs true |>.setBool `pp.instances true
+      -- Coercion notation otherwise forgets its destination: `↑z = 0` can
+      -- elaborate as equality in Fin L instead of Nat. Analysis alone does
+      -- not restore that information; retain readable, typed coercions.
+      |>.setBool `pp.coercions.types true
       |>.setBool `pp.analyze true |>.setBool `pp.analyze.knowsType false
       |>.setBool `pp.analyze.checkInstances true |>.setBool `pp.analyze.typeAscriptions true
       |>.setBool `pp.analyze.trustSubtypeMk false |>.setBool `pp.analyze.trustOfNat false

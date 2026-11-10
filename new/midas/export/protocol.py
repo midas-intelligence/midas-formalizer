@@ -96,7 +96,13 @@ class Request:
             raise ValueError('Expected an export compiler request')
         metadata = value['export']
         codec.fields(metadata, ('format', 'profile', 'roots', 'parent', 'integration', 'files', 'maximum', 'toolchain',
-                                'allow_sorry', 'nodes'))
+                                'allow_sorry', 'nodes', *(('lean_options',) if 'lean_options' in metadata else ())))
+        if 'lean_options' in metadata:
+            options = metadata['lean_options']
+            if type(options) is not list or len(options) != 2:
+                raise ValueError('Invalid export Lean options')
+            natural(options[0], 'max_heartbeat')
+            natural(options[1], 'max_rec_depth', positive=True)
         if metadata['format'] != 'midas-export-v1' or metadata['profile'] not in ('source', 'library'):
             raise ValueError('Unsupported export profile')
         natural(metadata['maximum'], 'Export bytes', positive=True)

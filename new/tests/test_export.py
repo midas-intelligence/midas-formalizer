@@ -203,6 +203,33 @@ class Contracts(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.h = Harness(self.root)
 
+    def test_export_retains_configured_lean_limits_through_projection_and_publication(self):
+        h = self.h
+        for heartbeat, depth in ((2_000_000, 1000), (0, 4096), (123456, 789)):
+            with self.subTest(heartbeat=heartbeat, depth=depth):
+                integration = h.integrate(max_heartbeat=heartbeat, max_rec_depth=depth)
+                value = integration.request.decode()
+                self.assertEqual(value['export']['lean_options'], [heartbeat, depth])
+                prefix = f'set_option maxHeartbeats {heartbeat}\nset_option maxRecDepth {depth}\n'
+                source = value['packet']['source']
+                self.assertIn(prefix, source)
+                for start, stop in value['packet']['regions']:
+                    self.assertNotIn('set_option maxHeartbeats', source.encode()[start:stop].decode())
+                verified = h.verify(integration)
+                self.assertIn(prefix, verified.request.decode()['packet']['source'])
+                destination = self.root/f'limits-{heartbeat}'
+                h.export.materialize(verified, h.selection, h.graph, h.artifacts, destination)
+                saved, reader = read_bundle(destination)
+                exported = (destination/'src/Main.lean').read_text()
+                self.assertIn(prefix, exported)
+                self.assertEqual(h.export.prepare_recheck(saved, reader).decode()['packet']['source'], exported)
+
+    def test_export_rejects_invalid_lean_limits(self):
+        for options in ({'max_heartbeat': -1}, {'max_heartbeat': True}, {'max_rec_depth': 0},
+                        {'max_rec_depth': '1000'}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.h.integrate(**options)
+
     def test_verification_uses_admitted_aliases_and_publishes_reduced_source(self):
         from midas.source import parse_identifier
         h = self.h
@@ -276,6 +303,8 @@ class Contracts(unittest.TestCase):
         work = h.export.plan(h.selection, h.graph, allow_sorry=True)
         self.assertEqual(work[0].kind, JobKind.INTEGRATE)
         integrated = h.integrate(allow_sorry=True)
+        self.assertIn('set_option maxHeartbeats 2000000\nset_option maxRecDepth 1000\n',
+                      integrated.request.decode()['packet']['source'])
         self.assertTrue(integrated.request.allow_sorry)
         self.assertEqual(integrated.request.proofs, ())
         self.assertIn('sorry', integrated.request.decode()['packet']['source'])

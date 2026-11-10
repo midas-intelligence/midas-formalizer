@@ -36,6 +36,7 @@ class NodeDetails:
     reason: str | None
     submission: str | None
     artifacts: tuple
+    cause: str | None = None
 
 
 def progress(reader, *, committed=None, integration=Stage.PENDING, verification=Stage.PENDING,

@@ -264,7 +264,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.http(lambda _: httpx.Response(200, stream=Chunks([body]))).raw, b'done')
 
     def test_http_failures_no_retry_or_error_body_retention(self):
-        for status, kind in ((401,'authentication'),(429,'rate_limit'),(500,'transient'),(302,'configuration')):
+        for status, kind in ((401,'authentication'),(429,'rate_limit'),(500,'transient'),
+                             (503,'service_unavailable'),(302,'configuration')):
             calls = []
             def handler(req):
                 calls.append(req)
@@ -273,6 +274,28 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual((len(calls), out.error, out.retry_after_ms), (1,kind,123))
             self.assertNotIn(b'test-secret', out.raw+out.events)
             self.assertEqual(out.delivery, Delivery.DELIVERED)
+
+    def test_bedrock_untyped_service_unavailable_survives_receipt_admission(self):
+        from midas.controller.operations import model_operation
+        from midas.policy import Failure
+        from midas.domain.encoding import load_record
+        for error in ({'type': 'server_error', 'code': 'service_unavailable'},
+                      {'code': 'service_unavailable'}):
+            body = sse({'type': 'response.output_text.delta', 'delta': 'partial'},
+                       {'error': dict(error, message='test-secret')}) + b'data: [DONE]\n\n'
+            out = self.http(lambda _: httpx.Response(200, stream=Chunks([body])))
+            self.assertEqual((out.error, out.delivery, out.raw),
+                             ('service_unavailable', Delivery.DELIVERED, b'partial'))
+            self.assertEqual(out.diagnostics, ('TransportError',))
+            self.assertIsNone(out.usage.output_tokens)
+            self.assertNotIn(b'test-secret', out.events)
+            size = int.from_bytes(out.events[:8], 'little')
+            self.assertEqual(load_record(out.events[8:8+size], limit=LIMITS.event_bytes),
+                             {'type': 'error', 'error': 'service_unavailable'})
+            provider, inv, result, receipt, auth = self.service(out)
+            accepted = model_operation(provider, lambda *args: None).admit(
+                inv, result, receipt, self.a, auth)
+            self.assertEqual(accepted.failure, Failure.SERVICE_UNAVAILABLE)
 
     def test_connect_failure_not_sent_write_failure_unknown(self):
         for exc, certainty in ((httpx.ConnectError,Delivery.NOT_SENT),(httpx.WriteError,Delivery.UNKNOWN)):

@@ -82,10 +82,53 @@ class Response:
     memory: Update | None = None
 
 
+def _fill(value, **defaults):
+    if type(value) is dict:
+        for key, default in defaults.items():
+            value.setdefault(key, default)
+
+
+def _rows(value, key):
+    rows = value.get(key)
+    return (row for row in rows if type(row) is dict) if type(rows) is list else ()
+
+
+def _optional_fields(value, role):
+    """Supply empty optional content; explicit values still require validation."""
+    if role == 'reviewer':
+        _fill(value, findings=[], question='', urls=[], child_declarations=[])
+        return
+    _fill(value, memory_update=None)
+    memory = value['memory_update']
+    _fill(memory, upsert=[], forget=[], pin_evidence=[], unpin_evidence=[])
+    action = value.get('action')
+    if type(action) is not dict:
+        return
+    mode = action.get('mode')
+    if mode in ('proof', 'decomposition', 'candidate'):
+        _fill(action, definitions=[], imports=[], proof='', proof_departures='')
+        if mode == 'decomposition':
+            for child in _rows(action, 'children'):
+                _fill(child, proof_body=None, proof='', usefulness='', depends_on=[])
+        elif mode == 'candidate':
+            for entry in _rows(action, 'entries'):
+                _fill(entry, scope_target=None, statement=None, proof_body=None,
+                      proof='', dependencies=[])
+    elif mode == 'retrieve':
+        _fill(action, queries=[], names=[], backends=[])
+        for backend in _rows(action, 'backends'):
+            _fill(backend, prefixes=[])
+    elif mode == 'stop':
+        _fill(action, objection=None)
+    elif mode == 'web_search':
+        _fill(action, urls=[])
+
+
 def interpret(payload, *, role, contract):
     if CONTRACTS.get(role) != contract:
         raise DomainError('No interpreter for dispatched response contract')
     value = decode_object(payload, limit=RESPONSE_BYTES)
+    _optional_fields(value, role)
     discarded_queries = False
     action = value.get('action')
     if role == 'prover' and type(action) is dict and action.get('mode') == 'retrieve':

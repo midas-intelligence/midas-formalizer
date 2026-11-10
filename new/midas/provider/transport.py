@@ -80,6 +80,7 @@ def provider_error(payload):
         ('authentication', {'authentication_error', 'unauthorized', 'invalid_api_key'}, {401, 403}),
         ('rate_limit', {'rate_limit', 'rate_limit_exceeded', 'ratelimit'}, {429}),
         ('timeout', {'timeout', 'request_timeout'}, {408}),
+        ('service_unavailable', {'service_unavailable'}, {503}),
         ('transient', {'server_error', 'connection_reset', 'stream_error', 'ssl_eof'}, {409, 425})):
         if codes & known or statuses & status:
             return kind, delay
@@ -128,6 +129,10 @@ class Collector:
         if byte_count > self.limits.frame_bytes or self.observed > self.limits.event_bytes:
             raise TransportError('output_limit')
         kind = event.get('type', event.get('method', 'rpc'))
+        if 'type' not in event and isinstance(event.get('error'), dict):
+            error, _ = provider_error(event['error'])
+            self.save_event({'type': 'error', 'error': error})
+            return
         if type(kind) is not str:
             raise TransportError('malformed_output')
         if kind not in ('response.output_text.delta', 'item/agentMessage/delta'):

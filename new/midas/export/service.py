@@ -12,11 +12,12 @@ from .protocol import AdmittedStage, Request, Work, file_rows, proof_ref, proof_
 
 
 def _metadata(profile, roots, maximum, toolchain, *, parent=None, files=(), integration=None,
-              allow_sorry=False, nodes=()):
+              allow_sorry=False, nodes=(), lean_options=None):
     return {'format': 'midas-export-v1', 'profile': profile, 'roots': [proof_row(r) for r in roots],
         'parent': proof_row(parent) if parent else None, 'files': [[p, r.to_dict()] for p, r in files],
         'integration': integration, 'maximum': maximum, 'toolchain': toolchain,
-        'allow_sorry': allow_sorry, 'nodes': [n.row() for n in nodes]}
+        'allow_sorry': allow_sorry, 'nodes': [n.row() for n in nodes],
+        **({'lean_options': list(lean_options)} if lean_options is not None else {})}
 
 
 def _selected(selection, graph, allow_sorry):
@@ -28,12 +29,15 @@ def _selected(selection, graph, allow_sorry):
     return proofs.roots(selection, graph), ()
 
 
-def _source(selection, graph, roots, reader, allow_sorry, available, *, aliases=(), generated=None, regions=None, calls=None):
+def _source(selection, graph, roots, reader, allow_sorry, available, *, aliases=(), generated=None, regions=None,
+            calls=None, lean_options=None):
+    prefix = (f'set_option maxHeartbeats {lean_options[0]}\n'
+              f'set_option maxRecDepth {lean_options[1]}\n\n').encode() if lean_options is not None else b''
     if allow_sorry:
         return proofs.render_partial(selection, graph, reader, available=available, aliases=aliases,
-                                     generated=generated, regions=regions, calls=calls)
+                                     generated=generated, regions=regions, calls=calls, command_prefix=prefix)
     return proofs.render(selection, roots, reader, available=available, aliases=aliases,
-                         generated=generated, regions=regions, calls=calls)
+                         generated=generated, regions=regions, calls=calls, command_prefix=prefix)
 
 
 def _request(value, metadata, refs):
@@ -144,7 +148,11 @@ class Export:
             self.checker.environment.toolchain_id, parent=parent_ref), refs)
 
     def prepare_integration(self, selection, graph, reader, staging, *, profile='source', library=None,
-                            maximum=16*1024**3, allow_sorry=False):
+                            maximum=16*1024**3, allow_sorry=False, max_heartbeat=2_000_000, max_rec_depth=1000):
+        from ..domain.records import natural
+        natural(max_heartbeat, 'max_heartbeat')
+        natural(max_rec_depth, 'max_rec_depth', positive=True)
+        lean_options = (max_heartbeat, max_rec_depth)
         if profile not in ('source', 'library'):
             raise ValueError('Unsupported export profile')
         environment = self.checker.environment
@@ -158,7 +166,7 @@ class Export:
         owner = nodes[0].owner if nodes else roots[0].owner
         generated, regions, calls = [], [], []
         source = _source(selection, graph, roots, reader, allow_sorry, frozenset(environment.manifest.modules),
-                         generated=generated, regions=regions, calls=calls)
+                         generated=generated, regions=regions, calls=calls, lean_options=lean_options)
 
         def save(data):
             ref = staging.write_bounded(data, max_bytes=64*1024**2)
@@ -188,7 +196,7 @@ class Export:
         files.extend(('src/' + path, ref) for path, ref in module_files(rows).items())
         refs = [r.evidence for r in roots] + [n.interface for n in nodes] + [r for _, r in files]
         request = _request(value, _metadata(profile, roots, maximum, environment.toolchain_id, files=sorted(files),
-            allow_sorry=allow_sorry, nodes=nodes), refs)
+            allow_sorry=allow_sorry, nodes=nodes, lean_options=lean_options), refs)
         self._layout(request.decode(), SourceReader(), source=source.data)
         return request
 
@@ -319,7 +327,8 @@ class Export:
             if request.kind == JobKind.INTEGRATE:
                 generated, regions, calls = [], [], []
                 source = _source(selection, graph, roots, reader, request.allow_sorry,
-                    frozenset(self.checker.environment.manifest.modules), generated=generated, regions=regions, calls=calls)
+                    frozenset(self.checker.environment.manifest.modules), generated=generated, regions=regions, calls=calls,
+                    lean_options=value['export'].get('lean_options'))
                 if (source.data.decode() != value['packet']['source'] or generated != packet['share']
                         or regions != packet['regions'] or calls != packet['calls']):
                     raise ValueError('Integration differs from selected proof sources')

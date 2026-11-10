@@ -287,13 +287,13 @@ def _partial_sources(selection, graph, reader):
 
 
 def render_partial(selection, graph, reader, *, available=frozenset(), maximum=64*1024**2,
-                   aliases=(), generated=None, regions=None, calls=None):
+                   aliases=(), generated=None, regions=None, calls=None, command_prefix=b''):
     return _render(selection, _partial_sources(selection, graph, reader), available=available, maximum=maximum,
-                   aliases=aliases, generated=generated, regions=regions, calls=calls)
+                   aliases=aliases, generated=generated, regions=regions, calls=calls, command_prefix=command_prefix)
 
 
 def render(selection, references, reader, *, available=frozenset(), maximum=64*1024**2,
-           aliases=(), generated=None, regions=None, calls=None):
+           aliases=(), generated=None, regions=None, calls=None, command_prefix=b''):
     if selection.selected.remaining_unfinished:
         raise ValueError('Cannot integrate unselected unfinished declarations')
     if len(references) != len(selection.identities):
@@ -306,10 +306,10 @@ def render(selection, references, reader, *, available=frozenset(), maximum=64*1
             rows, root = named(proof)
             yield proof, reference.evidence.id, rows, root
     return _render(selection, sources(), available=available, maximum=maximum, aliases=aliases,
-                   generated=generated, regions=regions, calls=calls)
+                   generated=generated, regions=regions, calls=calls, command_prefix=command_prefix)
 
 
-def _render(selection, sources, *, available, maximum, aliases=(), generated=None, regions=None, calls=None):
+def _render(selection, sources, *, available, maximum, aliases=(), generated=None, regions=None, calls=None, command_prefix=b''):
     replacements, imports, emitted, contexts = [], (), {}, {}
     names = ExportNames(selection.source, aliases)
     signatures = {}
@@ -352,4 +352,4 @@ def _render(selection, sources, *, available, maximum, aliases=(), generated=Non
         replacements.append(RootReplacement(target.selector, invocation, helpers))
         imports = merge_imports(imports, tuple(proof.get('imports', ())))
     return integrate(selection, tuple(replacements), imports=imports, available=available, maximum=maximum,
-                     regions=regions, calls=calls)
+                     regions=regions, calls=calls, command_prefix=command_prefix)

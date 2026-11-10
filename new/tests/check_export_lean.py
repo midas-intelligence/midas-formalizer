@@ -39,15 +39,22 @@ theorem proofType : (⟨0, rfl⟩ : {n : Nat // n = 0}) = ⟨0, rfl⟩ := rfl
 theorem integerType : (0 : Int) = 0 := rfl
 theorem universeType {α : Type u} {β : Type v} (f : α → β) : f = f := rfl
 theorem implicitIdType : (fun {α : Type u} (x : α) => x) = (fun {α : Type u} (x : α) => x) := rfl
+-- Untyped ↑z lets equality infer Fin L (and its OfNat instance) instead of Nat.
+theorem finZeroType {L : Nat} (z : Fin L) (h : z.val = 0) : z.val = 0 := h
+theorem finSuccessorType {L : Nat} (z : Fin (L + 1)) (h : z.val = 0) : z.val = 0 := h
+theorem finReversedType {L : Nat} (z : Fin L) (h : 0 = z.val) : 0 = z.val := h
+theorem natIntType (n : Nat) (h : (n : Int) = 0) : (n : Int) = 0 := h
+theorem subtypeZeroType (z : {n : Nat // n < 10}) (h : z.val = 0) : z.val = 0 := h
 run_cmd do
-  for original in [`instanceType, `nestedType, `proofType, `integerType, `universeType, `implicitIdType] do
+  for original in [`instanceType, `nestedType, `proofType, `integerType, `universeType, `implicitIdType,
+      `finZeroType, `finSuccessorType, `finReversedType, `natIntType, `subtypeZeroType] do
     let ci ← getConstInfo original
     let source ← liftTermElabM <| Midas.Identity.present ci.type (source := true)
     let .ok parsed := Parser.runParserCategory (← getEnv) `term source
       | throwError "invalid rendered type: {source}"
     let typeSyntax : Term := ⟨parsed⟩
     let result := original.appendAfter "Rendered"
-    elabCommand (← `(command| theorem $(mkIdent result):ident : $typeSyntax := by intros; rfl))
+    elabCommand (← `(command| theorem $(mkIdent result):ident : $typeSyntax := @$(mkIdent original)))
     let actual ← getConstInfo result
     liftTermElabM do
       unless ← Meta.isDefEq ci.type actual.type do
@@ -63,7 +70,9 @@ run_cmd do
         if result.returncode:
             print(result.stdout + result.stderr, flush=True)
             raise AssertionError('Rendered types failed to compile')
-        print('readable instance, nested-function and proof-bearing types: compiled', flush=True)
+        # Keep readable coercion notation while fixing its destination type.
+        assert '(↑z : Nat)' in result.stdout, result.stdout
+        print('readable instance, nested-function, proof-bearing and coercion types: round-tripped', flush=True)
 
 
 def check_flat_contexts(compiler):

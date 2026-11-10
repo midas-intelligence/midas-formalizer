@@ -138,6 +138,47 @@ def admitted(artifacts, dispatched, raw, **kwargs):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_missing_optional_fields_match_explicit_empty_values(self):
+        parse = lambda v: interpret(model_json(v), role='prover', contract='prover-action-v5')
+        minimal = dict(mode='proof', rationale='Use reflexivity.', proof_body='by rfl')
+        parsed = parse(dict(action=minimal))
+        expected = dict(minimal, definitions=[], imports=[], proof='', proof_departures='')
+        self.assertEqual(parsed.value, expected)
+        self.assertIsNone(parsed.memory)
+        self.assertEqual(expand(parsed.value, context(), uid('optional')).payload,
+                         expand(expected, context(), uid('optional')).payload)
+        lookup = parse(dict(action=dict(mode='retrieve', rationale='Read addition.', names=['Nat.add'])))
+        self.assertEqual(lookup.value['queries'], [])
+        self.assertEqual(lookup.value['backends'], [])
+        memory = parse(dict(action=minimal, memory_update=dict(strategy='Use reflexivity.')))
+        self.assertEqual(memory.memory, Update('Use reflexivity.'))
+
+    def test_defaults_do_not_replace_invalid_values_or_required_content(self):
+        minimal = dict(mode='proof', rationale='Use reflexivity.', proof_body='by rfl')
+        actions = [dict(minimal, imports=None), dict(minimal, definitions={}),
+                   dict(minimal, proof=42), dict(minimal, unexpected=[])]
+        actions += [{k: v for k, v in minimal.items() if k != missing}
+                    for missing in ('mode', 'rationale', 'proof_body')]
+        actions += [dict(mode='decomposition', rationale='Split the task.', proof_body='by trivial'),
+                    dict(mode='candidate', rationale='Prove the target.'),
+                    dict(mode='probe', rationale='Check the tactic.'),
+                    dict(mode='revise', rationale='Replace the proof.',
+                         edits=[dict(path='/entries/parent/proof', new='by trivial')])]
+        for action in actions:
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                interpret(response(action), role='prover', contract='prover-action-v5')
+        with self.assertRaises(ValueError):
+            interpret(response(minimal, {}), role='prover', contract='prover-action-v5')
+
+    def test_optional_reviewer_fields_preserve_verdict_requirements(self):
+        parse = lambda v: interpret(model_json(v), role='reviewer', contract='review-verdict-v2')
+        value = dict(verdict='accept', rationale='The plan is valid.')
+        self.assertEqual(parse(value).value, dict(value, findings=[], question='', urls=[], child_declarations=[]))
+        for invalid in (dict(value, verdict='reject'), dict(value, verdict='research'),
+                        dict(value, findings=None), dict(rationale='The plan is valid.')):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                parse(invalid)
+
     def test_default_contracts_are_strict_and_role_bound(self):
         value = response(proof())
         parsed = interpret(value, role='prover', contract='prover-action-v5')
@@ -271,6 +312,24 @@ class ProtocolTests(unittest.TestCase):
 
 
 class CandidateTests(unittest.TestCase):
+    def test_optional_candidate_entry_fields_keep_proof_obligations(self):
+        action = dict(mode='candidate', rationale='Use a supporting lemma.', entries=[
+            dict(key='helper', name='helper', statement='True'),
+            dict(key='parent', name='goal', proof_body='by exact h',
+                 dependencies=[dict(parameter='h', submission='current', key='helper')])])
+        parsed = interpret(response(action), role='prover', contract='prover-action-v5')
+        draft = expand(parsed.value, context(), uid('optional-entries'))
+        self.assertEqual(draft.unproved, ('helper',))
+        self.assertEqual(child_context(draft, 'helper', context()).subjects[0].statement, 'True')
+        del action['entries'][1]['proof_body']
+        parsed = interpret(response(action), role='prover', contract='prover-action-v5')
+        with self.assertRaisesRegex(ValueError, 'Required targets need complete proofs'):
+            expand(parsed.value, context(), uid('missing-target-proof'))
+        del action['entries'][0]['statement']
+        parsed = interpret(response(action), role='prover', contract='prover-action-v5')
+        with self.assertRaises(ValueError):
+            expand(parsed.value, context(), uid('missing-lemma-statement'))
+
     def test_candidate_infers_existing_subject_and_new_lemma_scope(self):
         for required in (Subject('target', 'goal'), Subject('lemma', 'goal', 'Root.target', 'True')):
             with self.subTest(kind=required.kind):
@@ -498,11 +557,16 @@ class CandidateTests(unittest.TestCase):
             revise(dict(mode='revise', rationale='Cannot delegate the exact current goal.', edits=[
                 dict(path='/entries/parent/proof', old=None, new=None)]), nested, ctx, uid('null-goal'))
 
-    def test_child_requires_explicit_proof_choice_but_allows_empty_guidance(self):
+    def test_child_defaults_to_unproved_with_optional_guidance(self):
         action = decomposition()
-        del action['children'][0]['proof_body']
-        with self.assertRaises(ValueError):
-            interpret(response(action), role='prover', contract='prover-action-v5')
+        for key in ('proof_body', 'proof', 'usefulness'):
+            del action['children'][0][key]
+        del action['children'][1]['depends_on']
+        parsed = interpret(response(action), role='prover', contract='prover-action-v5')
+        draft = expand(parsed.value, context(), uid('optional-child'))
+        self.assertIn('second', draft.unproved)
+        self.assertEqual(child_context(draft, 'second', context()).prerequisites[0].parameter, 'first')
+        self.assertEqual(parsed.value['children'][1]['depends_on'], [])
         for guidance in ('', '  '):
             action = decomposition()
             action['children'][0].update(proof_body=None, proof=guidance)
@@ -510,6 +574,29 @@ class CandidateTests(unittest.TestCase):
         action['children'][0].update(proof_body='', proof='An explanation.')
         with self.assertRaises(ValueError):
             expand(action, context(), uid('invalid-child'))
+
+    def test_child_dependencies_ignore_scoped_definitions_and_repeated_names(self):
+        inherited = dict(name='oldValue', kind='def', type='Nat', value='0')
+        reference = Reference('base', 'earlier', uid('old'))
+        ctx = Context(context().selection_id, (Subject('lemma', 'goal', 'Root.target', 'True'),),
+                      pack([inherited]), (Prerequisite('h', reference, 'True'),))
+        action = decomposition()
+        action['definitions'] = [dict(name='newValue', kind='def', type='Nat', value='oldValue')]
+        action['children'][0]['depends_on'] = ['oldValue', 'first', 'newValue', 'h', 'first', 'h']
+        action['children'][1]['depends_on'] = ['newValue', 'oldValue', 'newValue']
+        draft = expand(action, ctx, uid('redundant-dependencies'))
+        child = child_context(draft, 'second', ctx)
+        self.assertEqual([p.parameter for p in child.prerequisites], ['first', 'h'])
+        self.assertEqual([d['name'] for d in load_record(child.definitions, limit=65536)],
+                         ['oldValue', 'newValue'])
+        self.assertEqual(child_context(draft, 'first', ctx).prerequisites, ())
+        clean = deepcopy(action)
+        clean['children'][0]['depends_on'] = ['first', 'h']
+        clean['children'][1]['depends_on'] = []
+        self.assertEqual(draft.payload, expand(clean, ctx, uid('redundant-dependencies')).payload)
+        action['children'][0]['depends_on'].append('missing')
+        with self.assertRaisesRegex(ValueError, 'Unknown child prerequisite'):
+            expand(action, ctx, uid('unknown-dependency'))
 
     def test_candidate_lean_support_is_checked_without_its_own_review(self):
         child = dict(key='support', name='support', scope_target=None, statement='True',
@@ -717,6 +804,35 @@ class MemoryTests(unittest.TestCase):
 class StateTests(unittest.TestCase):
     def setUp(self):
         self.strategy, self.policy = Strategy(), Policy(Config())
+
+    def test_proof_with_inherited_premises_uses_direct_allowance_and_survives_reload(self):
+        artifacts, snapshot = fixture()
+        ctx = Context(context().selection_id, (Subject('lemma', 'child', 'goal', 'True'),),
+            prerequisites=(Prerequisite('h', Reference('base', 'earlier', uid('earlier'))),))
+        snapshot = replace(snapshot, context=ctx,
+            version=replace(snapshot.version, context=artifacts.save(ctx.payload)),
+            usage=OwnerUsage(decomposition=self.policy.config.mathematics.decomposition))
+        dispatched, prepared, _ = dispatch(snapshot, artifacts)
+        capabilities = decode(prepared.wire.wire, limit=8*1024**2)['input'][-1]['text']
+        self.assertIn('Candidate modes: proof\n', capabilities)
+        changes = self.strategy.on_model(snapshot, self.policy, dispatched,
+            admitted(artifacts, dispatched, response(proof())), artifacts, submission_id=uid('proof-attempt'))
+        draft = Draft.load(changes.draft.payload)
+        self.assertEqual(draft.mode, 'direct')
+        self.assertEqual(load_submission(draft.submission)['entries'][0]['dependencies'],
+                         [ctx.prerequisites[0].dependency()])
+        revised = revise(dict(mode='revise', rationale='Use the premise.', edits=[
+            dict(path='/entries/parent/proof', old=None, new='by exact h')]), draft, ctx, uid('revised-proof'))
+        self.assertEqual(Draft.load(revised.payload).mode, 'direct')
+        self.assertEqual(expand(decomposition(), ctx, uid('new-children')).mode, 'decomposition')
+        with self.assertRaisesRegex(ValueError, 'decomposition_allowance_exhausted'):
+            self.strategy.on_model(snapshot, self.policy, dispatched,
+                admitted(artifacts, dispatched, response(decomposition())), artifacts, submission_id=uid('decomposition-attempt'))
+        exhausted = replace(snapshot, usage=OwnerUsage(direct=self.policy.config.mathematics.direct))
+        dispatched, _, _ = dispatch(exhausted, artifacts)
+        with self.assertRaisesRegex(ValueError, 'direct_allowance_exhausted'):
+            self.strategy.on_model(exhausted, self.policy, dispatched,
+                admitted(artifacts, dispatched, response(proof())), artifacts, submission_id=uid('proof-attempt'))
 
     def test_prover_schema_filters_disabled_research_and_capabilities_report_availability(self):
         cases = (

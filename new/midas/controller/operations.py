@@ -19,6 +19,7 @@ def model_operation(provider, reduce):
         if value.status != ResultStatus.SUCCEEDED:
             failure = Failure.CANCELLED if value.status == ResultStatus.CANCELLED else {
                 'transient': Failure.TRANSPORT, 'crash': Failure.TRANSPORT, 'rate_limit': Failure.RATE_LIMIT,
+                'service_unavailable': Failure.SERVICE_UNAVAILABLE,
                 'timeout': Failure.TIMEOUT, 'malformed_output': Failure.PROTOCOL, 'output_limit': Failure.PROTOCOL,
             }.get(value.outcome.error, Failure.PERMANENT)
         return Accepted(value, failure, value.outcome.retry_after_ms or 0,

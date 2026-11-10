@@ -196,6 +196,40 @@ class Contracts(unittest.TestCase):
             self.assertEqual(run.writer.status_snapshot().accounting.turns, 1)
             self.assertEqual(Compiler.calls, ['binding', 'proof', 'integrate', 'audit'])
 
+    def test_child_proofs_charge_direct_allowance_with_inherited_prerequisites(self):
+        from tests.test_strategy import decomposition
+        self.app.checker_factory = LemmaCompiler
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        accept = model_json(dict(child_declarations=[], verdict='accept', rationale='Valid decomposition.',
+                                 findings=[], question='', urls=[]))
+        action = decomposition()
+        action['children'][0]['statement'] = 'True ∨ True'
+        action['children'][1]['statement'] = 'True ∧ True'
+        with self.start(workflow='scripted', config=replace(Config(), prover=route, reviewer=route),
+                script=(('prover', response(action)), ('reviewer', accept),
+                        ('prover', response(proof())), ('prover', response(proof())))) as run:
+            # The fixture does not replay conditional assembly. Stop after
+            # all three proof attempts have been checked and charged.
+            for _ in range(1000):
+                run.step()
+                nodes = run.workflow.graph(run.writer).nodes
+                if len(nodes) == 3 and all(n.selected is not None for n in nodes):
+                    break
+                time.sleep(.001)
+            else:
+                self.fail('Child proof attempts did not finish')
+            root = self.selected.identities[0].id
+            inherited = []
+            for node in run.workflow.graph(run.writer).nodes:
+                owner = node.owner.obligation_id
+                scope = 'owner:'+owner
+                self.assertEqual(run.writer.counter(scope, 'decomposition'), int(owner == root))
+                self.assertEqual(run.writer.counter(scope, 'direct'), int(owner != root))
+                if owner != root:
+                    snapshot = run.workflow.snapshot(run.writer, node.owner)
+                    inherited.append(len(snapshot.context.prerequisites))
+            self.assertEqual(sorted(inherited), [0, 1])
+
     def test_revised_decomposition_reuses_verified_support_after_parent_failure(self):
         from midas.application import records as r
         from midas.controller import Accepted
@@ -741,7 +775,7 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(run.writer.counter('owner:'+owner, 'direct'), 2)
                     self.assertEqual(run.writer.status_snapshot().accounting.turns, 5)
 
-    def test_protocol_rejection_is_saved_but_omitted_from_next_model_prompt(self):
+    def test_protocol_rejection_is_saved_and_visible_in_next_model_prompt(self):
         from midas.application import records as r
         from midas.provider import ModelOutput, Route
         from midas.strategy import Memory
@@ -763,9 +797,10 @@ class Contracts(unittest.TestCase):
                     if len(calls) == 1:
                         reply = response(action)
                     else:
-                        self.assertNotIn(b'Action rejected:', raw)
-                        self.assertNotIn(b'Correct the action using the current CAPABILITIES', raw)
-                        self.assertNotIn(b'FEEDBACK observation-', raw)
+                        self.assertIn(b'Action rejected:', raw)
+                        self.assertIn(expected, raw)
+                        self.assertIn(b'Correct the action using the current CAPABILITIES', raw)
+                        self.assertIn(b'FEEDBACK observation-', raw)
                         reply = response(proof())
                     return ModelOutput(raw=reply, usage=Usage(0, 0, 0, 0))
                 self.app.transports = {Route.from_config(route).scope: transport}
@@ -779,8 +814,7 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(run.writer.counter('owner:'+owner, 'protocol'), 1)
                     self.assertEqual(run.writer.counter('owner:'+owner, 'retrieval'), 0)
                     self.assertEqual(run.writer.counter('owner:'+owner, 'research'), 0)
-                    self.assertEqual(calls[0].partition(b'QUESTION next-action')[0],
-                                     calls[1].partition(b'QUESTION next-action')[0])
+                    self.assertNotEqual(calls[0], calls[1])
 
     def test_resume_raised_protocol_allowance_reopens_exhausted_node(self):
         from midas.application import records as r
@@ -789,7 +823,8 @@ class Contracts(unittest.TestCase):
         calls = []
         def transport(request, raw, *args):
             calls.append(raw)
-            self.assertNotIn(b'Action rejected:', raw)
+            if len(calls) > 1:
+                self.assertIn(b'Action rejected:', raw)
             action = (dict(mode='retrieve', rationale='Inspect addition.', queries=['addition'],
                            names=[], backends=[]) if len(calls) <= 3 else proof())
             return ModelOutput(raw=response(action), usage=Usage(0, 0, 0, 0))

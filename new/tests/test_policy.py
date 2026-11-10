@@ -647,6 +647,20 @@ class RetryAndCompletionTests(unittest.TestCase):
                 policy.retry(reservation, invocation, report, failure, RetryHistory(), RunUsage(),
                              now_ms=1000, saved_recovery=RecoveryConfig(), resume=True)
 
+    def test_service_unavailable_uses_transport_allowance_not_unknown_allowance(self):
+        decision = self.retry(delivery=DeliveryCertainty.DELIVERED,
+                              failure=Failure.SERVICE_UNAVAILABLE)
+        self.assertTrue(decision.eligible)
+        self.assertEqual((decision.transport_charge, decision.unknown_charge, decision.turn_charge),
+                         (1, 0, 1))
+        self.assertEqual(self.retry(delivery=DeliveryCertainty.DELIVERED,
+            failure=Failure.SERVICE_UNAVAILABLE, history=RetryHistory(transport_retries=2)).reason,
+            'provider_retry_exhausted')
+        self.assertEqual(self.retry(delivery=DeliveryCertainty.UNKNOWN,
+            failure=Failure.SERVICE_UNAVAILABLE).reason, 'unknown_outcome_policy')
+        self.assertEqual(self.retry(delivery=DeliveryCertainty.DELIVERED).reason,
+                         'unknown_outcome_policy')
+
     def test_cancel_resume_resource_replay_and_mathematical_revision_are_distinct(self):
         self.assertEqual(self.retry(failure=Failure.CANCELLED).reason, 'cancelled')
         resumed = self.retry(failure=Failure.CANCELLED, resume=True, delivery=DeliveryCertainty.UNKNOWN)
