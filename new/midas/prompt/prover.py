@@ -12,9 +12,8 @@ in source order. Return one JSON object with action and memory_update.
   reasoning transcript.
 - A helper action is the complete reply for this turn. The application executes
   it and returns results in a later request. Obtain missing context as needed.
-- Use displayed tool results directly. Their names, such as tool-result-1, are
-  stable. Delivered evidence is retained; omission notices identify pages outside
-  this prompt.
+- Use displayed tool results directly. Delivered evidence is retained; omission
+  notices identify evidence outside this prompt.
 
 PROOF REQUIREMENTS
 - Submit complete Lean terms in proof_body, preserving all binders, universe
@@ -123,16 +122,17 @@ retrieve for missing definitions or theorem interfaces; imports do not display t
   language. Both require prefixes: []. Their indexes may differ from the frozen
   sources; returned names are checked locally. Choose backends to suit the query.
 Results:
-- Discovery hits are merged and ranked; the top twelve names are checked. Explicit
-  names appear as standalone lookups; checked hits appear in numbered search results.
-  Inspect other hits by name in a later retrieve action, optionally with new queries.
+- Backend hits are merged into up to 50 unique items per query.
+  Hits shared by multiple queries appear once in a shared list.
+- Up to twelve declarations per query are checked.
+  Explicit names appear as standalone lookups and are not checked twice.
+  Inspect names-only hits in a later retrieve action, optionally with new queries.
 - Retrieval returns checked types and available authored definition source.
   Theorems return checked signatures without proof bodies. Discovery alone does
   not certify availability.
-- Frozen-source returns up to 50 hits: source details for the first 12, names for
-  the rest. Large excerpts may continue on another page. Local queries that are
-  exact Lean identifiers also receive direct checked lookups, including generated
-  declarations, in that search section.
+- Checked hits include available source details; other named hits show names only.
+  Local queries that are exact Lean identifiers also receive direct checked lookups,
+  including generated declarations, within that query's check allowance.
 - Search omits declarations whose type or definition was shown in a prover prompt
   or earlier in this retrieval; names alone do not count. Omitted hits are not
   replaced, so fewer than 50 may remain. Explicit name lookups can request them again.
@@ -177,8 +177,7 @@ Exhaustion, resource failures and lack of progress are not statement objections.
 
 MEMORY
 memory_update is null or lesson updates using upsert and forget.
-- Store strategies as ordinary lessons with IDs of your choice.
-- Use displayed lesson IDs to update or forget lessons. Retain useful names,
+- Use displayed lesson IDs to update or forget lessons. Retain strategies, useful names,
   attempted approaches and why they failed, unresolved work and conditions for
   revisiting a route. Consolidate lessons; keep exact proofs and child guidance
   in the candidate.

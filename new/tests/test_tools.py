@@ -1,6 +1,5 @@
 """Offline tools contracts; no Lean execution, hosted calls or model calls."""
 from dataclasses import replace
-from fractions import Fraction
 from hashlib import sha256
 import io
 import json
@@ -286,7 +285,8 @@ class ToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             continue_retrieval(plan, reports, replace(self.scope, owner=replace(self.scope.owner, generation=1)))
 
-    def test_fusion_matches_fraction_order_and_deduplicates_complete_stages(self):
+    def test_fusion_caps_merged_backends_at_fifty_per_query_and_checks_twelve_each(self):
+        from midas.tools.retrieval import merge_searches
         local = Backend('frozen-source', ('Mathlib',))
         for backends in ((local,), (local, Backend('leanexplore')), (local, Backend('leansearch')),
                          (Backend('leanexplore'), Backend('leansearch')),
@@ -295,23 +295,103 @@ class ToolsTests(unittest.TestCase):
                 request = self.request(Retrieve(('a query', 'b query', 'c query'), backends=backends))
                 reports, per_query = [], {}
                 for stage in search_stages(request):
-                    count = 1000 if stage.action.backend.name == 'frozen-source' else 50
-                    names = tuple(f'N.x{(n*7+stage.ordinal)%1000}' for n in range(count))
-                    rows = (tuple(Match(names[i:i+20], 'lib/X.lean', i+1, i+1, 'source', 1)
-                                  for i in range(0, count, 20)) if count == 1000
+                    names = tuple(f'N.stage{stage.ordinal}hit{n:02}' for n in range(50))
+                    rows = (tuple(Match((name,), 'lib/X.lean', i+1, i+1, 'source', 1)
+                                  for i, name in enumerate(names)) if stage.action.backend == local
                             else tuple(Match((name,)) for name in names))
                     reports.append(SearchResult(stage.sha256, rows))
-                    weights = per_query.setdefault(stage.action.query, {})
+                    ranks = per_query.setdefault(stage.action.query, [])
                     for rank, name in enumerate(names):
-                        weights[name] = max(weights.get(name, Fraction()), Fraction(1, 60+rank))
-                expected = {}
-                for weights in per_query.values():
-                    for name, weight in weights.items():
-                        expected[name] = expected.get(name, Fraction()) + weight
-                ranked = tuple(sorted(expected, key=lambda n: (-expected[n], n)))
+                        ranks.append((rank, name))
+                searches = tuple((report, stage.action) for report, stage in
+                                 zip(reports, search_stages(request)))
+                queries = merge_searches(searches)
+                self.assertEqual(queries, merge_searches(tuple(
+                    pair for query in request.action.queries
+                    for pair in reversed(searches) if pair[1].query == query)))
                 fusion = fuse(request, tuple(reports))
-                self.assertEqual(fusion.ranked, ranked)
-                self.assertEqual(fusion.selected, ranked[:12])
+                self.assertEqual(len(fusion.ranked), 150)
+                self.assertEqual(len(fusion.selected), 36)
+                for query in queries:
+                    expected = tuple(name for _, name in sorted(per_query[query.query])[:50])
+                    self.assertEqual(tuple(hit.name for hit in query.hits), expected)
+                    self.assertEqual(set(fusion.selected).intersection(expected), set(expected[:12]))
+
+    def test_two_queries_with_three_shared_hits_check_twenty_one_unique_declarations(self):
+        shared = tuple(f'N.shared{i}' for i in range(3))
+        specific = tuple(tuple(f'N.q{q}hit{i:02}' for i in range(47)) for q in (1, 2))
+        request = self.request(Retrieve(('first query', 'second query'), backends=(Backend('leanexplore'),)))
+        stages = search_stages(request)
+        reports = tuple(SearchResult(stage.sha256, tuple(Match((name,)) for name in (*names, *shared)))
+                        for stage, names in zip(stages, specific))
+        fusion = fuse(request, reports)
+        self.assertEqual(len(fusion.ranked), 97)
+        self.assertEqual(fusion.selected[:3], shared)
+        self.assertEqual(len(fusion.selected), 21)
+        for names in specific:
+            self.assertEqual(set(fusion.selected).intersection(names), set(names[:9]))
+        checked = {name: f'theorem {name} : True' for name in fusion.selected}
+        rows, positions, displayed = retrieval_summary(request.action,
+            tuple((report, stage.action) for report, stage in zip(reports, stages)), checked)
+        self.assertEqual(rows[0], 'Shared hits (multiple queries):')
+        self.assertEqual(len(positions), 21)
+        self.assertEqual(len(displayed), 21)
+        for index, name in enumerate(shared, 1):
+            self.assertTrue(rows[index].startswith(f'{index}. [queries 1, 2] {name}\n'))
+            self.assertEqual(sum(name in row for row in rows), 1)
+        for q, names in enumerate(specific, 1):
+            query_rows = [row for row in rows if row.splitlines()[0].split('. ')[-1] in names]
+            self.assertEqual(len(query_rows), 47)
+            self.assertEqual(sum('\n' in row for row in query_rows), 9)
+            self.assertEqual(sum('\n' not in row for row in query_rows), 38)
+
+    def test_shared_aliases_and_large_overlap_respect_every_query_check_allowance(self):
+        request = self.request(Retrieve(('first query', 'second query', 'third query'),
+                                       backends=(Backend('leanexplore'), Backend('leansearch'))))
+        stages = search_stages(request)
+        names = tuple(f'N.shared{i:02}' for i in range(15))
+        reports = tuple(SearchResult(stage.sha256, tuple(Match((name if stage.action.backend.name == 'leanexplore'
+            else '_root_.'+name,)) for name in names)) for stage in stages)
+        fusion = fuse(request, reports)
+        self.assertEqual(len(fusion.ranked), 15)
+        self.assertEqual(len(fusion.selected), 12)
+        checked = {name: f'theorem {name} : True' for name in fusion.selected}
+        rows, positions, _ = retrieval_summary(request.action,
+            tuple((report, stage.action) for report, stage in zip(reports, stages)), checked)
+        self.assertEqual(len(positions), 12)
+        self.assertEqual(sum('[queries 1, 2, 3]' in row for row in rows), 15)
+
+    def test_pairwise_overlaps_across_three_queries_never_exceed_twelve_checks_each(self):
+        pairs = {pair: tuple(f'N.{pair}{i}' for i in range(8)) for pair in ('ab', 'ac', 'bc')}
+        names = (pairs['ab'] + pairs['ac'], pairs['ab'] + pairs['bc'], pairs['ac'] + pairs['bc'])
+        names = tuple(shared + tuple(f'N.unique{q}x{i:02}' for i in range(34))
+                      for q, shared in enumerate(names))
+        request = self.request(Retrieve(('first query', 'second query', 'third query'),
+                                       backends=(Backend('leanexplore'),)))
+        reports = tuple(SearchResult(stage.sha256, tuple(Match((name,)) for name in found))
+                        for stage, found in zip(search_stages(request), names))
+        fusion = fuse(request, reports)
+        self.assertEqual(len(fusion.selected), len(set(fusion.selected)))
+        for found in names:
+            self.assertEqual(len(set(fusion.selected).intersection(found)), 12)
+
+    def test_display_and_check_selection_apply_the_same_exclusions_before_merged_cap(self):
+        request = self.request(Retrieve(('find terms',),
+            backends=(Backend('leanexplore'), Backend('leansearch'))), forbidden=('N.a00',))
+        stages = search_stages(request)
+        reports = tuple(SearchResult(stage.sha256, tuple(Match((name,)) for name in names))
+            for stage, names in zip(stages, (
+                ('_root_.N.«a00»', *(f'N.a{i:02}' for i in range(1, 50))),
+                tuple(f'N.b{i:02}' for i in range(50)))))
+        fusion = fuse(request, reports)
+        checked = {name: f'theorem {name} : True' for name in fusion.selected}
+        rows, positions, _ = retrieval_summary(request.action,
+            tuple((report, stage.action) for report, stage in zip(reports, stages)), checked,
+            forbidden=request.forbidden)
+        self.assertEqual(len(rows), 51)
+        self.assertEqual(len(positions), 12)
+        self.assertEqual({name for name, _ in positions}, set(fusion.selected))
+        self.assertNotIn('a00', '\n'.join(rows))
 
     def test_fusion_same_query_backend_overlap_does_not_bury_first_hit(self):
         target = 'Polynomial.fwdDiff_iter_degree_add_one_eq_zero'
@@ -336,7 +416,7 @@ class ToolsTests(unittest.TestCase):
                 self.assertEqual(dict(fusion.provenance)[target], tuple(
                     (s.ordinal, 0) for s in plan.stages if s.action.backend == hosted))
 
-    def test_fusion_distinct_queries_add_even_when_only_one_backend_finds_the_name(self):
+    def test_fusion_groups_cross_query_overlap_without_rewarding_backend_overlap(self):
         request = self.request(Retrieve(('first query', 'second query'),
             backends=(Backend('frozen-source'), Backend('leanexplore'))))
         names = (('A.first', 'Z.across_queries', 'N.within_one_query'),
@@ -347,7 +427,7 @@ class ToolsTests(unittest.TestCase):
             else Match((name,)) for name in found)) for stage, found in zip(search_stages(request), names))
         fusion = fuse(request, reports)
         self.assertEqual(fusion.ranked,
-            ('Z.across_queries', 'A.first', 'B.first', 'C.first', 'D.first', 'N.within_one_query'))
+            ('Z.across_queries', 'A.first', 'C.first', 'B.first', 'D.first', 'N.within_one_query'))
         self.assertEqual(dict(fusion.provenance)['Z.across_queries'], ((0, 1), (2, 1)))
         self.assertEqual(dict(fusion.provenance)['N.within_one_query'], ((0, 2), (1, 1)))
 
@@ -402,7 +482,7 @@ class ToolsTests(unittest.TestCase):
         reports = (SearchResult(plan.stages[0].sha256, tuple(Match((name,)) for name in names)),)
         following, fusion = continue_retrieval(plan, reports, self.scope)
         self.assertEqual(fusion.ranked, names)
-        self.assertEqual(fusion.selected, (names[-1], *names[:12]))
+        self.assertEqual(fusion.selected, (names[-1], *names[:11]))
         self.assertEqual(tuple(name for s in following.stages for name in s.action.names), fusion.selected)
         direct = self.plan(Retrieve(names=(names[12], names[18])))
         self.assertEqual(tuple(s.action for s in direct.stages), (Lookup((names[12], names[18])),))
@@ -504,7 +584,7 @@ class ToolsTests(unittest.TestCase):
         checked = {name: f'theorem {name} : True' for name in (*explicit, *hits[:12])}
         rows, positions, displayed = retrieval_summary(action, ((result, search),), checked)
         self.assertEqual(rows[:4], tuple(checked[name] for name in explicit))
-        self.assertEqual(rows[4], 'Search (frozen-source): find terms')
+        self.assertEqual(rows[4], 'Search 1: find terms')
         self.assertEqual(len(rows), 4+1+50)
         for i, name in enumerate(hits[:12]):
             self.assertEqual(rows[5+i], f'{i+1}. {name}\nSource: project/Main.lean:{i+1}\n{checked[name]}')
@@ -523,12 +603,12 @@ class ToolsTests(unittest.TestCase):
         result = SearchResult('a'*64, tuple(Match((name,)) for name in hits))
         checked = {hits[0]: 'def N.hit0 : Nat\n\n'+('large source body\n'*1500)}
         rows, positions, displayed = retrieval_summary(action, ((result, search),), checked)
-        self.assertEqual(rows[0], 'Search (leanexplore): find terms')
-        self.assertIn('50. N.hit49', rows[1])
-        self.assertEqual(positions, (('N.hit0', 2),))
+        self.assertEqual(rows[0], 'Search 1: find terms')
+        self.assertEqual(rows[-1], '50. N.hit49')
+        self.assertEqual(positions, (('N.hit0', 1),))
         self.assertEqual(tuple((name, index) for name, index, _ in displayed), positions)
         archive = prepare_archive(self.scope, 'a'*64, rows, (self.a.save(b'provenance'),), self.a)
-        selected = b''.join(page_text(self.a.data[ref.id], records={'2'}) for ref in archive.pages)
+        selected = b''.join(page_text(self.a.data[ref.id], records={'1'}) for ref in archive.pages)
         self.assertIn(b'def N.hit0 : Nat', selected)
         self.assertNotIn(b'N.hit49', selected)
         self.assertGreater(len(archive.pages), 1)
@@ -540,9 +620,23 @@ class ToolsTests(unittest.TestCase):
         for error in (None, 'search failure'):
             result = SearchResult('a'*64, error=error)
             rows, positions, _ = retrieval_summary(action, ((result, search),), checked)
-            self.assertEqual(rows[0], 'Search (frozen-source): N.Generated.rec')
+            self.assertEqual(rows[0], 'Search 1: N.Generated.rec')
             self.assertEqual(rows[-1], 'Exact identifier lookup:\n'+checked['N.Generated.rec'])
-            self.assertEqual(positions, (('N.Generated.rec', 2),))
+            self.assertEqual(positions, (('N.Generated.rec', 2 if error else 1),))
+
+    def test_continuous_retrieval_display_reassembles_unicode_across_storage_pages(self):
+        from midas.application.helpers import pages_text
+        rows = ('Search (frozen-source): terms', 'def N.long : Nat\n'+'-- αβλ source\n'*3000,
+                '50. N.last')
+        archive = prepare_archive(self.scope, 'a'*64, rows, (self.a.save(b'provenance'),), self.a)
+        self.assertGreater(len(archive.pages), 2)
+        payloads = tuple(self.a.data[ref.id] for ref in archive.pages)
+        self.assertEqual(pages_text(payloads), ('\n\n'.join(rows)+'\n').encode())
+        self.assertEqual(pages_text(payloads, records={'1'}), (rows[1]+'\n').encode())
+        # Missing storage fragments must still be marked as incomplete.
+        partial = pages_text((payloads[0], payloads[-1]))
+        self.assertIn(b'Excerpt continues on the next page.', partial)
+        self.assertIn(b'Continued excerpt', partial)
 
     def test_paged_multi_name_hit_tracks_where_each_type_actually_starts(self):
         from midas.application.helpers import page_text
@@ -554,25 +648,25 @@ class ToolsTests(unittest.TestCase):
         rows, _, displayed = retrieval_summary(action, ((result, search),), checked)
         archive = prepare_archive(self.scope, 'a'*64, rows, (self.a.save(b'provenance'),), self.a)
         first = page_text(self.a.data[archive.pages[0].id])
-        self.assertIn(b'N.later', first)
+        self.assertNotIn(b'N.later', first)
         self.assertNotIn(checked['N.later'].encode(), first)
         for name, index, offset in displayed:
             self.assertTrue(rows[index].encode()[offset:].startswith(checked[name].encode()))
 
     def test_checked_search_source_is_not_repeated_within_entry_or_as_another_lookup(self):
         action = Retrieve(('first query', 'second query'), backends=(Backend('frozen-source'),))
-        source = 'def example : Nat := 1'
-        result = SearchResult('a'*64, (Match(('N.example',), 'project/Main.lean', 1, 1, source),))
+        source = 'def exampleDef : Nat := 1'
+        result = SearchResult('a'*64, (Match(('N.exampleDef',), 'project/Main.lean', 1, 1, source),))
         searches = tuple((result, Search(query, action.backends[0])) for query in action.queries)
-        checked = {'N.example': 'def N.example : Nat\n\n'+source}
+        checked = {'N.exampleDef': 'def N.exampleDef : Nat\n\n'+source}
         rows, positions, displayed = retrieval_summary(action, searches, checked)
-        self.assertEqual(rows[0], 'Search (frozen-source): first query')
-        self.assertEqual(rows[1].splitlines()[:2], ['N.example', 'Source: project/Main.lean:1'])
+        self.assertEqual(rows[0], 'Shared hits (multiple queries):')
+        self.assertEqual(rows[1].splitlines()[:2], ['1. [queries 1, 2] N.exampleDef', 'Source: project/Main.lean:1'])
         self.assertEqual(rows[1].count(source), 1)
-        self.assertEqual('\n'.join(rows).count('def N.example : Nat'), 1)
-        self.assertEqual(positions, (('N.example', 1),))
+        self.assertEqual('\n'.join(rows).count('def N.exampleDef : Nat'), 1)
+        self.assertEqual(positions, (('N.exampleDef', 1),))
         self.assertEqual(tuple((name, index) for name, index, _ in displayed), positions)
-        self.assertEqual(rows[-1], 'No new matches; declaration types or definitions were already shown.')
+        self.assertEqual(rows[-1], 'No additional hits; matches are shared above or were already shown.')
         self.assertEqual('\n'.join(rows).count(source), 1)
 
     def test_retrieval_removes_seen_details_without_refilling_or_promoting_tail(self):
@@ -599,9 +693,8 @@ class ToolsTests(unittest.TestCase):
             seen=('N.known',), available={'N.known'})
         self.assertEqual(rows[0], checked['N.known'])
         self.assertEqual('\n'.join(rows).count('N.known'), 1)
-        self.assertEqual(rows.count('N.hint'), 2)
-        self.assertIn('N.failed\nN.failed: unavailable', rows)
-        self.assertIn('N.failed', rows)
+        self.assertEqual(sum('N.hint' in row for row in rows), 1)
+        self.assertIn('N.failed\nN.failed: unavailable', '\n'.join(rows))
         self.assertEqual(displayed, (('N.known', 0, 0),))
         self.assertEqual(positions, (('N.known', 0), ('N.failed', 2)))
 
@@ -615,7 +708,7 @@ class ToolsTests(unittest.TestCase):
         self.assertNotIn('N.old', '\n'.join(rows))
         self.assertIn('N.new', rows[1])
         self.assertIn('-- useful comment', rows[2])
-        self.assertEqual(tuple((name, index) for name, index, _ in displayed), (('N.new', 1),))
+        self.assertEqual(displayed, ())
 
     def test_probe_display_preserves_diagnostics_goals_flags_and_inspection(self):
         case = dict(id='inspect', operation='tactic', code='run_tac do\n  pure ()', setup='', expected=None)
@@ -815,6 +908,27 @@ class ToolsTests(unittest.TestCase):
         for row, rendered in zip(records, result):
             self.assertIn(row['query']+' : checked type\n\n'+source.rstrip(), rendered)
         self.assertEqual(self.a.reads, [index.entries[0].artifact])
+
+    def test_research_page_size_roundtrip_and_default_page_bound(self):
+        from midas.application.helpers import pages_text
+        from midas.tools.evidence import PAGE_BYTES, RESEARCH_PAGE_BYTES
+        for value in ('α😀\n'*3000, 'α😀\n'*10000):
+            for bound in (PAGE_BYTES, RESEARCH_PAGE_BYTES):
+                with self.subTest(bytes=len(value.encode()), bound=bound):
+                    archive = prepare_archive(self.scope, 'a'*64, (value,),
+                        (self.a.save(b'receipt'),), self.a, page_bytes=bound)
+                    archive = Archive.load(archive.payload)
+                    payloads, cursor = [], None
+                    while True:
+                        page = read_page(archive, self.scope, self.a, cursor=cursor)
+                        self.assertLessEqual(len(page.payload), bound)
+                        payloads.append(page.payload)
+                        cursor = page.next_cursor
+                        if cursor is None:
+                            break
+                    self.assertEqual(pages_text(payloads), (value+'\n').encode())
+                    if len(value.encode()) < RESEARCH_PAGE_BYTES:
+                        self.assertEqual(len(payloads), 1 if bound == RESEARCH_PAGE_BYTES else 2)
 
     def test_archive_large_unicode_indexed_reads_and_duplicate_guard(self):
         value = 'α😀"\\\n'*180000

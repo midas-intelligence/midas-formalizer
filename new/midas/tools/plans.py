@@ -1,35 +1,15 @@
 """Helper planning and reduction over explicit values; no workers or database."""
 from dataclasses import dataclass, replace
-from functools import lru_cache
-from math import lcm
+from itertools import zip_longest
 
 from ..domain import ArtifactRef, ReceiptBinding, ResultStatus
 from ..domain import encoding as codec
 from ..domain.records import identifier, instance, items, natural
 from ..policy import AdmissionRequest
-from ..source import lean_name, parse_identifier
 from .protocol import (HelperRequest, Lookup, Probe, WebSearch, Retrieve, Scope, Search, Stage,
                        REQUEST_BYTES, RESULT_BYTES, action_value, read, text)
 from .search import SearchResult
-
-# The complete bounded rank domain has one exact denominator. Integer addition
-# preserves Fraction ordering without allocating/reducing a fraction per hit.
-_DENOMINATOR = lcm(*range(60, 1060))
-_RANK_WEIGHT = tuple(_DENOMINATOR // rank for rank in range(60, 1060))
-
-
-@lru_cache(maxsize=4096)
-def _canonical(name):
-    parsed = parse_identifier(name)
-    return lean_name(parsed, readable=True) if parsed is not None else None
-
-
-def _allowed(forbidden):
-    denied = {_canonical(n) for n in forbidden}
-    def allowed(name):
-        canonical = _canonical(name)
-        return canonical is not None and canonical not in denied and not canonical.startswith('Midas')
-    return allowed
+from .retrieval import allowed_names as _allowed, canonical as _canonical, merge_searches, shared_hits
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +88,7 @@ def fuse(request, reports):
     stages = search_stages(request)
     if type(reports) is not tuple or len(reports) != len(stages):
         raise ValueError('Retrieval requires every exact search stage outcome')
-    scores, query_weights, provenance, excluded, errors = {}, {}, {}, {}, []
+    provenance, excluded, errors = {}, {}, []
     allowed = _allowed(request.forbidden)
     for stage, report in zip(stages, reports):
         instance(report, SearchResult)
@@ -116,46 +96,53 @@ def fuse(request, reports):
         if report.error is not None:
             errors.append((stage.ordinal, report.error))
             continue
-        best = query_weights.setdefault(stage.action.query, {})
         names = dict.fromkeys(name for row in report.records for name in row.names)
         for rank, name in enumerate(names):
             if not allowed(name):
                 excluded[name] = None
                 continue
-            # Each query contributes its best backend rank, once. Keep every
-            # occurrence below for provenance, including the weaker backend.
-            weight = _RANK_WEIGHT[rank]
-            previous = best.get(name, 0)
-            if weight > previous:
-                best[name] = weight
-                scores[name] = scores.get(name, 0) + weight - previous
-            provenance.setdefault(name, []).append((stage.ordinal, rank))
-    ranked = tuple(sorted(scores, key=lambda n: (-scores[n], n)))
+            provenance.setdefault(_canonical(name), []).append((stage.ordinal, rank))
+    queries = merge_searches(tuple((report, stage.action) for stage, report in zip(stages, reports)),
+                            allowed=allowed)
+    shared = shared_hits(queries)
+    common = {hit.key for hit, _ in shared}
+    remaining = tuple(tuple(hit for hit in query.hits if hit.name is not None and hit.key not in common)
+                      for query in queries)
+    ranked = tuple(hit.name for hit, _ in shared) + tuple(
+        hit.name for row in zip_longest(*remaining) for hit in row if hit is not None)
     action = request.action
     # The lexical index cannot enumerate generated declarations. Try local
     # identifier queries directly in the checker, even without any source hits.
+    memberships = {}
+    for index, query in enumerate(queries):
+        for hit in query.hits:
+            if hit.name is not None:
+                memberships.setdefault(_canonical(hit.name), set()).add(index)
     direct = []
-    for stage in stages:
-        name = stage.action.query.strip()
-        if stage.action.backend.name == 'frozen-source' and _canonical(name) is not None:
+    for index, query in enumerate(queries):
+        name = query.query.strip()
+        if query.local and _canonical(name) is not None:
             if allowed(name):
                 direct.append(name)
+                memberships.setdefault(_canonical(name), set()).add(index)
             else:
                 excluded[name] = None
-    candidates = {}
-    for name in (*direct, *ranked):
-        candidates.setdefault(_canonical(name), name)
-        if len(candidates) == 12:
-            break
-    names = dict.fromkeys((*action.names, *candidates.values()))
-    selected = []
-    for name in names:
-        if allowed(name):
-            selected.append(name)
-        else:
+    selected, counts = {}, [0] * len(queries)
+    for name in (*action.names, *direct, *ranked):
+        if not allowed(name):
             excluded[name] = None
-    return Fusion(ranked, tuple(selected), tuple(excluded),
-                  tuple((n, tuple(provenance[n])) for n in ranked), tuple(errors))
+            continue
+        key = _canonical(name)
+        if key in selected:
+            continue
+        indices = memberships.get(key, ())
+        if any(counts[index] >= 12 for index in indices) and name not in action.names:
+            continue
+        selected[key] = name
+        for index in indices:
+            counts[index] += 1
+    return Fusion(ranked, tuple(selected.values()), tuple(excluded),
+                  tuple((n, tuple(provenance[_canonical(n)])) for n in ranked), tuple(errors))
 
 
 def lookup_stages(request, fusion):

@@ -32,6 +32,13 @@ paging. It imports only domain, policy, and source.
 checked lookup; queries run searches and automatically check the selected results.
 Search and lookup remain internal stages, with one helper charge for the whole
 retrieval request.
+All retrieval results appear in one continuous response, including all three
+queries when supplied, without result IDs or page headers. Storage pages do not
+impose a display byte cutoff or require a `page` action to reveal later queries.
+Backend lists merge by best rank into at most 50 unique hits per query. Declarations
+shared across queries appear once, before each query's remaining hits. Each query
+has twelve checked slots; a shared declaration is checked once and counts toward
+every matching query's allowance. Other named hits display names only.
 
 `midas/prompt` implements independent, replaceable prover, decomposition-reviewer, stop-reviewer, researcher and web-searcher
 renderers, bounded readable context, and exact frozen wire construction. It imports
@@ -1359,14 +1366,18 @@ The checker/provider lower stage descriptions into their exact frozen requests,
 preserving the stage key, scope and initial helper charge. Remaining stages and
 `continue_retrieval` reserve execution capacity without another helper charge.
 
-Search hints are fused using exact integer reciprocal-rank weights over the bounded
-rank domain. Each declaration contributes once per query, using its best rank
-across backends: `sum_query max_backend 1/(60 + zero_based_rank)`. Contributions
-from distinct queries add; all backend occurrences remain in provenance. Missing
-or failed backends add no weight. Explicit names retain priority. Local queries
-that are valid Lean identifiers are sent directly to checked lookup ahead of BM25
-names, within the 12-name selection bound, so generated declarations can appear first even when
-absent from the lexical index. Equivalent query/result spellings are deduplicated.
+Search hints merge into at most 50 unique hits per query, ordered by each hit's
+best backend rank with canonical-name tie breaking. All backend occurrences remain
+in provenance. Shared declarations appear once in a separate list, with their
+matching query numbers; each query displays only its remaining hits.
+Each query has twelve checked slots. Shared declarations are checked first and
+consume a slot in every matching query, followed by query-specific hits in rank
+order. Thus two 50-hit queries sharing three declarations check 21 unique names
+and display 38 additional names per query. No reciprocal-rank sum across queries
+is used. Explicit names retain priority and consume matching query slots.
+Local queries that are valid Lean identifiers are sent directly to checked lookup
+within their query's twelve-slot allowance, so generated declarations can appear
+even when absent from the lexical index. Equivalent spellings are deduplicated.
 Forbidden names and their equivalent escaped spellings, internal Midas names and
 invalid identifiers cannot become lookup jobs.
 Searches must all have exact, ordered outcomes, including explicit failures.
@@ -1537,8 +1548,9 @@ remains available. Empty outputs add no partial-output section.
 Requests, results and archives use shallow binary records. The bounded external
 wire decoder is shared in `domain/wire.py`; provider imports that same decoder.
 Search/research wire parsing and large source/evidence handling make no JSON-library
-calls. `prepare_archive` stages fixed pages of at most 16,000 bytes and a bounded
-index. Guidance is projected to plain text before paging. Web-search results contain
+calls. `prepare_archive` stages pages of at most 16,000 bytes by default, with
+32,000-byte pages for research results, and a bounded index. Guidance is projected
+to plain text before paging. Web-search results contain
 the answer, sources and unresolved questions. Sources use numbered
 labels; source IDs and web-action metadata stay in the original evidence and are
 not presented in prompts. Search and probe records
@@ -1549,8 +1561,9 @@ logged message, each goal and inspected expressions/types retain their first fiv
 and last five lines when longer than ten lines, with an explicit omitted-line count.
 Generated code and diagnostic locations remain intact; original results remain in
 archive provenance. Truncation happens before paging so more errors fit on a page.
-Combined retrieval shows explicitly requested lookups first, then search results
-with automatically checked declarations embedded in their numbered entries.
+Combined retrieval shows explicitly requested lookups first, then shared results
+and each query's remaining merged results. Automatically checked declarations are
+embedded in their numbered entries; other named hits display names only.
 Search titles remain declaration names. Checked details replace the indexed
 excerpt beneath the source location instead of adding a separate lookup entry.
 The indexed source remains a fallback when lookup source is unavailable.
@@ -1571,9 +1584,11 @@ they require reassembly before use as complete source. Each `read_page` call rea
 verifies one indexed page, with no archive-wide decoding or earlier-page scan.
 The controller supplies an indexed duplicate-delivery check and rechecks the returned
 delivery key and scope when committing. Scope changes invalidate cursors.
-Delivered evidence pages and result archives remain saved. The `page` action fetches
-additional undelivered pages using advertised cursors. There is no `recall` action.
-Results use stable names such as `tool-result-1`, numbered by saved result order
+Delivered evidence pages and result archives remain saved. Retrieval delivers and
+reassembles all its storage pages into one continuous response, without result IDs
+or page headers. For other helpers, the `page` action fetches additional undelivered
+pages using advertised cursors. There is no `recall` action.
+Paged results use stable names such as `tool-result-1`, numbered by saved result order
 within each obligation. The cursor `tool-result-1:2` requests page 2. Names remain
 stable across prompt truncation and resume and can be referenced in lessons;
 archive hashes remain internal for integrity checks.
@@ -1588,7 +1603,7 @@ Feedback includes checker/reviewer
 diagnostics, action/edit failures, stop-review responses, and omission notices.
 Superseded check/edit/protocol errors are hidden from the prompt; some other
 observations become history when newer observations arrive.
-The 16,000-byte storage page bound still applies.
+Storage pages are bounded at 32,000 bytes for research and 16,000 bytes for other tools.
 
 `prover.input_token_budget` in `config.json` controls the prompt's rolling evidence
 window. Its default `null` includes all delivered pages; a positive integer such

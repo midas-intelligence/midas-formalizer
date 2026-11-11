@@ -13,6 +13,7 @@ from ..strategy import Context
 from ..tools import (Archive, HelperRequest, Lookup, Plan, Probe, Research, Retrieve, Search, WebSearch,
     SearchResult, SourceIndex, Stage, StageEvidence, admit_checked, admit_research, admit_web_search, continue_retrieval,
     lookup_sources, prepare_archive, probe_summary, research_summary, retrieval_summary, web_search_summary, search_stages)
+from ..tools.evidence import MAX_PAGE_BYTES, PAGE_BYTES, RESEARCH_PAGE_BYTES
 from . import records as r, token_usage
 
 
@@ -272,7 +273,7 @@ def reduce(flow, reader, invocation, accepted, binding):
     if isinstance(request.action, Retrieve):
         summaries, positions, displayed = retrieval_summary(request.action,
             tuple((result, search.action) for result, search in zip(searches, search_stages(request))), checked,
-            seen=shown_declarations(reader, request.scope), available=available)
+            seen=shown_declarations(reader, request.scope), available=available, forbidden=request.forbidden)
         lookup_records = [[name, len(rows)+index] for name, index in positions]
         displayed_records = tuple((name, len(rows)+index, offset) for name, index, offset in displayed)
         rows.extend(summaries)
@@ -281,7 +282,8 @@ def reduce(flow, reader, invocation, accepted, binding):
     if not provenance:
         provenance.append(r.unref(saved['request']))
     buffer = Buffer()
-    archive = prepare_archive(request.scope, key, rows, tuple(dict.fromkeys(provenance)), buffer)
+    archive = prepare_archive(request.scope, key, rows, tuple(dict.fromkeys(provenance)), buffer,
+                              page_bytes=RESEARCH_PAGE_BYTES if isinstance(request.action, Research) else PAGE_BYTES)
     declarations = {}
     for name, index, offset in displayed_records:
         declarations.setdefault(str(index), []).append((name, offset))
@@ -295,13 +297,15 @@ def reduce(flow, reader, invocation, accepted, binding):
         if names:
             extra.append(r.record(reader, 'application.page-declarations', page.reference.sha256, list(names)))
     archive_data = artifact(archive.payload)
+    # Retrieval is one complete response, even when its storage spans pages.
+    delivered = archive.pages if isinstance(request.action, Retrieve) else archive.pages[:1]
     _, state = r.owner_state(reader, request.scope.owner.obligation_id)
     archives = r.value(reader, 'application.archives', request.scope.owner.obligation_id) or []
     archives = archives + [r.ref(archive_data.reference)]
     effects = [*extra, Effect(artifacts=(*buffer.artifacts, archive_data)),
         r.record(reader, 'application.archives', request.scope.owner.obligation_id, archives),
         r.save_owner(reader, request.scope.owner.obligation_id, replace(state,
-            evidence=tuple(dict.fromkeys((*state.evidence, archive.pages[0]))))),
+            evidence=tuple(dict.fromkeys((*state.evidence, *delivered))))),
         r.record(reader, 'application.pending', request.scope.owner.obligation_id, None),
         r.record(reader, 'application.helpers', key, dict(saved, completed=True, lookup_records=lookup_records))]
     if saved['parent']:
@@ -321,6 +325,37 @@ def named_archives(reader, owner):
     """Stable owner-local names from the append-only saved archive order."""
     return tuple((f'tool-result-{i}', archive)
                  for i, archive in enumerate(advertised(reader, owner), 1))
+
+
+def evidence_groups(reader, owner, displayed):
+    """Group retrieval storage pages into one display section per request."""
+    selected = set(displayed)
+    groups = {}
+    for number, (name, archive) in enumerate(named_archives(reader, owner), 1):
+        pages = tuple(ref for ref in archive.pages if ref in selected)
+        if not pages:
+            continue
+        saved = r.value(reader, 'application.helpers', archive.helper_id)
+        retrieval = saved and isinstance(
+            HelperRequest.load(r.read(reader, r.unref(saved['request']))).action, Retrieve)
+        for ordinal, ref in enumerate(archive.pages, 1):
+            if ref not in selected:
+                continue
+            if retrieval:
+                groups[ref] = (f'retrieval-{number}', '', pages)
+            else:
+                count = len(archive.pages)
+                section_name = name if count == 1 else f'{name}-page-{ordinal}'
+                header = f'Result ID: {name}\nPage {ordinal} of {count}. '
+                header += 'Complete result included below.\n\n' if count == 1 else 'This page is included below.\n\n'
+                groups[ref] = (section_name, header, (ref,))
+    emitted = set()
+    for ordinal, ref in enumerate(displayed, 1):
+        if ref in emitted:
+            continue
+        group = groups.get(ref, (f'tool-output-{ordinal}', 'Tool output included below.\n\n', (ref,)))
+        emitted.update(group[2])
+        yield group
 
 
 def page_effect(flow, reader, snapshot, turn, work, state):
@@ -393,24 +428,55 @@ def review_evidence(reader, snapshot, review, sections, displayed):
                 continue
         else:
             continue
+        if isinstance(request.action, Retrieve):
+            refs = tuple(ref for ref in archive.pages if ref in displayed)
+            text = pages_text((r.read(reader, ref, MAX_PAGE_BYTES) for ref in refs), records=records)
+            if text:
+                yield refs, b'Selected checked declaration excerpts.\n\n' + text
+            continue
         for ordinal, ref in enumerate(archive.pages):
             if ref not in displayed:
                 continue
-            text = page_text(r.read(reader, ref, 16000), records=records)
+            text = page_text(r.read(reader, ref, MAX_PAGE_BYTES), records=records)
             if not text:
                 continue
             header = f'Result ID: {result_name}\nPage {ordinal+1} of {len(archive.pages)}. '
-            header += ('Selected checked declaration excerpts.\n\n' if records is not None else
-                       'Review web search (advisory).\n\n' if isinstance(request.action, WebSearch) else
+            header += ('Review web search (advisory).\n\n' if isinstance(request.action, WebSearch) else
                        'Review research (advisory).\n\n')
-            yield ref, header.encode() + text
+            yield (ref,), header.encode() + text
 
 
 def page_text(payload, *, records=None):
     """Readable projection of one bounded page; JSON is never used for display."""
-    value = codec.load_record(payload, limit=16000)
+    return pages_text((payload,), records=records)
+
+
+def _joined_fragments(payloads):
+    """Reassemble adjacent flat text fragments across immutable page boundaries."""
+    pending, chunks = None, []
+    for payload in payloads:
+        for row in codec.load_record(payload, limit=MAX_PAGE_BYTES)[4]:
+            if (pending is not None and row[0] == 'text' and row[1] == pending[1]
+                    and row[3] == pending[3] and row[2] == end):
+                chunks.append(row[4])
+                end += len(row[4].encode())
+                continue
+            if pending is not None:
+                yield [*pending[:4], ''.join(chunks)]
+                pending, chunks = None, []
+            if row[0] == 'text' and len(row[1]) == 1:
+                pending, chunks = row, [row[4]]
+                end = row[2] + len(row[4].encode())
+            else:
+                yield row
+    if pending is not None:
+        yield [*pending[:4], ''.join(chunks)]
+
+
+def pages_text(payloads, *, records=None):
+    """Render selected pages together, hiding boundaries inside complete text."""
     lines = []
-    for row in value[4]:
+    for row in _joined_fragments(payloads):
         if records is not None and row[1][0] not in records:
             continue
         if row[0] == 'text' and len(row[1]) == 1:

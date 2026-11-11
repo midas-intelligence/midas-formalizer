@@ -238,13 +238,21 @@ class PresentationTests(unittest.TestCase):
             self.assertIn(useful, text)
         for clutter in (b'Nat.mul_comm', b'Unrelated search excerpt', b'Search (', b'PROVER_RESEARCH', b'STALE_RESEARCH', b'STALE_WEB_SEARCH'):
             self.assertNotIn(clutter, text)
-        self.assertEqual({ref for ref, _ in result}, set((*retrieval.pages, *fragmented.pages, *current.pages, *current_web.pages)))
+        self.assertEqual({ref for refs, _ in result for ref in refs},
+                         set((*retrieval.pages, *fragmented.pages, *current.pages, *current_web.pages)))
         for i, archive in enumerate(archives, 1):
-            for ref, content in result:
-                if ref in archive.pages:
-                    self.assertIn(f'Result ID: tool-result-{i}\n'.encode(), content)
+            for refs, content in result:
+                if set(refs).intersection(archive.pages):
+                    if archive in (retrieval, fragmented):
+                        self.assertEqual(refs, archive.pages)
+                        self.assertNotIn(b'Result ID:', content)
+                        self.assertNotIn(b'Page ', content)
+                    else:
+                        self.assertIn(f'Result ID: tool-result-{i}\n'.encode(), content)
                     self.assertNotIn(archive.id.encode(), content)
-        self.assertIn(b'Continued excerpt', text)
+        self.assertNotIn(b'Continued excerpt', text)
+        self.assertNotIn(b'Excerpt continues on the next page.', text)
+        self.assertEqual(text.count(b'exact supporting source\n'), 1500)
 
 
 if __name__ == '__main__':

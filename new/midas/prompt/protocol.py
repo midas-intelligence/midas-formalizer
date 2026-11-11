@@ -158,7 +158,7 @@ def clean_diagnostics(data):
 
 
 def display(snapshot, order):
-    """Stable grouping, whole evidence pages only, and an explicit omission notice."""
+    """Stable grouping, whole evidence sections only, and an explicit omission notice."""
     if not isinstance(snapshot, Snapshot):
         raise DomainError('Expected a frozen prompt snapshot')
     if len(set(order)) != len(order) or set(order) != set(KINDS):

@@ -948,7 +948,7 @@ class Contracts(unittest.TestCase):
             self.assertIn(b'Result ID: tool-result-12\\n', calls[0])
             self.assertGreater(calls[0].count(b'Result ID:'), 2)
             self.assertLess(calls[0].count(b'Result ID:'), 12)
-            self.assertIn(b'older evidence page(s) omitted', calls[0])
+            self.assertIn(b'older evidence section(s) omitted', calls[0])
             self.assertEqual(r.owner_state(reader, owner.obligation_id)[1].evidence, evidence)
             self.assertEqual(token_usage.sample(reader, owner, 'prover', provider_route), (1000, 500))
         with self.app.resume(self.root/'run') as run:
@@ -956,7 +956,7 @@ class Contracts(unittest.TestCase):
             self.assertEqual(r.owner_state(run.writer, owner.obligation_id)[1].evidence, evidence)
 
     def test_callers_use_web_references_then_research_guidance_with_separate_routes(self):
-        from midas.application import token_usage
+        from midas.application import helpers, token_usage
         from midas.provider import ModelOutput, Route
         from tests.test_tools import events
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
@@ -965,7 +965,8 @@ class Contracts(unittest.TestCase):
         web_answer = model_json(dict(answer='Reference on True.intro.', sources=[dict(
             url='https://example.test/true', title='True constructors', location='Section 1',
             excerpt='', summary='True.intro constructs True.', hypotheses='None.')], unresolved=[]))
-        guidance = model_json(dict(answer='Apply True.intro to the exact goal.', unresolved=[]))
+        answer = 'Apply True.intro to the exact goal.\n' + 'Detailed guidance. '*1100 + 'End of guidance.'
+        guidance = model_json(dict(answer=answer, unresolved=[]))
         for caller in ('prover', 'reviewer'):
             with self.subTest(caller=caller):
                 def ask(helper):
@@ -1008,6 +1009,10 @@ class Contracts(unittest.TestCase):
                                       ('web-searcher', b'Find references only.'))) as run:
                     self.assertEqual(self.finish(run).exit_code, 0)
                     owner = run.workflow.graph(run.writer).nodes[0].owner
+                    research_archive = helpers.advertised(run.writer, owner)[-1]
+                    self.assertEqual(len(research_archive.pages), 1)
+                    self.assertGreater(research_archive.pages[0].byte_count, 16000)
+                    self.assertLessEqual(research_archive.pages[0].byte_count, 32000)
                     for helper in ('research', 'web_search'):
                         self.assertEqual(run.writer.counter('owner:'+owner.obligation_id, helper), 1)
                         self.assertEqual(sum(role == helper for role, _ in calls), 1)
@@ -1015,6 +1020,7 @@ class Contracts(unittest.TestCase):
                     self.assertIsNone(token_usage.sample(run.writer, owner, 'web_search', Route.from_config(web_route)))
                     last_caller = [raw for role, raw in calls if role == caller][-1]
                     self.assertIn(b'Apply True.intro to the exact goal.', last_caller)
+                    self.assertIn(b'End of guidance.', last_caller)
 
     def test_codex_role_efforts_are_independent_and_preserved_on_resume(self):
         from midas.application import records as r
@@ -1139,6 +1145,7 @@ class Contracts(unittest.TestCase):
     def test_large_partial_output_is_paged_and_raw_output_retained(self):
         from midas.application import helpers, records as r
         from midas.provider import ModelOutput, Route
+        from midas.tools.evidence import RESEARCH_PAGE_BYTES
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
         partial = ('Draft beginning\n'+'αβγ\n'*6000+'Draft last received fragment').encode()
         replies = iter((response(dict(mode='research', rationale='Find a proof.', question='What is known?')),
@@ -1153,7 +1160,8 @@ class Contracts(unittest.TestCase):
             archive, = helpers.advertised(run.writer, owner)
             self.assertGreater(len(archive.pages), 1)
             fragments = [row for ref in archive.pages
-                         for row in codec.load_record(r.read(run.writer, ref, 16000), limit=16000)[4]
+                         for row in codec.load_record(r.read(run.writer, ref, RESEARCH_PAGE_BYTES),
+                                                      limit=RESEARCH_PAGE_BYTES)[4]
                          if row[0] == 'text' and row[1] == ['1']]
             self.assertEqual(''.join(row[4] for row in fragments).encode(),
                              b'Partial output (incomplete; unverified):\n'+partial)
@@ -1613,10 +1621,8 @@ class Contracts(unittest.TestCase):
             pages = [helpers.page_text(r.read(run.writer, a.pages[0], 16000)).decode()
                      for a in helpers.advertised(run.writer, owner)]
             self.assertEqual(len(pages), 2)
-            self.assertIn('Search (leanexplore): addition\n', pages[0])
-            self.assertIn('Search (leansearch): addition\n', pages[0])
-            self.assertIn('Search (frozen-source): addition\n', pages[0])
-            self.assertIn('\nNat.add\n', pages[0])
+            self.assertEqual(pages[0].count('Search 1: addition\n'), 1)
+            self.assertIn('1. Nat.add\n', pages[0])
             self.assertIn('Probe case1 (tactic): closed_exploratory (advisory)', pages[1])
             self.assertIn('Probe case2 (tactic): closed_exploratory (advisory)', pages[1])
             self.assertIn('case1.code (line 1 below):\nrun_tac do\n  '+probe['cases'][0]['code'], pages[1])
@@ -1645,7 +1651,7 @@ class Contracts(unittest.TestCase):
         index = SourceIndex(self.environment.id, (SourceEntry('project/Support.lean', artifacts.save(source.encode())),))
         self.app.search_factory = lambda: SearchService(index=index, source_reader=artifacts)
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        retrieve = dict(mode='retrieve', rationale='Find declarations.', queries=['Nat'], names=[],
+        retrieve = dict(mode='retrieve', rationale='Find declarations.', queries=['Nat value'], names=[],
                         backends=[dict(name='frozen-source', prefixes=['project'])])
         named = dict(mode='retrieve', rationale='Expand a tail name.', names=['Fixture.term49'],
                      queries=[], backends=[])
@@ -1668,12 +1674,89 @@ class Contracts(unittest.TestCase):
             self.assertEqual(Compiler.calls.count('lookup'), 2)
             self.assertEqual(searches.call_count, 1)
 
+    def test_three_search_queries_deliver_all_results_without_page_actions(self):
+        from midas.application import helpers, records as r
+        from midas.prompt import prover
+        from midas.tools import Match, SearchService, SourceIndex
+        self.app.search_factory = lambda: SearchService(index=SourceIndex(self.environment.id, ()))
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        queries = ('first terms', 'second terms', 'third terms')
+        retrieve = dict(mode='retrieve', rationale='Find declarations.', queries=list(queries), names=[],
+                        backends=[dict(name='frozen-source', prefixes=[])])
+        def search(stage, *args, **kwargs):
+            name = stage.action.query.split()[0]
+            return tuple(Match((f'Fixture.{name}{i}',), 'project/Support.lean', i+1, i+1,
+                '-- '+stage.action.query+' λ'*1900 if i < 12 else '') for i in range(50))
+        with patch('midas.tools.search.source_search', side_effect=search), self.start(
+                workflow='scripted', config=replace(Config(), prover=route),
+                script=(('prover', response(retrieve)), ('prover', response(proof())))) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            archive, = helpers.advertised(run.writer, owner)
+            self.assertGreater(sum(page.byte_count for page in archive.pages), 128*1024)
+            _, state = r.owner_state(run.writer, owner.obligation_id)
+            self.assertEqual(state.evidence, archive.pages)
+            snapshot = run.workflow.snapshot(run.writer, owner)
+            self.assertEqual(snapshot.cursors, ())
+            sections = prover.render(run.workflow.display(run.writer, snapshot)).sections
+            evidence = [s for s in sections if s.kind == 'evidence']
+            self.assertEqual(len(evidence), 1)
+            text = evidence[0].text.decode()
+            self.assertTrue(text.startswith('Search 1: first terms\n'))
+            for marker in ('Result ID:', 'tool-result-', 'Page ', 'Continued excerpt',
+                           'Excerpt continues on the next page'):
+                self.assertNotIn(marker, text)
+            self.assertEqual(len(evidence[0].declarations), 36)
+            for ordinal, query in enumerate(queries, 1):
+                self.assertIn(f'Search {ordinal}: '+query, text)
+                for i in range(50):
+                    self.assertIn(f'Fixture.{query.split()[0]}{i}', text)
+                self.assertEqual(text.count('-- '+query+' λ'*1900), 12)
+            self.assertNotIn('use page', text)
+            self.assertEqual(run.writer.counter('owner:'+owner.obligation_id, 'retrieval'), 1)
+            self.assertEqual(run.writer.status_snapshot().accounting.turns, 2)
+
+    def test_shared_search_results_check_once_and_retain_per_query_allowances(self):
+        from midas.application import helpers, records as r
+        from midas.tools import Match, SearchService, SourceIndex
+        shared = tuple(f'Fixture.shared{i}' for i in range(3))
+        def transport(action, *args):
+            names = tuple(f'Fixture.{action.query.split()[0]}{i:02}' for i in range(47)) + shared
+            return tuple(Match((name,)) for name in names)
+        self.app.search_factory = lambda: SearchService(index=SourceIndex(self.environment.id, ()),
+                                                        transport=transport)
+        route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
+        retrieve = dict(mode='retrieve', rationale='Find declarations.',
+            queries=['first terms', 'second terms'], names=[],
+            backends=[dict(name='leanexplore', prefixes=[]), dict(name='leansearch', prefixes=[])])
+        with self.start(workflow='scripted', config=replace(Config(), prover=route),
+                script=(('prover', response(retrieve)), ('prover', response(proof())))) as run:
+            self.assertEqual(self.finish(run).exit_code, 0)
+            owner = run.workflow.graph(run.writer).nodes[0].owner
+            archive, = helpers.advertised(run.writer, owner)
+            saved = r.value(run.writer, 'application.helpers', archive.helper_id)
+            self.assertEqual(len(saved['lookup_records']), 21)
+            self.assertEqual(Compiler.calls.count('lookup'), 2)
+            snapshot = run.workflow.snapshot(run.writer, owner)
+            evidence, = (s for s in run.workflow.display(run.writer, snapshot).sections if s.kind == 'evidence')
+            text = evidence.text.decode()
+            self.assertEqual(text.count('Original declaration source unavailable:'), 21)
+            self.assertTrue(text.startswith('Shared hits (multiple queries):\n'))
+            self.assertEqual(text.count('[queries 1, 2]'), 3)
+            self.assertEqual(text.count('Search 1:'), 1)
+            self.assertEqual(text.count('Search 2:'), 1)
+            query_hits = [row for row in text.split('\n\n')
+                          if row.startswith(tuple(f'{rank}. Fixture.' for rank in range(1, 51)))]
+            self.assertEqual(len(query_hits), 94)
+            self.assertEqual(sum('\n' not in row.rstrip() for row in query_hits), 76)
+            self.assertEqual(snapshot.cursors, ())
+
     def test_repeated_search_omits_only_displayed_details_across_resume_and_fork(self):
         from midas.application import helpers, records as r
         from midas.tools import SearchService, SourceEntry, SourceIndex
         from tests.test_tools import Artifacts
         route = ModelRoute(provider='azure', model='fixture', endpoint='https://fixture.test/responses')
-        retrieve = dict(mode='retrieve', rationale='Find declarations.', queries=['Nat'], names=[],
+        retrieve = dict(mode='retrieve', rationale='Find declarations.', queries=['Nat value'], names=[],
                         backends=[dict(name='frozen-source', prefixes=['project'])])
         for large, forked in ((False, False), (True, False), (True, True)):
             with self.subTest(large=large, forked=forked):
@@ -1695,13 +1778,16 @@ class Contracts(unittest.TestCase):
                             break
                         time.sleep(.001)
                     self.assertEqual(len(archives), 1)
-                    shown = r.value(run.writer, 'application.page-declarations', archives[0].pages[0].sha256)
-                    self.assertTrue(shown)
+                    first_shown = r.value(run.writer, 'application.page-declarations', archives[0].pages[0].sha256)
+                    self.assertTrue(first_shown)
+                    _, state = r.owner_state(run.writer, owner.obligation_id)
+                    self.assertEqual(state.evidence, archives[0].pages)
+                    shown = {name for page in state.evidence for name in
+                             (r.value(run.writer, 'application.page-declarations', page.sha256) or ())}
+                    self.assertEqual(len(shown), 12)
                     if large:
-                        self.assertLess(len(shown), 12)
+                        self.assertLess(len(first_shown), 12)
                         self.assertGreater(len(archives[0].pages), 1)
-                    else:
-                        self.assertEqual(len(shown), 12)
                 following = (self.app.fork(self.root/name, self.root/(name+'-child'),
                     script=(('prover', response(retrieve)), ('prover', response(proof()))))
                     if forked else self.app.resume(self.root/name))
@@ -1866,8 +1952,9 @@ class Contracts(unittest.TestCase):
             evidence = [s for s in sections if s.kind == 'evidence']
             self.assertEqual(len(evidence), 25)
             for i, (section, archive) in enumerate(zip(evidence, archives), 1):
-                self.assertEqual(section.name, f'tool-result-{i}')
-                self.assertIn(f'Result ID: tool-result-{i}\n'.encode(), section.text)
+                self.assertEqual(section.name, f'retrieval-{i}')
+                self.assertNotIn(b'Result ID:', section.text)
+                self.assertNotIn(b'Page ', section.text)
                 self.assertNotIn(archive.id.encode(), section.text)
             # Selecting only a later result must not renumber it.
             from midas.application.service import commit
@@ -1875,8 +1962,8 @@ class Contracts(unittest.TestCase):
                 replace(state, evidence=expected[-1:])))
             snapshot = run.workflow.snapshot(run.writer, owner)
             evidence = [s for s in run.workflow.display(run.writer, snapshot).sections if s.kind == 'evidence']
-            self.assertEqual(evidence[0].name, 'tool-result-25')
-            self.assertIn(b'Result ID: tool-result-25\n', evidence[0].text)
+            self.assertEqual(evidence[0].name, 'retrieval-25')
+            self.assertNotIn(b'Result ID:', evidence[0].text)
 
     def test_empty_retrieval_disables_node_retrieval_without_protocol_charge(self):
         from midas.provider import ModelOutput, Route
@@ -1944,7 +2031,7 @@ class Contracts(unittest.TestCase):
             owner = run.workflow.graph(run.writer).nodes[0].owner
             archive = helpers.advertised(run.writer, owner)[0]
             text = helpers.page_text(r.read(run.writer, archive.pages[0], 16000)).decode()
-            self.assertIn('Search (leanexplore): addition', text)
+            self.assertIn('Search 1: addition', text)
             self.assertIn('Nat.add', text)
             self.assertNotRegex(text, r'(?m)^\d+(?:/[^:]+)?:')
             self.assertEqual(research_prompt.call_count, 1)

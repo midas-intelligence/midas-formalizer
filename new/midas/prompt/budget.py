@@ -1,4 +1,4 @@
-"""Estimate input size from recorded usage and select whole evidence pages."""
+"""Estimate input size from recorded usage and select whole evidence sections."""
 from dataclasses import replace
 
 from ..domain import DomainError
@@ -47,8 +47,8 @@ def window(prompt, tokens, sample=None):
         omitted.add(section.name)
         size -= section_bytes(section)
         notice = Section('feedback', name,
-            f'{len(omitted)} older evidence page(s) omitted to fit the estimated input-token budget. '.encode()
-            + b'Delivered pages remain saved; only the newest pages are shown.')
+            f'{len(omitted)} older evidence section(s) omitted to fit the estimated input-token budget. '.encode()
+            + b'Delivered evidence remains saved; only the newest sections are shown.')
         if size + section_bytes(notice) <= limit:
             sections = tuple(s for s in prompt.sections if s.name not in omitted)
             # Prover feedback precedes memory so lesson updates leave the
@@ -56,4 +56,4 @@ def window(prompt, tokens, sample=None):
             index = (next((i for i, s in enumerate(sections) if s.kind == 'memory'), len(sections)-1)
                      if prompt.role == 'prover' else len(sections)-1)
             return replace(prompt, sections=(*sections[:index], notice, *sections[index:]))
-    raise DomainError('Input token budget cannot fit the required prompt and newest evidence page')
+    raise DomainError('Input token budget cannot fit the required prompt and newest evidence section')

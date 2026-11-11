@@ -10,8 +10,11 @@ from ..source import SourceFile, lean_name, parse_identifier
 from .protocol import RESULT_BYTES, Scope, pack, read, text
 from .search import FILE_BYTES, SearchResult
 from .bm25 import DETAILS
+from .retrieval import allowed_names, merge_searches, shared_hits
 
 PAGE_BYTES = 16000
+RESEARCH_PAGE_BYTES = 32000
+MAX_PAGE_BYTES = RESEARCH_PAGE_BYTES
 MAX_PAGES = 1024
 INDEX_BYTES = 256 * 1024
 SOURCE_UNAVAILABLE = 'Original declaration source unavailable:'
@@ -31,7 +34,7 @@ class Archive:
         items(self.provenance, ArtifactRef)
         items(self.pages, ArtifactRef)
         if (not 1 <= len(self.pages) <= MAX_PAGES or not 1 <= len(self.provenance) <= 64
-                or any(p.byte_count > PAGE_BYTES for p in self.pages)
+                or any(p.byte_count > MAX_PAGE_BYTES for p in self.pages)
                 or sum(p.byte_count for p in self.pages) > RESULT_BYTES):
             raise ValueError('Invalid advisory archive bounds')
         object.__setattr__(self, 'id', sha256(self.payload).hexdigest())
@@ -51,7 +54,7 @@ class Archive:
                    tuple(ArtifactRef.from_dict(r) for r in v[4]))
 
 
-def _fragments(records):
+def _fragments(records, page_bytes):
     """Iterative, shallow leaf projection; text offsets count UTF-8 bytes."""
     count = total = 0
     for index, record in enumerate(records):
@@ -86,7 +89,7 @@ def _fragments(records):
                 offset = 0
                 # Leave room for the full scope and page envelope. Boundaries are
                 # explicit, so fragments cannot be mistaken for complete source.
-                chunk = PAGE_BYTES - path_size - 2048
+                chunk = page_bytes - path_size - 2048
                 while offset < len(data):
                     end = min(len(data), offset+chunk)
                     while end < len(data) and data[end] & 0xC0 == 0x80:
@@ -97,26 +100,28 @@ def _fragments(records):
                     yield ['text', list(path), 0, 0, '']
             else:
                 # Only scalar/empty containers reach here; no nested copies.
-                codec.record_size(value, limit=PAGE_BYTES)
+                codec.record_size(value, limit=page_bytes)
                 yield ['value', list(path), value]
 
 
-def prepare_archive(scope, helper_id, records, provenance, staging):
+def prepare_archive(scope, helper_id, records, provenance, staging, *, page_bytes=PAGE_BYTES):
     """Stage immutable pages. Controller publishes refs and commits their index."""
     instance(scope, Scope)
     identifier(helper_id, '')
+    if type(page_bytes) is not int or page_bytes not in (PAGE_BYTES, RESEARCH_PAGE_BYTES):
+        raise ValueError('Invalid advisory page size')
     pages, rows, size, total = [], [], 0, 0
     def flush():
         nonlocal rows, size, total
-        payload = pack(['midas-advisory-page-v1', scope.value(), helper_id, len(pages), rows], PAGE_BYTES)
+        payload = pack(['midas-advisory-page-v1', scope.value(), helper_id, len(pages), rows], page_bytes)
         total += len(payload)
         if total > RESULT_BYTES or len(pages) >= MAX_PAGES:
             raise ValueError('Evidence archive exceeds allowance')
-        pages.append(staging.write_bounded(payload, max_bytes=PAGE_BYTES))
+        pages.append(staging.write_bounded(payload, max_bytes=page_bytes))
         rows, size = [], 0
-    for fragment in _fragments(records):
-        length = codec.record_size(fragment, limit=PAGE_BYTES)
-        if rows and size+length > PAGE_BYTES-1024:
+    for fragment in _fragments(records, page_bytes):
+        length = codec.record_size(fragment, limit=page_bytes)
+        if rows and size+length > page_bytes-1024:
             flush()
         rows.append(fragment)
         size += length
@@ -157,8 +162,8 @@ def read_page(archive, scope, reader, *, cursor=None, delivered=lambda key: Fals
         raise ValueError('Evidence cursor outside archive')
     if delivered(f'{archive.id}:{ordinal}'):
         return None
-    payload = read(reader, archive.pages[ordinal], PAGE_BYTES)
-    v = codec.load_record(payload, limit=PAGE_BYTES)
+    payload = read(reader, archive.pages[ordinal], MAX_PAGE_BYTES)
+    v = codec.load_record(payload, limit=MAX_PAGE_BYTES)
     if (type(v) is not list or len(v) != 5 or v[:4] != [
             'midas-advisory-page-v1', scope.value(), archive.helper_id, ordinal] or type(v[4]) is not list):
         raise ValueError('Evidence page binding differs')
@@ -204,18 +209,13 @@ def _name_key(name):
 
 
 def _search_records(result, search, checked, seen, available):
-    """Twelve detailed hits and a compact name tail, without a score cutoff.
-
-    If full excerpts would push names off the first page, lead with the ranked
-    name list and page the details after it. Anonymous hits always need source.
-    """
+    """Twelve detailed hits and a compact name tail, without a display byte cutoff."""
     instance(result, SearchResult)
     rows = [(f'Search ({search.backend.name}): {search.query}', (), ())]
     if result.error:
         rows.append(('Search failed: '+result.error, (), ()))
     elif not result.records:
         rows.append(('No matches.', (), ()))
-    details, names = [], []
     compact = len(result.records) > DETAILS
     # Exact identifier queries can resolve generated declarations absent from the index.
     direct = search.query.strip()
@@ -231,7 +231,6 @@ def _search_records(result, search, checked, seen, available):
             continue
         name = '\n'.join(remaining) or 'Source match (no declaration name)'
         label = f'{rank}. ' if compact else ''
-        names.append(label+name if match.names else f'{label}{name}: {match.path}:{match.line}')
         resolved = tuple(n for n in remaining if n in checked)
         summaries = tuple(checked.pop(n) for n in resolved)
         body = '\n\n'.join(summaries)
@@ -253,34 +252,76 @@ def _search_records(result, search, checked, seen, available):
             name += '\n'+body
         row = (label+name, resolved, tuple(shown))
         seen.update(_name_key(n) for n, _ in shown)
-        if detailed and (match.path is not None or resolved):
-            details.append(row)
         rows.append(row)
     if result.records and len(rows) == header_count:
         rows.append(('No new matches; declaration types or definitions were already shown.', (), ()))
-    if compact and details and sum(codec.record_size(f, limit=PAGE_BYTES)
-                                   for f in _fragments(text for text, _, _ in rows)) > PAGE_BYTES-1024:
-        return (*rows[:header_count], ('Ranked names (details follow; use page for further excerpts):\n'+'\n'.join(names), (), ()),
-                *details)
     return tuple(rows)
 
 
-def retrieval_summary(action, searches, checked, *, seen=(), available=None):
-    """Keep explicit lookups separate and place checked search hits in their rows.
-
-    Return flat name/record-index maps for checked lookups and displayed details;
-    details also carry their starting byte offset for exact page selection.
-    Names alone and lookup failures do not suppress later search hits. Filtering
-    keeps the original ranks and detail allowance, without fetching replacement hits.
-    """
-    pending = dict(checked)
+def retrieval_summary(action, searches, checked, *, seen=(), available=None, forbidden=()):
+    """Display shared hits once, followed by each query's remaining merged hits."""
+    pending = {_name_key(name): (name, summary) for name, summary in checked.items()}
     seen = {_name_key(n) for n in seen}
-    available = set(checked) if available is None else set(available)
-    records = [(pending.pop(name), (name,), ((name, 0),) if name in available else ())
-               for name in action.names if name in pending]
-    seen.update(_name_key(n) for _, _, names in records for n, _ in names)
-    for result, search in searches:
-        records.extend(_search_records(result, search, pending, seen, available))
+    available = {_name_key(n) for n in (checked if available is None else available)}
+    records, emitted = [], set()
+    for name in action.names:
+        key = _name_key(name)
+        if key in pending:
+            original, summary = pending.pop(key)
+            records.append((summary, (original,), ((original, 0),) if key in available else ()))
+            emitted.add(('name', key))
+    queries = merge_searches(searches, allowed=allowed_names(forbidden))
+    shared = shared_hits(queries)
+    common = {hit.key for hit, _ in shared}
+
+    def append_hit(hit, label):
+        key = _name_key(hit.name) if hit.name is not None else None
+        if hit.key in emitted or key in seen:
+            return
+        emitted.add(hit.key)
+        name = hit.name or 'Source match (no declaration name)'
+        resolved = pending.pop(key, None)
+        body = resolved[1] if resolved else ''
+        shown = [(resolved[0], 0)] if resolved and key in available else []
+        match = hit.match
+        if match.path is not None and (resolved or hit.name is None):
+            name += f'\nSource: {match.path}:{match.line}'
+            if match.source and (not resolved or '\n-- '+SOURCE_UNAVAILABLE in body) and match.source not in body:
+                offset = len(body.encode())+(2 if body else 0)
+                if hit.name is not None and key not in available:
+                    shown.append((hit.name, offset))
+                body += ('\n\n' if body else '')+match.source
+        prefix = label+name
+        if body:
+            shown = [(n, len((prefix+'\n').encode())+offset) for n, offset in shown]
+            prefix += '\n'+body
+        records.append((prefix, (resolved[0],) if resolved else (), tuple(shown)))
+
+    if any(hit.key not in emitted and _name_key(hit.name) not in seen for hit, _ in shared):
+        records.append(('Shared hits (multiple queries):', (), ()))
+        for rank, (hit, indices) in enumerate(shared, 1):
+            append_hit(hit, f'{rank}. [queries {", ".join(str(i+1) for i in indices)}] ')
+    for index, query in enumerate(queries):
+        records.append((f'Search {index+1}: {query.query}', (), ()))
+        for backend, error in query.errors:
+            records.append((f'Search failed ({backend}): {error}', (), ()))
+        start = len(records)
+        direct = query.query.strip()
+        key = _name_key(direct)
+        if (query.local and key in pending and key not in seen and ('name', key) not in emitted
+                and not any(hit.key == ('name', key) for hit in query.hits)):
+            original, summary = pending.pop(key)
+            prefix = 'Exact identifier lookup:\n'
+            records.append((prefix+summary, (original,),
+                            ((original, len(prefix.encode())),) if key in available else ()))
+            emitted.add(('name', key))
+        for rank, hit in enumerate(query.hits, 1):
+            if hit.key not in common:
+                append_hit(hit, f'{rank}. ')
+        if len(records) == start:
+            note = ('No matches.' if not query.hits else
+                    'No additional hits; matches are shared above or were already shown.')
+            records.append((note, (), ()))
     return (tuple(text for text, _, _ in records),
             tuple((name, index) for index, (_, names, _) in enumerate(records) for name in names),
             tuple((name, index, offset) for index, (_, _, names) in enumerate(records) for name, offset in names))

@@ -16,6 +16,7 @@ from ..provider import Limits, ModelRequest, Route
 from ..storage import Changes
 from ..status import progress as committed_progress
 from ..strategy import Attempt, Context, Dispatch, Draft, Memory, Snapshot, StopRequest, Strategy, Turn, Version
+from ..tools.evidence import MAX_PAGE_BYTES
 from . import candidates, records as r, token_usage
 
 
@@ -222,52 +223,42 @@ class Workflow:
                     dep.alias.encode() + b' :\n' + subject('type', signature).text))
                 refs.append(dep.interface)
                 owners.append(dep.owner)
-        from .helpers import named_archives, page_text, review_evidence
+        from .helpers import evidence_groups, pages_text, review_evidence
         displayed = tuple(dict.fromkeys(state.evidence))
+        groups = tuple(evidence_groups(reader, snapshot.version.owner, displayed)) if review is None else ()
         if bounded_evidence and review is None:
             # Keep preparation itself within the prompt's hard byte/section
-            # bounds before the calibrated token window selects its final pages.
-            # Use artifact sizes, without loading pages that cannot be displayed.
+            # bounds before the calibrated token window selects its sections.
+            # Select whole retrieval responses using their stored artifact sizes.
             from ..prompt.protocol import MAX_BYTES
             size = sum(len(s.text) for s in sections)
             retained = []
-            for reference in reversed(displayed):
-                if retained and (size + reference.byte_count + 1024 > MAX_BYTES - 65536
+            for group in reversed(groups):
+                group_size = sum(ref.byte_count for ref in group[2]) + 1024
+                if retained and (size + group_size > MAX_BYTES - 65536
                                  or len(sections) + len(retained) >= 1000):
                     break
-                retained.append(reference)
-                size += reference.byte_count + 1024
-            omitted = len(displayed) - len(retained)
-            displayed = tuple(reversed(retained))
+                retained.append(group)
+                size += group_size
+            omitted = len(groups) - len(retained)
+            groups = tuple(reversed(retained))
             if omitted:
                 sections.append(Section('feedback', 'evidence-preparation-limit',
-                    f'{omitted} older evidence page(s) omitted by the prompt preparation byte/section limit.'.encode()))
+                    f'{omitted} older evidence section(s) omitted by the prompt preparation byte/section limit.'.encode()))
         if review is not None:
-            for ordinal, (reference, text) in enumerate(review_evidence(reader, snapshot, review, sections, displayed)):
+            for ordinal, (references, text) in enumerate(review_evidence(reader, snapshot, review, sections, displayed)):
                 sections.append(Section('evidence', f'review-result-{ordinal+1}', text))
-                refs.append(reference)
-            displayed = ()
-        pages = {reference: (name, ordinal+1, len(archive.pages))
-                 for name, archive in (named_archives(reader, snapshot.version.owner) if displayed else ())
-                 for ordinal, reference in enumerate(archive.pages) if reference in displayed}
-        for ordinal, reference in enumerate(displayed):
-            details = pages.get(reference)
-            if details is None:
-                section_name = f'tool-output-{ordinal+1}'
-                header = 'Tool output included below.\n\n'
-            else:
-                result_id, page, count = details
-                section_name = result_id if count == 1 else f'{result_id}-page-{page}'
-                header = f'Result ID: {result_id}\nPage {page} of {count}. '
-                header += 'Complete result included below.\n\n' if count == 1 else 'This page is included below.\n\n'
+                refs.extend(references)
+        for section_name, header, references in groups:
             sections.append(Section('evidence', section_name,
-                header.encode()+page_text(r.read(reader, reference, 16000)),
-                tuple(r.value(reader, 'application.page-declarations', reference.sha256) or ())))
-            refs.append(reference)
+                header.encode()+pages_text(r.read(reader, ref, MAX_PAGE_BYTES) for ref in references),
+                tuple(dict.fromkeys(name for ref in references for name in
+                    (r.value(reader, 'application.page-declarations', ref.sha256) or ())))))
+            refs.extend(references)
         if review is None and self.search and self.search.index:
             sections.append(Section('source', 'search-roots',
                 ('Frozen-source roots: '+', '.join(self.search.index.roots)).encode()))
-        # The renderer's byte allowance covers all selected pages. Any configured
+        # The renderer's byte allowance covers all selected results. Any configured
         # token window is applied after rendering, including instructions/schema.
         return Display(tuple(sections), tuple(dict.fromkeys(refs)), tuple(dict.fromkeys(owners)),
                        evidence_bytes=sum(len(s.text) for s in sections if s.kind == 'evidence'))

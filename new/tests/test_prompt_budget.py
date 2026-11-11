@@ -40,7 +40,7 @@ class BudgetTests(unittest.TestCase):
         for section in value.sections:
             if section.kind != 'evidence':
                 self.assertIn(section, result.sections)
-        self.assertIn(b'2 older evidence page(s) omitted', result.sections[-2].text)
+        self.assertIn(b'2 older evidence section(s) omitted', result.sections[-2].text)
         self.assertLessEqual(input_bytes(result), byte_budget(3300))
 
     def test_reported_token_density_changes_the_window(self):
