@@ -378,9 +378,8 @@ class Workflow:
                 # Its explicit owner fences, not the global graph revision,
                 # determine whether the controller must cancel it.
                 return None
-        prior_epoch = prior[-2] if prior and len(prior) == 4 else 0
-        if (prior and prior[0] in ('pending', 'failed') and prior[-1] == graph.revision
-                and prior_epoch == epoch):
+        if (prior and prior[0] in ('pending', 'failed') and prior[2] == epoch
+                and prior[3] == graph.revision):
             return None
         usage = r.value(reader, 'application.export', 'usage') or [0, 0, 0]
         try:
@@ -505,7 +504,7 @@ class Workflow:
             from .declarations import reduce
             return reduce(self, reader, invocation, accepted, binding)
         if kind == 'export':
-            return self.on_export(reader, invocation, accepted, binding[1], *binding[2:])
+            return self.on_export(reader, invocation, accepted, binding[1], binding[2])
         key, entry_key = binding[1:]
         saved = candidates.submission(reader, key)
         if saved is None or saved['current'] != invocation.request.job.semantic_key:
@@ -633,7 +632,7 @@ class Workflow:
                 effects.append(Effect(Changes(counters=(CounterChange(scope, name, before, before+1),))))
         return r.merge(*effects)
 
-    def on_export(self, reader, invocation, accepted, name, epoch=0):
+    def on_export(self, reader, invocation, accepted, name, epoch):
         graph = self.graph(reader)
         if accepted.failure:
             return r.record(reader, 'application.export', name, ['failed', accepted.failure.value, epoch, graph.revision])

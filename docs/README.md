@@ -1,8 +1,14 @@
-# Clean Midas: domain through CLI and LeanEval
+# Midas v2.2 implementation and validation notes
+
+Commands below run from the repository root. Module paths are relative to that
+root; the Python package, tests, and example configuration are in `midas/`,
+`tests/`, and `config.json`. Dated measurements describe the code at the time
+of each run. Historical v2 comparison scripts require the original v2 sources,
+which are not included in this tree.
 
 `midas/policy` now implements the policy layer on top of the domain. All policy
 settings are defined in `midas/policy/config.py` and loaded from one shallow JSON
-document. [`config.json`](config.json) contains the policy defaults and the
+document. [`config.json`](../config.json) contains the policy defaults and the
 prover/reviewer model settings from the supplied v2 `live.json` example.
 
 `midas/source` implements the pure source layer: names, explicit declaration and
@@ -95,14 +101,14 @@ locator. The previous copying attempt exceeded the CLI's ten-minute allowance.
 This measures package preparation and Lean source preflight, not proof generation.
 
 ```sh
-# From new/; package.json uses the ordinary package configuration below.
-../.venv/bin/python -B -m midas.leaneval package package --config package.json
-../.venv/bin/python -B -m midas.leaneval prepare workspace --package package --verification-config verification.json
-../.venv/bin/python -B -m midas.leaneval start run --workspace workspace --config config.json --output bundle
-../.venv/bin/python -B -m midas.leaneval status run
-../.venv/bin/python -B -m midas.leaneval resume run --output bundle
-../.venv/bin/python -B -m midas.leaneval finalize bundle result --workspace workspace --verification-config verification.json --runtime /absolute/path/to/regular-usr
-../.venv/bin/python -B -m midas.leaneval verify-submission result --workspace workspace --verification-config verification.json --runtime /absolute/path/to/regular-usr --evidence-output verification.bin
+# From the repository root; package.json uses the ordinary package configuration below.
+.venv/bin/python -B -m midas.leaneval package package --config package.json
+.venv/bin/python -B -m midas.leaneval prepare workspace --package package --verification-config verification.json
+.venv/bin/python -B -m midas.leaneval start run --workspace workspace --config config.json --output bundle
+.venv/bin/python -B -m midas.leaneval status run
+.venv/bin/python -B -m midas.leaneval resume run --output bundle
+.venv/bin/python -B -m midas.leaneval finalize bundle result --workspace workspace --verification-config verification.json --runtime /absolute/path/to/regular-usr
+.venv/bin/python -B -m midas.leaneval verify-submission result --workspace workspace --verification-config verification.json --runtime /absolute/path/to/regular-usr --evidence-output verification.bin
 ```
 
 `start --workspace` also accepts the ordinary scripted and supplied-candidate
@@ -207,18 +213,18 @@ alternating timing medians measured new/v2 ratios of **0.148** for repeated
 These measure local wrapper costs, not full benchmark or model throughput.
 
 ```sh
-# Permission is required by the root AGENTS.md for Lean-related tests.
-../.venv/bin/python -B -m unittest tests.test_leaneval tests.test_export tests.test_environment tests.test_cli -q
-../.venv/bin/python -B -m tests.benchmark_leaneval
-../.venv/bin/python -B -m tests.check_leaneval_lean /absolute/path/to/toolchain/bin/lean /absolute/path/to/verifier-tools /absolute/path/to/lean4export
+# Real Lean tests require the toolchain and permission to create Linux namespaces.
+.venv/bin/python -B -m unittest tests.test_leaneval tests.test_export tests.test_environment tests.test_cli -q
+.venv/bin/python -B -m tests.benchmark_leaneval
+.venv/bin/python -B -m tests.check_leaneval_lean /absolute/path/to/toolchain/bin/lean /absolute/path/to/verifier-tools /absolute/path/to/lean4export
 ```
 
 ## Status and CLI
 
-Run the new entry point from `new/`:
+Run the entry point from the repository root:
 
 ```sh
-../.venv/bin/python -B -m midas --help
+.venv/bin/python -B -m midas --help
 ```
 
 The command set has one name per operation. Old names are not aliases:
@@ -238,14 +244,14 @@ independently checks a published bundle. `cache-probe RUN --config CONFIG` is th
 explicit four-call Responses diagnostic.
 
 ```sh
-../.venv/bin/python -B -m midas select package --source Main.lean --output selection.bin
-../.venv/bin/python -B -m midas start run --package package --selection selection.bin --config config.json
-../.venv/bin/python -B -m midas status run
-../.venv/bin/python -B -m midas status run --nodes --state UNRESOLVED --limit 100 --json
-../.venv/bin/python -B -m midas stop run
-../.venv/bin/python -B -m midas resume run --raise-limits increase.json
-../.venv/bin/python -B -m midas export run export
-../.venv/bin/python -B -m midas verify export --package package
+.venv/bin/python -B -m midas select package --source Main.lean --output selection.bin
+.venv/bin/python -B -m midas start run --package package --selection selection.bin --config config.json
+.venv/bin/python -B -m midas status run
+.venv/bin/python -B -m midas status run --nodes --state UNRESOLVED --limit 100 --json
+.venv/bin/python -B -m midas stop run
+.venv/bin/python -B -m midas resume run --raise-limits increase.json
+.venv/bin/python -B -m midas export run export
+.venv/bin/python -B -m midas verify export --package package
 ```
 
 Live is the default workflow. `start --script manifest.json` selects scripted
@@ -337,11 +343,11 @@ for warm committed status reads and **0.920** for parser construction/argument
 handling. These are local command costs, not complete Lean/model throughput.
 
 ```sh
-# From new/. The CLI tests need permission for local Unix sockets in this sandbox.
-../.venv/bin/python -B -m unittest tests.test_status tests.test_cli -q
-../.venv/bin/python -B -m tests.benchmark_status_cli
-# Requires permission for Lean/bubblewrap under the root AGENTS.md:
-../.venv/bin/python -B -m tests.check_cli_lean /absolute/path/to/toolchain/bin/lean
+# From the repository root. The CLI tests need permission for local Unix sockets in this sandbox.
+.venv/bin/python -B -m unittest tests.test_status tests.test_cli -q
+.venv/bin/python -B -m tests.benchmark_status_cli
+# Requires the Lean toolchain and permission to create Linux namespaces:
+.venv/bin/python -B -m tests.check_cli_lean /absolute/path/to/toolchain/bin/lean
 ```
 
 ## Application
@@ -486,15 +492,22 @@ rebinding, joint definition/property acceptance, and probes with inherited alias
 while sibling work proceeds. Scripted/provider fixtures exercise the transport
 boundaries without calling an external model service.
 
-Validation commands, run from `new/` (use an absolute interpreter path for the full
+Compatibility cleanup validation on 2026-11-11: **849 offline tests passed**,
+covering the compact memory format, rejection of retired response fields,
+storage-schema admission, explicit export epochs and saved Lean limits.
+The CLI tests require local Unix sockets; the full suite passed outside the
+sandbox restriction on those sockets. This run did not invoke real Lean or
+external model services.
+
+Validation commands, run from the repository root (use an absolute interpreter path for the full
 suite's executable-path checks):
 
 ```sh
-/home/ubuntu/midas-formalizer-v2.1/.venv/bin/python -B -m unittest discover -s tests -t . -q
-../.venv/bin/python -B -m tests.benchmark_application
-# Requires permission for Lean/bubblewrap under the root AGENTS.md:
-../.venv/bin/python -B -m tests.check_application_lean /absolute/path/to/toolchain/bin/lean
-../.venv/bin/python -B -m tests.check_joint_lean /absolute/path/to/toolchain/bin/lean
+"$PWD/.venv/bin/python" -B -m unittest discover -s tests -t . -q
+.venv/bin/python -B -m tests.benchmark_application
+# Requires the Lean toolchain and permission to create Linux namespaces:
+.venv/bin/python -B -m tests.check_application_lean /absolute/path/to/toolchain/bin/lean
+.venv/bin/python -B -m tests.check_joint_lean /absolute/path/to/toolchain/bin/lean
 ```
 
 The application benchmark compares warm inspection commands and idle
@@ -634,13 +647,13 @@ before caching decoded records. The saving pays for that initial cost on the
 second lookup. **80 relevant non-Lean tests passed**, covering immutable records,
 cache bounds, corrupted inventory files, export/recheck and application consumers.
 
-Validation (from `new/`):
+Validation (from the repository root):
 
 ```sh
 python3 -B -m unittest tests.test_export -v
 python3 -B -m tests.benchmark_export
 python3 -B -m tests.benchmark_inventory # Optional argument: a saved library.bin
-# Requires the Lean permission specified by root AGENTS.md:
+# Requires the Lean toolchain and permission to create Linux namespaces:
 python3 -B -m tests.check_export_lean /path/to/lean/bin/lean
 ```
 
@@ -743,12 +756,12 @@ remains application-owned. Controller metadata contains artifact references and
 environment hashes, with no environment inventory, large JSON operation or
 recursive persisted structure.
 
-Validation and benchmark commands (from `new/`):
+Validation and benchmark commands (from the repository root):
 
 ```sh
 python3 -B -m unittest tests.test_controller -v
 python3 -B -m tests.benchmark_controller
-# Requires the Lean permission specified by root AGENTS.md:
+# Requires the Lean toolchain and permission to create Linux namespaces:
 python3 -B -m tests.check_controller_lean /path/to/lean/bin/lean
 ```
 
@@ -899,7 +912,7 @@ comparison uses its public task API. These are local storage measurements, not
 formalization throughput. A separate 5 MB publication/read check disabled JSON
 library operations throughout.
 
-Validation and local benchmark commands (run from `new/`):
+Validation and local benchmark commands (run from the repository root):
 
 ```sh
 python3 -B -m unittest tests.test_storage -v
@@ -1065,7 +1078,7 @@ library operations disabled.
 python3 -B -m unittest tests.test_strategy -v
 python3 -B -m unittest tests.test_decomposition -v
 python3 -B -m tests.benchmark_strategy
-# Requires the Lean-test permission described in AGENTS.md:
+# Requires the Lean toolchain and permission to create Linux namespaces:
 python3 -B -m tests.check_decomposition_lean /absolute/path/to/toolchain/bin/lean
 ```
 
@@ -1085,10 +1098,10 @@ The v2 structure was traced through `midas_formalizer/strategy_context.py`
 (role contracts), `strategy_contract.py` (effective instructions),
 `strategy_prompts.py` (block order and caching), `strategy_presentation.py`
 (readable candidate/evidence projection), and `research_protocol.py` (research
-context). Those files remain in the repository root for reference. The v2.1
+context). These are historical references to the v2 implementation. The v2.2
 adaptation keeps these responsibilities without importing the old implementation:
 
-| v2 prompt block | v2.1 presentation |
+| v2 prompt block | v2.2 presentation |
 | --- | --- |
 | Fixed role instructions and response schema | Role wording followed by the response schema as prompt text; renderer versions are `prover-v14`, `decomposition-reviewer-v1`, `stop-reviewer-v1`, `researcher-v3`, and `web-searcher-v2`. |
 | Exact local task and formal context | Source prefix, named definitions, exact subjects, and dependency aliases paired with their checked types. Prepared/inherited imports are explicit. |
@@ -1100,7 +1113,7 @@ adaptation keeps these responsibilities without importing the old implementation
 
 The mathematical guidance retains v2's requirements for useful decomposition,
 explicit child hypotheses, concrete next steps, consistent witnesses and joint
-outputs, and independent review. Response fields and helper behavior follow v2.1:
+outputs, and independent review. Response fields and helper behavior follow v2.2:
 there are no copied v2 identity fields or import actions. A `stop` action has a
 nonempty `rationale` and nullable `objection`; a statement objection contains
 `category` (`suspected_false`, `missing_assumption`, or `context_mismatch`) and
@@ -1302,8 +1315,7 @@ measure prompt construction, not model proof success or provider cache hit rates
 
 ## Tools
 
-The nine helper modules in the blueprint are consolidated into six implementation
-modules plus `__init__.py`:
+Helper responsibilities are divided across these implementation modules:
 
 | New module | Responsibility |
 | --- | --- |
@@ -1311,7 +1323,9 @@ modules plus `__init__.py`:
 | `tools/search.py` | Frozen source selectors, bounded search projection, hosted LeanExplore/LeanSearch transports, worker execution and search receipt admission |
 | `tools/bm25.py` | Lexical declaration extraction, frozen-corpus SQLite FTS5 cache and path preference |
 | `tools/bm25_score.py` | Compound token fields, identifier budgets and span scoring |
-| `tools/plans.py` | Policy-backed planning, exact reciprocal-rank fusion, checker-advisory projection, stage validation and original strategy continuations |
+| `tools/plans.py` | Policy-backed planning, checked-name selection, stage validation and strategy continuations |
+| `tools/retrieval.py` | Best-rank backend merging, canonical-name deduplication and shared hits across queries |
+| `tools/search_process.py` | Supervised index preparation and local search execution |
 | `tools/research.py` | Mathematical guidance validation and advisory evidence |
 | `tools/web_search.py` | Reference validation, web-call bounds, recorded action IDs/types, quote bounds and advisory provenance |
 | `tools/evidence.py` | Readable search/probe results, frozen declaration excerpts, staged binary archives, indexed pages and duplicate-delivery keys |
@@ -1321,7 +1335,7 @@ These replace the tools responsibilities of `combined_retrieval`, `discovery`,
 `research_helpers`, `research_protocol` and `retrieval_helpers`. Durable run SQL,
 publication, scheduling and model/compiler execution remain with their owning components.
 Research prompt wording and response schemas belong to `prompt/researcher.py` and `prompt/web_searcher.py`.
-The original `midas_formalizer` files remain unchanged and are not imported.
+The implementation does not import the historical `midas_formalizer` package.
 
 Built-in search and package index construction run in a supervised Python child.
 The child's address space is capped by the invocation's `memory_mib`; wall time,
@@ -1342,7 +1356,8 @@ twelve explicit names. Explicit names appear as standalone lookup results; check
 search hits appear within the numbered search results. Exact local identifier
 queries also get checked, with generated declarations shown in their search section.
 To inspect other search results, select their names in a names-only request, which
-skips search. Use `page` to read more content from an existing result.
+skips search. Retrieval delivers all storage pages together; `page` is used
+only for additional pages from other helpers.
 Both retrieval forms require the compiler and consume one
 retrieval allowance. A names-only request with no allowed names is rejected
 before scheduling, so it cannot leave the task waiting on zero jobs.
@@ -1492,8 +1507,8 @@ and instances retain their bodies. If a theorem header boundary is lexically
 uncertain, search retains its name for checked lookup and omits the source excerpt.
 The derived index format is versioned so older full-proof excerpt ranges rebuild.
 Anonymous declarations retain excerpts because
-they cannot be looked up by name. When excerpts overflow the first evidence page,
-a compact ranked name list comes first and details follow through ordinary paging.
+they cannot be looked up by name. Excerpts remain with their ranked hits. All
+storage pages are reassembled into one continuous retrieval display.
 Extraction is lexical, not an elaborated declaration inventory: macro-generated
 names are not inferred, and anonymous instances appear as source hints. Thus the
 frozen-source corpus differs from the standalone LeanExplore experiment corpus.
@@ -1594,10 +1609,13 @@ stable across prompt truncation and resume and can be referenced in lessons;
 archive hashes remain internal for integrity checks.
 Memory updates contain only `upsert` and `forget`. Strategies are ordinary lessons
 with model-chosen IDs. The retired `strategy`, `pin_evidence`, and `unpin_evidence`
-fields are omitted from the response schema and ignored in older replies.
-Older saved memories remain readable: a saved strategy becomes an ordinary
-`legacy-strategy` lesson (with a suffix if that ID already exists), subject to
-normal memory retention, and old pin lists are discarded.
+fields are rejected by the response contract. Saved memory uses `midas-memory-v2`,
+containing only its version, lessons, observations and eviction count.
+Run storage uses schema 4; earlier runs and memory formats are unsupported.
+Create a new run after upgrading. No memory migration or retired-field translation
+is performed. Export attempts require explicit epochs. Integration and verification
+requests require saved heartbeat and recursion limits; missing fields are not
+interpreted as an older request format.
 Prover feedback precedes memory; both follow the last explicit cache boundary.
 Feedback includes checker/reviewer
 diagnostics, action/edit failures, stop-review responses, and omission notices.
@@ -1654,11 +1672,11 @@ same 1,090-file scope. These are local search timings, not proof throughput.
 Its 25 results and first 12 details fit in a single page (9.1 KB of display text).
 
 ```sh
-# From new/; offline tests and source-only benchmark:
-../.venv/bin/python -B -m unittest tests.test_search tests.test_source tests.test_tools tests.test_application tests.test_prompt tests.test_strategy -q
-../.venv/bin/python -B -m tests.benchmark_search /path/to/mathlib-checkout
-# Requires root AGENTS.md permission for Lean/bubblewrap:
-../.venv/bin/python -B -m tests.check_search_lean /absolute/path/to/toolchain/bin/lean
+# From the repository root; offline tests and source-only benchmark:
+.venv/bin/python -B -m unittest tests.test_search tests.test_source tests.test_tools tests.test_application tests.test_prompt tests.test_strategy -q
+.venv/bin/python -B -m tests.benchmark_search /path/to/mathlib-checkout
+# Requires the Lean toolchain and permission to create Linux namespaces:
+.venv/bin/python -B -m tests.check_search_lean /absolute/path/to/toolchain/bin/lean
 ```
 
 `tests.benchmark_search_pretrained` compares binary SentencePiece tokenizers with
@@ -2162,10 +2180,10 @@ python3 -B -m tests.benchmark_policy
 ## Domain
 
 The domain responsibilities of the 11 modules in the
-[cleanup blueprint](../docs/cleanup-blueprint.md) are grouped under
+[cleanup blueprint](cleanup-blueprint.md) are grouped under
 `midas/domain`. Related responsibilities are consolidated into **seven modules
 plus `__init__.py`**, with no compatibility wrappers or imports from the original
-`../midas_formalizer` folder. That folder remains unchanged.
+`midas_formalizer` implementation.
 
 | Original module | New owner | Implemented domain contract |
 | --- | --- | --- |
@@ -2372,7 +2390,7 @@ small immutable records. Expression expansion stays private to rendering. There
 are no source JSON files, per-type codecs, save/load round trips, manifests,
 environment records, database queries, file operations, or compiler invocations.
 The implementation imports only `domain`, its own modules, and the standard
-library. The preserved v2 implementation remains unchanged.
+library. The v2 comparisons below describe historical validation.
 
 `declaration_context` takes an admitted selection and explicit checked interfaces.
 `lookup_context` retains only the requested checked aliases and never decodes the
@@ -3100,9 +3118,9 @@ parsing a complete SSE stream of 1,024 deltas. The stream comparison includes
 framing, event decoding and text accumulation. These measure local provider work,
 not live model latency or end-to-end formalization.
 
-Run from `new/` with the repository virtual environment (HTTP tests use `httpx`):
+Run from the repository root with the repository virtual environment (HTTP tests use `httpx`):
 
 ```sh
-../.venv/bin/python -B -m unittest tests.test_provider -v
-../.venv/bin/python -B -m tests.benchmark_provider
+.venv/bin/python -B -m unittest tests.test_provider -v
+.venv/bin/python -B -m tests.benchmark_provider
 ```

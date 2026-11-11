@@ -230,6 +230,16 @@ class Contracts(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.h.integrate(**options)
 
+    def test_saved_export_requests_require_lean_limits(self):
+        integration = self.h.integrate()
+        verification = self.h.verify(integration)
+        for stage in (integration, verification):
+            with self.subTest(kind=stage.request.kind):
+                value = stage.request.decode()
+                del value['export']['lean_options']
+                with self.assertRaises(ValueError):
+                    Request(codec.encode(value))
+
     def test_verification_uses_admitted_aliases_and_publishes_reduced_source(self):
         from midas.source import parse_identifier
         h = self.h

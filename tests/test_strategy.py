@@ -422,8 +422,8 @@ class CandidateTests(unittest.TestCase):
         for payload in (draft.payload[:-1], draft.payload + b'x', b'MIDASDRAFT\x01' + b'\xff'*8):
             with self.subTest(payload=payload[:20]), self.assertRaises(ValueError):
                 Draft.load(payload)
-        for value in (['midas-memory-v1', 0, '', [[]], [], [], 0],
-                      ['midas-memory-v1', 0, '', [], [[]], [], 0]):
+        for value in (['midas-memory-v2', 0, [[]], [], 0],
+                      ['midas-memory-v2', 0, [], [[]], 0]):
             with self.assertRaises(ValueError):
                 Memory.load(pack(value))
         changed = replace(context(), selection_id='sel_'+'b'*64)
@@ -789,16 +789,13 @@ class MemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Update((Lesson('x', 'a'),), forget=('x',))
 
-    def test_old_memory_discards_pins_preserving_other_records(self):
+    def test_memory_roundtrip_preserves_records_and_accounting(self):
         original = Memory(version=7,
             lessons=(Lesson('base', 'Prove the base case first.'),),
             observations=(Observation('checker', 'rejected', artifact('evidence'), ('Unsolved goal.',)),),
             evicted=3)
-        legacy = original.value()
-        legacy[5] = ['tool-result-14', 'tool-result-15']
-        restored = Memory.load(pack(legacy))
+        restored = Memory.load(original.payload)
         self.assertEqual(restored, original)
-        self.assertEqual(load_record(restored.payload, limit=65536)[5], [])
         updated = update_memory(restored, Update())
         self.assertEqual(updated.version, 8)
         self.assertEqual(updated.lessons, original.lessons)
@@ -817,27 +814,12 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(memory.observations[-1].omitted, 1)
         self.assertLessEqual(len(memory.payload), 65536)
 
-    def test_old_strategy_becomes_an_editable_lesson_without_id_collision(self):
-        saved = Memory(version=4, lessons=(Lesson('legacy-strategy', 'Keep this existing lesson.'),))
-        legacy = saved.value()
-        legacy[2] = 'Try induction.'
-        restored = Memory.load(pack(legacy))
-        self.assertEqual(restored.version, saved.version)
-        self.assertEqual(restored.lessons, (*saved.lessons, Lesson('legacy-strategy-1', 'Try induction.')))
-        self.assertEqual(Memory.load(restored.payload), restored)
-        self.assertEqual(load_record(restored.payload, limit=65536)[2], '')
-        updated = update_memory(restored, Update(
-            (Lesson('my-next-approach', 'Use a direct proof.'),), forget=('legacy-strategy-1',)))
-        self.assertEqual(updated.lessons, (*saved.lessons, Lesson('my-next-approach', 'Use a direct proof.')))
-
-    def test_old_strategy_migration_obeys_lesson_limits(self):
-        saved = Memory(lessons=tuple(Lesson(str(i), 'A lesson.') for i in range(64)))
-        legacy = saved.value()
-        legacy[2] = 'Try induction.'
-        restored = Memory.load(pack(legacy))
-        self.assertEqual(len(restored.lessons), 64)
-        self.assertEqual(restored.lessons[-1], Lesson('legacy-strategy', 'Try induction.'))
-        self.assertEqual(restored.evicted, 1)
+    def test_old_memory_formats_are_rejected(self):
+        for strategy, pins in (('', []), ('Try induction.', []), ('', ['tool-result-14'])):
+            with self.subTest(strategy=strategy, pins=pins):
+                legacy = ['midas-memory-v1', 4, strategy, [['base', 'Prove the base case.']], [], pins, 0]
+                with self.assertRaisesRegex(ValueError, 'Invalid memory record'):
+                    Memory.load(pack(legacy))
 
 
 class StateTests(unittest.TestCase):
@@ -1238,23 +1220,20 @@ class StateTests(unittest.TestCase):
             admitted(artifacts, dispatched, response(action, memory)), artifacts)
         self.assertEqual(changes.memory.lessons, (Lesson(**memory['upsert'][0]),))
 
-    def test_retired_memory_fields_cannot_reject_an_otherwise_valid_action(self):
+    def test_retired_memory_fields_are_rejected(self):
         artifacts, snapshot = fixture()
         dispatched, _, _ = dispatch(snapshot, artifacts)
         action = dict(mode='retrieve', rationale='Inspect a related definition.', names=['Nat.add'],
                       queries=[], backends=[])
-        for pins, unpins in ((['unknown-result'], []),
-                             (['duplicate'] * 25, ['duplicate']),
-                             (None, {'invalid': 'old reminder'})):
-            with self.subTest(pins=pins, unpins=unpins):
+        for field, value in (('strategy', 'Try induction.'),
+                             ('pin_evidence', ['tool-result-1']),
+                             ('unpin_evidence', [])):
+            with self.subTest(field=field):
                 memory = dict(upsert=[dict(id='use-definition', text='Use the displayed definition.')],
-                              strategy={'invalid': 'obsolete field'},
-                              pin_evidence=pins, unpin_evidence=unpins)
-                changes = self.strategy.on_model(snapshot, self.policy, dispatched,
-                    admitted(artifacts, dispatched, response(action, memory)), artifacts)
-                self.assertEqual(changes.memory.lessons, (Lesson(**memory['upsert'][0]),))
-                self.assertEqual(changes.helper.request.action.names, ('Nat.add',))
-                self.assertIsNone(changes.revision_charge)
+                              forget=[], **{field: value})
+                with self.assertRaises(ValueError):
+                    self.strategy.on_model(snapshot, self.policy, dispatched,
+                        admitted(artifacts, dispatched, response(action, memory)), artifacts)
 
     def test_live_scripted_and_supplied_candidate_paths(self):
         drafts = []

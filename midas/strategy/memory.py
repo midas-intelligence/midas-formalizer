@@ -1,5 +1,5 @@
 """Immutable semantic memory; model lessons and admitted observations stay distinct."""
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from ..domain import ArtifactRef
 from ..domain.encoding import fields, load_record, record_parts
@@ -112,10 +112,10 @@ class Memory:
         self.payload
 
     def value(self):
-        return ['midas-memory-v1', self.version, '',
+        return ['midas-memory-v2', self.version,
                 [[x.id, x.text] for x in self.lessons],
                 [[x.source, x.status, x.evidence.to_dict(), list(x.messages), x.omitted]
-                 for x in self.observations], [], self.evicted]
+                 for x in self.observations], self.evicted]
 
     @property
     def payload(self):
@@ -124,27 +124,16 @@ class Memory:
     @classmethod
     def load(cls, payload):
         v = load_record(payload, limit=MAX_BYTES)
-        if type(v) is not list or len(v) != 7 or v[0] != 'midas-memory-v1':
+        if type(v) is not list or len(v) != 5 or v[0] != 'midas-memory-v2':
             raise ValueError('Invalid memory record')
-        if any(type(v[i]) is not list for i in (3, 4, 5)):
+        if any(type(v[i]) is not list for i in (2, 3)):
             raise ValueError('Invalid memory arrays')
-        if (any(type(x) is not list or len(x) != 2 for x in v[3])
-                or any(type(x) is not list or len(x) != 5 or type(x[3]) is not list for x in v[4])):
+        if (any(type(x) is not list or len(x) != 2 for x in v[2])
+                or any(type(x) is not list or len(x) != 5 or type(x[3]) is not list for x in v[3])):
             raise ValueError('Invalid memory row')
-        # Preserve the v1 layout with empty strategy/pin slots. Convert a saved
-        # strategy into an ordinary lesson without overwriting a model-chosen ID.
-        text(v[2], empty=True)
-        memory = cls(v[1], tuple(Lesson(*x) for x in v[3]),
-                     tuple(Observation(x[0], x[1], ArtifactRef.from_dict(x[2]), tuple(x[3]), x[4])
-                           for x in v[4]), v[6])
-        if v[2].strip():
-            names = {lesson.id for lesson in memory.lessons}
-            name, suffix = 'legacy-strategy', 1
-            while name in names:
-                name = f'legacy-strategy-{suffix}'
-                suffix += 1
-            memory = replace(update_memory(memory, Update((Lesson(name, v[2]),))), version=v[1])
-        return memory
+        return cls(v[1], tuple(Lesson(*x) for x in v[2]),
+                   tuple(Observation(x[0], x[1], ArtifactRef.from_dict(x[2]), tuple(x[3]), x[4])
+                         for x in v[3]), v[4])
 
 
 def update_memory(memory, change=None, *, observation=None, budget=16000):
@@ -174,7 +163,7 @@ def update_memory(memory, change=None, *, observation=None, budget=16000):
     rows = list(lessons.values())
     # Each binary list member is independently encoded; no repeated whole-memory
     # serialization while evicting. Reserve fixed metadata/collection overhead.
-    fixed = len(pack(['midas-memory-v1', memory.version + 1, '', [], [], [], memory.evicted]))
+    fixed = len(pack(['midas-memory-v2', memory.version + 1, [], [], memory.evicted]))
     sizes = [len(pack([x.id, x.text])) for x in rows]
     osizes = [len(pack([x.source, x.status, x.evidence.to_dict(), list(x.messages), x.omitted]))
               for x in observations]

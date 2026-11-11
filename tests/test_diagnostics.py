@@ -207,7 +207,10 @@ class DiagnosticTests(unittest.TestCase):
             receipt=lambda _: SimpleNamespace(result_ref=evidence))
         invocation = SimpleNamespace(original_execution_id='execution',
             request=SimpleNamespace(job=SimpleNamespace(semantic_key='proof-job')))
-        flow = SimpleNamespace(fail_candidate=lambda *args, diagnostics: diagnostics)
+        def fail_candidate(*args, diagnostics, entry_key, stage):
+            self.assertEqual((entry_key, stage), ('parent', 'proof'))
+            return diagnostics
+        flow = SimpleNamespace(fail_candidate=fail_candidate)
         with patch('midas.application.workflow.r.value', return_value=['proof', 'submission', 'parent']), \
                 patch('midas.application.workflow.candidates.submission', return_value={'current': 'proof-job'}), \
                 patch('midas.application.workflow.r.read', return_value=data):

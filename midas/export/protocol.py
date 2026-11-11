@@ -96,8 +96,8 @@ class Request:
             raise ValueError('Expected an export compiler request')
         metadata = value['export']
         codec.fields(metadata, ('format', 'profile', 'roots', 'parent', 'integration', 'files', 'maximum', 'toolchain',
-                                'allow_sorry', 'nodes', *(('lean_options',) if 'lean_options' in metadata else ())))
-        if 'lean_options' in metadata:
+                                'allow_sorry', 'nodes', *(('lean_options',) if value['operation'] != 'replay' else ())))
+        if value['operation'] != 'replay':
             options = metadata['lean_options']
             if type(options) is not list or len(options) != 2:
                 raise ValueError('Invalid export Lean options')

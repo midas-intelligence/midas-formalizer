@@ -2235,7 +2235,7 @@ class ExportScheduling(unittest.TestCase):
         flow, reader, key = self.fixture()
         for state in ('PENDING', 'RUNNING'):
             reader.intent_state.return_value = (state, None)
-            with patch('midas.application.records.value', return_value=['pending', key, 1]):
+            with patch('midas.application.records.value', return_value=['pending', key, 0, 1]):
                 self.assertIsNone(Workflow.export_plan(flow, reader))
         flow.export.prepare_assembly.assert_not_called()
         flow.compiler_job.assert_not_called()
@@ -2244,7 +2244,7 @@ class ExportScheduling(unittest.TestCase):
         from midas.application.workflow import Workflow
         flow, reader, key = self.fixture()
         reader.intent_state.return_value = ('DONE', None)
-        with patch('midas.application.records.value', side_effect=[['failed', 'checker', 1], None]):
+        with patch('midas.application.records.value', side_effect=[['failed', 'checker', 0, 1], None]):
             self.assertIsNone(Workflow.export_plan(flow, reader))
         flow.export.prepare_assembly.assert_called_once()
         reader.intent_state.assert_called_once_with(key)

@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from midas.application.helpers import page_text
+from midas.application.helpers import page_text, pages_text
 from midas.domain import JobKind, OwnerVersion, ResourceLimits
 from midas.tools import (Backend, Lookup, Match, Scope, Search, SearchResult,
     SourceEntry, SourceIndex, Stage, execute_search, prepare_archive, search_summary)
@@ -465,17 +465,22 @@ class SearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Search('Nat', action.backend, 51)
 
-    def test_large_details_put_all_names_first_and_preserve_paged_excerpts(self):
+    def test_large_details_preserve_ranked_hits_in_one_continuous_display(self):
         records = tuple(Match((f'N.term{i:02}',), 'lib/Mathlib/X.lean', 1, 1,
             'α'*2500 if i < 12 else '', .25) for i in range(50))
         result = SearchResult('a'*64, records)
         rows = search_summary(result, Search('term', Backend('frozen-source', ('Mathlib',))))
         archive = prepare_archive(self.scope, 'a'*64, rows, (self.scope.context,), self.artifacts)
-        pages = [page_text(self.artifacts.data[p.id]).decode() for p in archive.pages]
-        self.assertGreater(len(pages), 1)
-        for row in records:
-            self.assertIn(row.names[0], pages[0])
-        self.assertEqual('\n'.join(pages).count('α'), 12*2500)
+        # Storage remains paged; retrieval presents the complete archive together.
+        self.assertGreater(len(archive.pages), 1)
+        display = pages_text(tuple(self.artifacts.data[p.id] for p in archive.pages)).decode()
+        expected = ['Search (frozen-source): term']
+        for rank, row in enumerate(records, 1):
+            hit = f'{rank}. {row.names[0]}'
+            if rank <= 12:
+                hit += '\nSource: lib/Mathlib/X.lean:1\n' + 'α'*2500
+            expected.append(hit)
+        self.assertEqual(display, '\n\n'.join(expected)+'\n')
         self.assertTrue(all(p.byte_count <= 16000 for p in archive.pages))
 
     def test_hosted_results_still_display_names_without_claiming_source_details(self):

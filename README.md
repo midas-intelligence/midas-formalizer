@@ -1,9 +1,22 @@
-# Midas formalizer v2.1
+# Midas formalizer v2.2
 
 Midas selects unfinished Lean declarations, runs automatic or supplied proofs,
-saves progress, and exports independently checked Lean sources. The v2.1
-implementation is in [`new/midas`](new/midas); its entry point is
+saves progress, and exports independently checked Lean sources. The v2.2
+implementation is in [`midas`](midas); its entry point is
 `python -m midas`.
+
+Run storage now uses schema 4. Earlier runs cannot be resumed, forked, or exported
+with this version; create a new run after upgrading. Integrations must use the
+current response contract: memory updates accept only `upsert` and `forget`.
+
+The main changes in v2.2 are:
+
+- Indexed local BM25 search, alongside LeanExplore and LeanSearch, with all retrieval
+  results presented as one continuous response.
+- Reviewer-selected declaration suggestions, checked and delivered to child provers
+  without another retrieval turn.
+- Decompositions that mix supplied Lean proofs and English-guided children. Supplied
+  proofs are checked directly; only English-guided children receive new prover contexts.
 
 ## Setup
 
@@ -13,14 +26,13 @@ Use Python 3.11 or newer. From the repository root:
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install zstandard httpx
-cd new
 python -B -m midas --help
 ```
 
 `zstandard` is required for storage. `httpx` is needed for Azure and Bedrock
 Responses calls; supplied proofs and scripted model replies do not need it.
 All remaining commands assume the virtual environment is active and the working
-directory is `new/`. Use `python -B -m midas COMMAND --help` for individual options.
+directory is the repository root. Use `python -B -m midas COMMAND --help` for individual options.
 
 Lean operations require Linux, an installed Lean 4 toolchain, `bubblewrap` at
 `/usr/bin/bwrap`, `ldd`, and permission to create Linux namespaces. Run control
@@ -125,7 +137,7 @@ targets. A run accepts 1–256 selected roots.
 
 ## Run automatic proofs
 
-Copy [`new/config.json`](new/config.json) to a local configuration and edit it:
+Copy [`config.json`](config.json) to a local configuration and edit it:
 
 ```sh
 cp config.json live.json
@@ -292,7 +304,7 @@ saved run; stop an active controller first. With multiple possible owners, pass
 `--owner OBLIGATION_ID` from `status --nodes`. Submissions are capped at 8 MiB.
 Conditional candidates require explicit supplied approval and still undergo
 compiler checks. The full candidate schema is in
-[`submission.py`](new/midas/domain/submission.py).
+[`submission.py`](midas/domain/submission.py).
 
 ## Use scripted model replies
 
@@ -430,7 +442,7 @@ Ordinary CLI runs use the source export profile, which verifies with the toolcha
 alone. Packaging additional imports does not automatically capture a replayable
 export library. For projects needing non-toolchain imports at export, LeanEval
 prepares that library, or the application API accepts an explicitly prepared
-library and its reader (see [implementation notes](new/README.md#export)).
+library and its reader (see [implementation notes](docs/README.md#export)).
 
 To publish incomplete work explicitly:
 
@@ -452,8 +464,8 @@ binary; `--json` is for bounded summaries.
 
 Policy JSON uses `"format": "midas-config-v1"` and is capped at 16 KiB. Omitted
 settings use defaults; unknown fields and duplicate keys are rejected. See
-[`config.json`](new/config.json) for the full example and
-[`policy/config.py`](new/midas/policy/config.py) for field definitions.
+[`config.json`](config.json) for the full example and
+[`policy/config.py`](midas/policy/config.py) for field definitions.
 
 | Section | Controls |
 | --- | --- |
@@ -606,4 +618,4 @@ checkout is needed only for preparation. Ordinary `verify` checks a source bundl
 it does not perform the LeanEval submission checks.
 
 More detailed component and validation notes are in
-[`new/README.md`](new/README.md).
+[`docs/README.md`](docs/README.md).

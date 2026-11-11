@@ -1,6 +1,6 @@
 """The complete SQLite schema; no component outside storage owns SQL."""
 APPLICATION_ID = 0x4D494453
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE run (

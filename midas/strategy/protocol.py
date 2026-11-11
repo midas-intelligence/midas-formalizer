@@ -101,12 +101,6 @@ def _optional_fields(value, role):
     _fill(value, memory_update=None)
     memory = value['memory_update']
     _fill(memory, upsert=[], forget=[])
-    if type(memory) is dict:
-        # Resumed/in-flight replies may still contain these retired fields.
-        # Ignore them so obsolete reminders cannot reject a valid action.
-        memory.pop('pin_evidence', None)
-        memory.pop('unpin_evidence', None)
-        memory.pop('strategy', None)
     action = value.get('action')
     if type(action) is not dict:
         return

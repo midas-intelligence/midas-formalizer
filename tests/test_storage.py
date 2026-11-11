@@ -113,13 +113,16 @@ class StorageTests(unittest.TestCase):
 
     def test_unsupported_schema_rejected_without_new_session(self):
         self.w.close()
-        with sqlite3.connect(self.path/'run.sqlite3') as db:
-            epoch = db.execute('SELECT epoch FROM run').fetchone()
-            db.execute('PRAGMA user_version=999')
-        with self.assertRaises(StorageError):
-            claim_writer(self.path)
-        with sqlite3.connect(self.path/'run.sqlite3') as db:
-            self.assertEqual(db.execute('SELECT epoch FROM run').fetchone(), epoch)
+        for version in (3, 999):
+            with self.subTest(version=version):
+                with sqlite3.connect(self.path/'run.sqlite3') as db:
+                    epoch = db.execute('SELECT epoch FROM run').fetchone()
+                    db.execute(f'PRAGMA user_version={version}')
+                for opener in (open_reader, claim_writer):
+                    with self.assertRaisesRegex(StorageError, 'create a new run'):
+                        opener(self.path)
+                with sqlite3.connect(self.path/'run.sqlite3') as db:
+                    self.assertEqual(db.execute('SELECT epoch FROM run').fetchone(), epoch)
 
     def test_symlinks_and_nonregular_archives_rejected(self):
         alias = Path(self.temp.name)/'alias'

@@ -30,9 +30,9 @@ def _selected(selection, graph, allow_sorry):
 
 
 def _source(selection, graph, roots, reader, allow_sorry, available, *, aliases=(), generated=None, regions=None,
-            calls=None, lean_options=None):
+            calls=None, lean_options):
     prefix = (f'set_option maxHeartbeats {lean_options[0]}\n'
-              f'set_option maxRecDepth {lean_options[1]}\n\n').encode() if lean_options is not None else b''
+              f'set_option maxRecDepth {lean_options[1]}\n\n').encode()
     if allow_sorry:
         return proofs.render_partial(selection, graph, reader, available=available, aliases=aliases,
                                      generated=generated, regions=regions, calls=calls, command_prefix=prefix)
@@ -328,7 +328,7 @@ class Export:
                 generated, regions, calls = [], [], []
                 source = _source(selection, graph, roots, reader, request.allow_sorry,
                     frozenset(self.checker.environment.manifest.modules), generated=generated, regions=regions, calls=calls,
-                    lean_options=value['export'].get('lean_options'))
+                    lean_options=value['export']['lean_options'])
                 if (source.data.decode() != value['packet']['source'] or generated != packet['share']
                         or regions != packet['regions'] or calls != packet['calls']):
                     raise ValueError('Integration differs from selected proof sources')
