@@ -173,8 +173,13 @@ def compose(parent, children, dependencies):
                 alias_row['type_source'] = child['type_source']
             append(alias_row)
             aliases.append(alias)
+        # A term-level `open ... in` introduces leading implicit binders before
+        # elaborating a `by` proof. Open in tactic scope instead, so `exact`
+        # elaborates the original term against the same full checked telescope.
+        # Keep the original source intact, including its tactic indentation.
         append(dict(original, name=root, requires=aliases,
-            source='open ' + lean_name(namespace, absolute=True, readable=True) + ' in\n' + original['source']))
+            source='by\n  open ' + lean_name(namespace, absolute=True, readable=True) +
+                   ' in\n  exact (\n' + original['source'] + '\n  )'))
         value, requires = application(root, parent['signature']['universes']), [root]
     else:
         rows, root = named(parent)

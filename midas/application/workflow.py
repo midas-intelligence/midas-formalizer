@@ -360,52 +360,51 @@ class Workflow:
         graph, pending = self.work_graph(reader)
         profile = 'library' if self.library else 'source'
         integration, verification = self.stage(reader, 'integration'), self.stage(reader, 'verification')
-        work = self.export.plan(self.selection, graph, profile=profile, integration=integration,
-            verification=verification, allow_sorry=self.allow_sorry, limit=1)
-        if not work:
-            return None
-        work = work[0]
-        if pending and work.kind != JobKind.ASSEMBLE:
-            return None
-        name = 'assembly:'+work.owner.obligation_id if work.kind == JobKind.ASSEMBLE else (
-            'integration' if work.kind == JobKind.INTEGRATE else 'verification')
-        prior = r.value(reader, 'application.export', name)
-        epoch = reader.counter(r.SCOPE, 'export_epoch')
-        if prior and prior[0] == 'pending':
-            state = reader.intent_state(prior[1])
-            if state and state[0] in ('PENDING', 'RUNNING'):
-                # Other branches can advance the graph while this job runs.
-                # Its explicit owner fences, not the global graph revision,
-                # determine whether the controller must cancel it.
-                return None
-        if (prior and prior[0] in ('pending', 'failed') and prior[2] == epoch
-                and prior[3] == graph.revision):
-            return None
-        usage = r.value(reader, 'application.export', 'usage') or [0, 0, 0]
-        try:
-            limits = self.policy.export_limits(ExportUsage(*usage), comparator=work.kind == JobKind.EXPORT_VERIFY)
-            buffer = Buffer()
-            if work.kind == JobKind.ASSEMBLE:
-                request = self.export.prepare_assembly(self.selection, graph, work.owner,
-                    self.parent_request(reader, work.owner), reader, maximum=self.policy.config.export.max_bytes)
-            elif work.kind == JobKind.INTEGRATE:
-                request = self.export.prepare_integration(self.selection, graph, reader, buffer, profile=profile,
-                    library=self.library, maximum=self.policy.config.export.max_bytes, allow_sorry=self.allow_sorry,
-                    max_heartbeat=limits.max_heartbeat, max_rec_depth=limits.max_rec_depth)
-            else:
-                request = self.export.prepare_verification(integration, self.selection, graph, reader, buffer)
-        except ValueError as error:
-            return r.record(reader, 'application.export', name, ['failed', str(error)[:2048], epoch, graph.revision])
-        key = 'export:'+request.sha256
-        if epoch:
-            key += ':limits:'+str(epoch)
-        if reader.intent_state(key) is not None:
-            # Retries belong to the existing controller intent. Unchanged
-            # export inputs must not publish a second admission for its key.
-            return None
-        return r.merge(self.compiler_job(reader, key, request, request.expected_versions, ['export', name, epoch], limits=limits),
-            r.record(reader, 'application.export', name, ['pending', key, epoch, graph.revision]),
-            Effect(artifacts=tuple(buffer.artifacts)))
+        # Keep scanning after an unavailable assembly; its independent siblings
+        # may still be ready. The iterator never finalizes an unassembled graph.
+        for work in self.export.iter_plan(self.selection, graph, profile=profile, integration=integration,
+                verification=verification, allow_sorry=self.allow_sorry):
+            if pending and work.kind != JobKind.ASSEMBLE:
+                continue
+            name = 'assembly:'+work.owner.obligation_id if work.kind == JobKind.ASSEMBLE else (
+                'integration' if work.kind == JobKind.INTEGRATE else 'verification')
+            prior = r.value(reader, 'application.export', name)
+            epoch = reader.counter(r.SCOPE, 'export_epoch')
+            if prior and prior[0] == 'pending':
+                state = reader.intent_state(prior[1])
+                if state and state[0] in ('PENDING', 'RUNNING'):
+                    # Other branches can advance the graph while this job runs.
+                    # Its explicit owner fences, not the global graph revision,
+                    # determine whether the controller must cancel it.
+                    continue
+            if (prior and prior[0] in ('pending', 'failed') and prior[2] == epoch
+                    and prior[3] == graph.revision):
+                continue
+            usage = r.value(reader, 'application.export', 'usage') or [0, 0, 0]
+            try:
+                limits = self.policy.export_limits(ExportUsage(*usage), comparator=work.kind == JobKind.EXPORT_VERIFY)
+                buffer = Buffer()
+                if work.kind == JobKind.ASSEMBLE:
+                    request = self.export.prepare_assembly(self.selection, graph, work.owner,
+                        self.parent_request(reader, work.owner), reader, maximum=self.policy.config.export.max_bytes)
+                elif work.kind == JobKind.INTEGRATE:
+                    request = self.export.prepare_integration(self.selection, graph, reader, buffer, profile=profile,
+                        library=self.library, maximum=self.policy.config.export.max_bytes, allow_sorry=self.allow_sorry,
+                        max_heartbeat=limits.max_heartbeat, max_rec_depth=limits.max_rec_depth)
+                else:
+                    request = self.export.prepare_verification(integration, self.selection, graph, reader, buffer)
+            except ValueError as error:
+                return r.record(reader, 'application.export', name, ['failed', str(error)[:2048], epoch, graph.revision])
+            key = 'export:'+request.sha256
+            if epoch:
+                key += ':limits:'+str(epoch)
+            if reader.intent_state(key) is not None:
+                # Retries belong to the existing controller intent. Unchanged
+                # export inputs must not publish a second admission for its key.
+                continue
+            return r.merge(self.compiler_job(reader, key, request, request.expected_versions, ['export', name, epoch], limits=limits),
+                r.record(reader, 'application.export', name, ['pending', key, epoch, graph.revision]),
+                Effect(artifacts=tuple(buffer.artifacts)))
 
     def plan(self, reader, policy, limit):
         """Generator observes each preceding committed effect; no history scans."""

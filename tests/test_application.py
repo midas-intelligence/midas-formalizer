@@ -2221,7 +2221,7 @@ class ExportScheduling(unittest.TestCase):
         work = SimpleNamespace(kind=JobKind.ASSEMBLE, owner=SimpleNamespace(obligation_id='owner'))
         flow = SimpleNamespace(graph=lambda reader: SimpleNamespace(revision=2), library=None,
             stage=lambda *args: None, selection=None, allow_sorry=False,
-            export=SimpleNamespace(plan=Mock(return_value=(work,)),
+            export=SimpleNamespace(iter_plan=Mock(return_value=(work,)),
                                    prepare_assembly=Mock(return_value=request)),
             parent_request=Mock(), policy=SimpleNamespace(config=Config(), export_limits=Mock()),
             compiler_job=Mock(side_effect=AssertionError('Duplicate export job')))
@@ -2249,6 +2249,40 @@ class ExportScheduling(unittest.TestCase):
         flow.export.prepare_assembly.assert_called_once()
         reader.intent_state.assert_called_once_with(key)
         flow.compiler_job.assert_not_called()
+
+    def test_unavailable_assembly_does_not_block_independent_work(self):
+        from unittest.mock import Mock
+        from midas.application.workflow import Workflow
+        from midas.controller import Effect
+        from midas.domain import JobKind
+        for status, revision, intent_state in (
+                ('failed', 2, None),
+                ('failed', 1, ('DONE', None)),
+                ('pending', 1, ('RUNNING', None)),
+                ('pending', 1, ('PENDING', None))):
+            with self.subTest(status=status, revision=revision, intent_state=intent_state):
+                flow, reader, key = self.fixture()
+                first, = flow.export.iter_plan.return_value
+                second = SimpleNamespace(kind=JobKind.ASSEMBLE,
+                                         owner=SimpleNamespace(obligation_id='independent'))
+                flow.export.iter_plan.return_value = iter((first, second))
+                requests = {
+                    'owner': SimpleNamespace(sha256='a' * 64, expected_versions=()),
+                    'independent': SimpleNamespace(sha256='b' * 64, expected_versions=()),
+                }
+                flow.export.prepare_assembly.side_effect = (
+                    lambda selection, graph, owner, *args, **kwargs: requests[owner.obligation_id])
+                flow.compiler_job = Mock(return_value=Effect())
+                reader.intent_state.side_effect = lambda query: intent_state if query == key else None
+                prior = [status, key, 0, revision]
+                with patch('midas.application.records.value',
+                           side_effect=lambda rd, scope, name: prior if name == 'assembly:owner' else None), \
+                     patch('midas.application.records.record', return_value=Effect()):
+                    self.assertIsNotNone(Workflow.export_plan(flow, reader))
+                flow.compiler_job.assert_called_once()
+                self.assertEqual(flow.compiler_job.call_args.args[1], 'export:' + 'b' * 64)
+                self.assertEqual(flow.compiler_job.call_args.args[4],
+                                 ['export', 'assembly:independent', 0])
 
 
 if __name__ == '__main__':

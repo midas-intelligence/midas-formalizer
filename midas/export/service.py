@@ -1,5 +1,6 @@
 """Export planning, checked composition, source integration and stage admission."""
 from hashlib import sha256
+from itertools import islice
 
 from ..checker import CompilerRequest
 from ..checker.requests import _candidate, read, signature
@@ -62,37 +63,43 @@ def current(stage, selection, graph, *, profile=None, allow_sorry=None):
 
 def plan(selection, graph, *, profile='source', integration=None, verification=None, limit=128, allow_sorry=False):
     """Read only selected proof metadata; rendering and artifact reads happen later."""
-    if (profile not in ('source', 'library') or type(limit) is not int or not 1 <= limit <= 1000
-            or type(allow_sorry) is not bool):
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError('Invalid export planning bounds/profile')
+    return tuple(islice(iter_plan(selection, graph, profile=profile, integration=integration,
+                                  verification=verification, allow_sorry=allow_sorry), limit))
+
+
+def iter_plan(selection, graph, *, profile='source', integration=None, verification=None, allow_sorry=False):
+    """Visit every ready assembly lazily, before offering any finalization work."""
+    if profile not in ('source', 'library') or type(allow_sorry) is not bool:
         raise ValueError('Invalid export planning bounds/profile')
     if graph.roots != tuple(dict.fromkeys(i.id for i in selection.identities)):
         raise ValueError('Export graph differs from selection')
     nodes = {n.owner.obligation_id: n for n in graph.nodes}
     reachable = graph.reachable() if not allow_sorry else ()
-    work = []
+    assembling = False
     for node in graph.nodes:
         if node.owner.obligation_id not in reachable or node.state != ProofState.CONDITIONAL:
             continue
         children = tuple(nodes[d.owner.obligation_id].proof for d in node.selected.candidate.logical_dependencies)
         if children and all(children):
-            work.append(Work(JobKind.ASSEMBLE, node.owner, children))
-            if len(work) == limit:
-                break
-    if work:
-        return tuple(work)
+            assembling = True
+            yield Work(JobKind.ASSEMBLE, node.owner, children)
+    if assembling:
+        return
     try:
         roots, snapshots = _selected(selection, graph, allow_sorry)
     except ValueError:
-        return ()
+        return
     owner = snapshots[0].owner if snapshots else roots[0].owner
     if (not current(integration, selection, graph, profile=profile, allow_sorry=allow_sorry)
             or integration.request.kind != JobKind.INTEGRATE):
-        return (Work(JobKind.INTEGRATE, owner, roots),)
+        yield Work(JobKind.INTEGRATE, owner, roots)
+        return
     if (not current(verification, selection, graph, profile=profile, allow_sorry=allow_sorry)
             or verification.request.kind != JobKind.EXPORT_VERIFY
             or verification.request.integration != integration.request.sha256):
-        return (Work(JobKind.EXPORT_VERIFY, owner, roots),)
-    return ()
+        yield Work(JobKind.EXPORT_VERIFY, owner, roots)
 
 
 class Export:
@@ -100,6 +107,7 @@ class Export:
         self.checker = checker
 
     plan = staticmethod(plan)
+    iter_plan = staticmethod(iter_plan)
     current = staticmethod(current)
 
     def prepare_assembly(self, selection, graph, owner, parent_request, reader, *, maximum=16*1024**3):
